@@ -54,6 +54,11 @@ pkgs.mkShell {
       gtk3
       libayatana-appindicator
       librsvg
+      # rodio/cpal's ALSA backend (alsa-sys, pkg-config: alsa) -- CI's
+      # quality.yaml runs cargo through this devshell, whose hermetic
+      # PKG_CONFIG_PATH only ever sees nixpkgs-provided .pc files, never
+      # apt-installed ones, so an apt-get step alone can't fix this.
+      alsa-lib
     ]
     ++ lib.optionals stdenv.isDarwin [
       libiconv
