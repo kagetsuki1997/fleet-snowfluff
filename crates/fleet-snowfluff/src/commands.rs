@@ -68,7 +68,10 @@ pub fn get_personalization(
 /// Applies `update` to the live manager, mutates the cached `Config`
 /// through `set_field`, and persists -- the shared tail every setter
 /// command below runs, so each one only has to say what's different.
-fn apply_and_save(
+/// `pub(crate)` since `tray.rs`'s follow-mouse/click-through toggles
+/// need the exact same persist step (desktop-integration spec: those
+/// SHALL persist in config too, not just apply live).
+pub(crate) fn apply_and_save(
     app: &AppHandle,
     config: &State<Mutex<Config>>,
     update: impl FnOnce(&mut Config),

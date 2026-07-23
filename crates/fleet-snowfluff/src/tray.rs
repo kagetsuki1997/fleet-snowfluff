@@ -3,15 +3,24 @@
 //! labels resolved through the locale dictionary (11.3) and refreshed
 //! after every toggle so they always reflect current `PetManager`
 //! state, per desktop-integration's "System tray" requirement.
+//!
+//! follow-mouse and click-through also persist to `Config` on toggle
+//! (via `commands::apply_and_save`, the same helper the settings
+//! window's setters use) -- desktop-integration's "Click-through"
+//! requirement explicitly says that toggle "persists in config", and
+//! neither of these has a settings-window control of its own (tray/
+//! quick-menu is the only place they're ever changed), so without this
+//! they'd silently revert to the last-saved value on every restart.
 
 use std::sync::Mutex;
 
+use fleet_snowfluff_core::Config;
 use tauri::{
     menu::{CheckMenuItem, IsMenuItem, Menu, MenuEvent, MenuItem, PredefinedMenuItem},
     AppHandle, Manager,
 };
 
-use crate::{manager::PetManager, settings_window};
+use crate::{commands::apply_and_save, manager::PetManager, settings_window};
 
 /// Every item in the show/hide, pause/resume, follow-mouse,
 /// click-through, settings, quit menu (desktop-integration spec: tray
@@ -135,13 +144,23 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
             m.set_paused(next);
         }
         "follow_mouse" => {
-            let mut m = manager.lock().unwrap();
-            m.settings.follow_mouse = !m.settings.follow_mouse;
+            let next = {
+                let mut m = manager.lock().unwrap();
+                m.settings.follow_mouse = !m.settings.follow_mouse;
+                m.settings.follow_mouse
+            };
+            let config = app.state::<Mutex<Config>>();
+            apply_and_save(app, &config, |c| c.follow_mouse = next);
         }
         "click_through" => {
-            let mut m = manager.lock().unwrap();
-            let next = !m.click_through();
-            m.set_click_through(next);
+            let next = {
+                let mut m = manager.lock().unwrap();
+                let next = !m.click_through();
+                m.set_click_through(next);
+                next
+            };
+            let config = app.state::<Mutex<Config>>();
+            apply_and_save(app, &config, |c| c.click_through = next);
         }
         "settings" => {
             let title = {
