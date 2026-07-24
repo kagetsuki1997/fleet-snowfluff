@@ -27,7 +27,7 @@ pub fn load(
     match std::fs::read_to_string(&path) {
         Ok(contents) => config::load_from_str(&contents, available_voice_languages),
         Err(_) => migrate_legacy_if_present(detected_ui_language, available_voice_languages)
-            .unwrap_or_default(),
+            .unwrap_or_else(|| Config { ui_language: detected_ui_language, ..Default::default() }),
     }
 }
 
