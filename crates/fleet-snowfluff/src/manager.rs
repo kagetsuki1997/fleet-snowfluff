@@ -30,6 +30,31 @@ static NEXT_PET_ID: AtomicU64 = AtomicU64::new(0);
 
 fn next_label() -> String { format!("pet-{}", NEXT_PET_ID.fetch_add(1, Ordering::Relaxed)) }
 
+/// Picks which wgpu backends the instance enumerates adapters from.
+///
+/// `WGPU_BACKEND` always wins when set. Otherwise this prefers Vulkan over
+/// GL: on X11, wgpu's GLES/EGL surface only ever advertises the `Opaque`
+/// composite alpha mode, so pet windows can't be see-through on that path
+/// even when a real GPU is behind it -- Vulkan (including the Lavapipe
+/// software implementation) advertises `PreMultiplied`/`PostMultiplied`
+/// instead. Falls back to every backend when no Vulkan ICD is present at
+/// all, so systems without Vulkan still render (just opaque).
+#[cfg(not(target_os = "windows"))]
+fn select_wgpu_backends() -> wgpu::Backends {
+    if let Some(backends) = wgpu::Backends::from_env() {
+        return backends;
+    }
+    let vulkan_probe = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::VULKAN,
+        ..Default::default()
+    });
+    if vulkan_probe.enumerate_adapters(wgpu::Backends::VULKAN).is_empty() {
+        wgpu::Backends::all()
+    } else {
+        wgpu::Backends::VULKAN
+    }
+}
+
 /// Converts a monitor's rect from the physical pixels `Monitor` reports
 /// to the logical points `LogicalPosition`/`LogicalSize` (what window
 /// placement actually uses) -- getting this wrong is exactly how pets
@@ -49,8 +74,8 @@ fn monitor_logical_bounds(m: &tauri::window::Monitor) -> Bounds {
     }
 }
 
-/// Converts a physical-pixel point (what `GetCursorPos` -- and so
-/// `device_query`'s Windows backend -- always reports, regardless of
+/// Converts a physical-pixel point (what `GetCursorPos` on Windows and
+/// `XQueryPointer` on Linux both always report, regardless of
 /// per-monitor DPI awareness) to the logical points every other
 /// coordinate in this codebase uses (`state.x/y`, `Bounds`, window
 /// positions), by finding which monitor the point falls on and
@@ -61,7 +86,7 @@ fn monitor_logical_bounds(m: &tauri::window::Monitor) -> Bounds {
 /// before this existed. Falls back to scale 1.0 (i.e. passes `physical`
 /// through unchanged) if no monitor contains the point, e.g.
 /// transiently during a display reconfiguration.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn physical_to_logical_cursor(app: &tauri::AppHandle, physical: (f64, f64)) -> (f64, f64) {
     let scale = app
         .available_monitors()
@@ -170,11 +195,13 @@ pub struct PetManager {
     /// constructor panics in that case (inside a callback the OS won't
     /// let unwind past), so it's built behind `catch_unwind` and drag /
     /// follow-mouse are simply disabled rather than crashing the app.
-    /// Unconditionally absent on Linux (see `mouse_available`'s doc
-    /// comment) rather than always `None`, since the *type* itself
-    /// (not just the value) is the problem there.
     #[cfg(not(target_os = "linux"))]
     device_state: Option<DeviceState>,
+    /// Linux equivalent of `device_state` -- see `platform::linux::
+    /// MousePoller`'s doc comment for why this is a separate type
+    /// rather than `device_query::DeviceState` here too.
+    #[cfg(target_os = "linux")]
+    mouse_poller: Option<crate::platform::linux::MousePoller>,
     drag_owner: Option<usize>,
     was_left_down: bool,
     was_right_down: bool,
@@ -198,6 +225,14 @@ impl PetManager {
                 );
             })
             .ok();
+        #[cfg(target_os = "linux")]
+        let mouse_poller = crate::platform::linux::MousePoller::connect().or_else(|| {
+            log::warn!(
+                "global mouse polling unavailable (no X11 display?) -- drag and follow-mouse will \
+                 be disabled this session"
+            );
+            None
+        });
         // Bootstrap value only -- lib.rs's setup overrides it with the
         // real config's voice_language immediately after construction,
         // same pattern as PetManager's other Config::default()-seeded
@@ -207,7 +242,10 @@ impl PetManager {
         Self {
             app,
             #[cfg(not(target_os = "windows"))]
-            instance: wgpu::Instance::new(&wgpu::InstanceDescriptor::default()),
+            instance: wgpu::Instance::new(&wgpu::InstanceDescriptor {
+                backends: select_wgpu_backends(),
+                ..Default::default()
+            }),
             #[cfg(not(target_os = "windows"))]
             gpu: None,
             animations: None,
@@ -229,6 +267,8 @@ impl PetManager {
             rng: StdRng::from_os_rng(),
             #[cfg(not(target_os = "linux"))]
             device_state,
+            #[cfg(target_os = "linux")]
+            mouse_poller,
             drag_owner: None,
             was_left_down: false,
             was_right_down: false,
@@ -244,20 +284,15 @@ impl PetManager {
         }
     }
 
-    /// Whether global mouse polling is available this session. On Linux
-    /// this is unconditionally `false`: `device_query`'s X11 backend
-    /// wraps `Rc<X11Connection>`, which isn't `Send`, and would make
-    /// `Mutex<PetManager>` unable to satisfy Tauri's `Send + Sync`
-    /// requirement for managed state if `device_state` were stored at
-    /// all -- caught via a real Linux build (task 18.2), not just
-    /// reasoned about. Tracked as a follow-up to poll mouse state some
-    /// other way on Linux; for now drag/follow-mouse degrade exactly
-    /// like the macOS missing-permission case.
+    /// Whether global mouse polling is available this session -- `false`
+    /// if the platform poller (`device_state` off Linux, `mouse_poller`
+    /// on it) failed to initialize, e.g. missing OS input-monitoring
+    /// permission on macOS or no reachable X11 display on Linux.
     #[cfg(not(target_os = "linux"))]
     fn mouse_available(&self) -> bool { self.device_state.is_some() }
 
     #[cfg(target_os = "linux")]
-    fn mouse_available(&self) -> bool { false }
+    fn mouse_available(&self) -> bool { self.mouse_poller.is_some() }
 
     fn ensure_animations(&mut self) -> Arc<AnimationSet> {
         if self.animations.is_none() {
@@ -549,11 +584,21 @@ impl PetManager {
             // drag, follow the cursor, or open the quick menu.
             None => ((0.0, 0.0), false, false),
         };
-        // No mouse polling on Linux at all yet (see `mouse_available`):
-        // pets still move, just never drag, follow the cursor, or open
-        // the quick menu.
         #[cfg(target_os = "linux")]
-        let (cursor, left_down, right_down) = ((0.0, 0.0), false, false);
+        let (cursor, left_down, right_down) =
+            match self.mouse_poller.as_ref().and_then(|p| p.poll()) {
+                // `XQueryPointer`'s root_x/root_y are root-window (physical)
+                // pixels, same as `GetCursorPos` on Windows -- convert
+                // before use for the same reason (see the Windows branch
+                // above): otherwise drag/click/follow-mouse only work on a
+                // monitor at 100% scale.
+                Some((physical_cursor, left_down, right_down)) => {
+                    (physical_to_logical_cursor(&self.app, physical_cursor), left_down, right_down)
+                }
+                // No mouse polling available: pets still move, just never
+                // drag, follow the cursor, or open the quick menu.
+                None => ((0.0, 0.0), false, false),
+            };
         let left_pressed_this_tick = left_down && !self.was_left_down;
         let left_released_this_tick = !left_down && self.was_left_down;
         self.was_left_down = left_down;

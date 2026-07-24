@@ -76,6 +76,8 @@ Linux WMs are best-effort, not release blockers.
 
 ## Linux X11 (verified: GNOME, KDE)
 
+- [ ] Drag, follow-mouse, and the right-click quick menu all work (global
+      X11 mouse polling via `platform::linux::MousePoller`)
 - [ ] Display priority 1/2/3 via `_NET_WM_STATE_ABOVE` /
       `_NET_WM_STATE_FULLSCREEN` detection / `_NET_WM_WINDOW_TYPE_DESKTOP`
 - [ ] Click-through toggle works on both GNOME and KDE

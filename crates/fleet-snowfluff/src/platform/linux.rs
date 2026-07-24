@@ -26,7 +26,7 @@ use fleet_snowfluff_core::{Bounds, ForeignWindowRect};
 use gtk::prelude::WidgetExt;
 use x11rb::{
     connection::Connection,
-    protocol::xproto::{AtomEnum, ConnectionExt as _},
+    protocol::xproto::{self, AtomEnum, ConnectionExt as _, KeyButMask},
     rust_connection::RustConnection,
 };
 
@@ -127,4 +127,37 @@ pub fn foreground_window() -> Option<ForegroundWindow> {
     Some(ForegroundWindow {
         rect: ForeignWindowRect { left: x, top: y, right: x + w, bottom: y + h },
     })
+}
+
+/// Global cursor position + button state, replacing `device_query` on
+/// Linux (task follow-up to `PetManager::mouse_available`'s doc
+/// comment). `device_query`'s X11 backend wraps `Rc<Display>`
+/// internally, which isn't `Send`, so it can't be stored in
+/// `Mutex<PetManager>` under Tauri's `Send + Sync` state requirement.
+/// `x11rb`'s `RustConnection` is a pure-Rust XCB client built to be
+/// thread-safe, so a single long-lived connection here can be.
+pub struct MousePoller {
+    conn: RustConnection,
+    root: xproto::Window,
+}
+
+impl MousePoller {
+    /// `None` if no X11 display is reachable (e.g. no `DISPLAY` set),
+    /// matching `device_query`'s macOS/Windows failure modes -- drag/
+    /// follow-mouse/quick-menu just degrade the same way in that case.
+    pub fn connect() -> Option<Self> {
+        let (conn, screen_num) = x11rb::connect(None).ok()?;
+        let root = conn.setup().roots.get(screen_num)?.root;
+        Some(Self { conn, root })
+    }
+
+    /// Root-relative (physical-pixel) cursor position, left-button
+    /// down, right-button down -- `None` on a query failure (e.g. the
+    /// X server went away mid-session).
+    pub fn poll(&self) -> Option<((f64, f64), bool, bool)> {
+        let reply = self.conn.query_pointer(self.root).ok()?.reply().ok()?;
+        let left = reply.mask.contains(KeyButMask::BUTTON1);
+        let right = reply.mask.contains(KeyButMask::BUTTON3);
+        Some(((reply.root_x as f64, reply.root_y as f64), left, right))
+    }
 }

@@ -10,6 +10,7 @@
   <img src="https://img.shields.io/badge/Windows-0078D6?style=flat-square&logo=windows11&logoColor=white" alt="Windows">
   <img src="https://img.shields.io/badge/macOS-000000?style=flat-square&logo=apple&logoColor=white" alt="macOS">
   <img src="https://img.shields.io/badge/Linux-FCC624?style=flat-square&logo=linux&logoColor=black" alt="Linux">
+  <a href="DEVELOP.md#nix--nixos"><img src="https://img.shields.io/badge/Nix-flake-5277C3?style=flat-square&logo=nixos&logoColor=white" alt="Nix flake"></a>
 </p>
 
 <p align="center">
@@ -64,6 +65,11 @@ Fleet Snowfluff は、オリジナルの Python プロジェクト
 から、お使いのプラットフォーム向けのインストーラーを入手してください。本プロジェクトは
 現在も活発に開発中です。まだリリースがない場合や、最新のコードを試したい・開発に
 参加したい場合は、[`DEVELOP.md`](DEVELOP.md) のソースからのビルド方法をご覧ください。
+
+また、NixOS／Nix ユーザーは本リポジトリの flake から直接ビルド・実行
+（`nix build`／`nix run`）したり、flake input として自分のシステム構成に
+組み込んだりすることもできます。詳細は
+[`DEVELOP.md`](DEVELOP.md#nix--nixos) をご覧ください。
 
 ## 🧑‍💻 開発
 
