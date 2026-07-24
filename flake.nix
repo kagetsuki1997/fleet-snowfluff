@@ -86,9 +86,26 @@
           "--workspace"
         ];
 
-        src = craneLib.cleanCargoSource (craneLib.path ./.);
-        commonArgs = { inherit src; };
+        src = ./.;
+        commonArgs = {
+          inherit src;
+
+          nativeBuildInputs = with pkgs; [
+            pkg-config
+            wrapGAppsHook3
+          ];
+
+          buildInputs = with pkgs; [
+            libX11
+            gtk3
+            glib
+            webkitgtk_4_1
+            alsa-lib
+          ];
+        };
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
+
+        ui = pkgs.callPackage ./devshell/ui.nix { };
       in
       {
         formatter = pkgs.treefmt;
@@ -122,6 +139,17 @@
               partitionType = "count";
             }
           );
+        };
+
+        packages.default = pkgs.callPackage ./devshell/package.nix {
+          inherit
+            craneLib
+            src
+            cargoArtifacts
+            name
+            ui
+            ;
+          version = cargoToml.workspace.package.version;
         };
       }
     ))

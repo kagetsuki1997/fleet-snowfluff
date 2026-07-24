@@ -148,6 +148,66 @@ crate itself (no system libraries on a macOS host to link against), so
 anything touching `platform/linux.rs` still needs `just build-linux` for real
 verification.
 
+### Nix / NixOS
+
+`.deb` and AppImage (the two Linux artifacts `release.yaml` ships) both
+assume a standard FHS layout, which NixOS deliberately doesn't have —
+AppImage in particular is known to need extra shims (`nix-alien`,
+`appimage-run`) to run on NixOS at all. `flake.nix` exposes a native
+`packages.default` (built from [`devshell/package.nix`](devshell/package.nix)
+via [crane](https://github.com/ipetkov/crane), with the frontend prebuilt
+separately by [`devshell/ui.nix`](devshell/ui.nix)) as a NixOS/Nix-native
+alternative install path, **not a replacement** for the `.deb`/AppImage —
+those still matter for everyone else on Linux, and a `nix build` output only
+runs on a machine that has Nix itself (resolving the exact `/nix/store` paths
+it was linked against), not on an arbitrary Linux system.
+
+```sh
+nix build          # produces ./result/bin/fleet-snowfluff
+nix run             # build + run in one step
+```
+
+**Consuming it from your own NixOS/home-manager config** — add this repo as a
+flake input and reference its `packages.<system>.default`:
+
+```nix
+# flake.nix
+inputs.fleet-snowfluff.url = "github:kagetsuki1997/fleet-snowfluff";
+
+# then, wherever you build your system/home-manager config, with
+# `system` resolved to your host's (e.g. "x86_64-linux"):
+environment.systemPackages = [
+  inputs.fleet-snowfluff.packages.${system}.default
+];
+# or, for home-manager:
+home.packages = [ inputs.fleet-snowfluff.packages.${system}.default ];
+```
+
+Or try it without installing anything: `nix run github:kagetsuki1997/fleet-snowfluff`.
+
+**Known limitations, currently unverified on real hardware:**
+
+- `packages.default` is Linux-only in practice (built via GTK-specific
+  tooling — `wrapGAppsHook3`, `webkitgtk_4_1`) even though `flake-utils`'
+  `eachDefaultSystem` technically evaluates it for Darwin systems too; macOS
+  building/running through this path isn't a supported or tested
+  configuration. Use `just build`/`just macos-signing` on macOS instead.
+- Pet-window transparency and the settings webview have real, open bugs when
+  running inside a VirtualBox VM guest specifically: wgpu falls back to the
+  GLES/EGL backend (no real Vulkan ICD available through VirtualBox's GL-only
+  guest passthrough), which — like the situation that forced abandoning wgpu
+  on Windows entirely (see the Windows section above) — never advertises an
+  alpha-capable surface, so pets render fully opaque; separately, the
+  settings window can render fully blank, a known WebKitGTK-on-NixOS
+  DMABUF-compositing issue. `devshell/package.nix` wires in `vulkan-loader` +
+  `/run/opengl-driver/lib` and `WEBKIT_DISABLE_COMPOSITING_MODE=1` as
+  best-effort fixes, but neither is confirmed on real (non-virtualized)
+  hardware yet — VirtualBox's virtual GPU generally doesn't expose real
+  Vulkan to a Linux guest at all, so a VM may simply not be capable of this
+  regardless of packaging. Treat VM results as provisional; real hardware is
+  the actual bar, matching this project's own "verified on GNOME/KDE" tier
+  for the Linux platform generally (design.md D5).
+
 ## CI
 
 - **Quality** ([`.github/workflows/quality.yaml`](.github/workflows/quality.yaml)) —
