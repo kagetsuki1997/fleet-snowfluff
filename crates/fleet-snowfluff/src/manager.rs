@@ -382,6 +382,9 @@ impl PetManager {
         );
         log::info!("spawned {label} at ({:.1}, {:.1})", pet.state.x, pet.state.y);
         pet.apply_display_priority(self.display_priority);
+        #[cfg(target_os = "windows")]
+        crate::platform::windows::set_click_through(&pet.window, self.click_through);
+        #[cfg(not(target_os = "windows"))]
         pet.window.set_ignore_cursor_events(self.click_through).ok();
         self.pets.push(pet);
         self.apply_visibility();
@@ -501,6 +504,14 @@ impl PetManager {
     pub fn set_click_through(&mut self, enable: bool) {
         self.click_through = enable;
         for pet in &self.pets {
+            // Windows goes through its own raw `WS_EX_TRANSPARENT` toggle
+            // instead of tao's `set_ignore_cursor_events` -- see that
+            // function's doc for why (tao's version silently strips the
+            // `WS_EX_LAYERED` bit `make_layered` needs, breaking/flashing
+            // `UpdateLayeredWindow` compositing).
+            #[cfg(target_os = "windows")]
+            crate::platform::windows::set_click_through(&pet.window, enable);
+            #[cfg(not(target_os = "windows"))]
             pet.window.set_ignore_cursor_events(enable).ok();
         }
     }

@@ -54,7 +54,7 @@ use windows::{
                 GetParent, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
                 SendMessageTimeoutW, SetParent, SetWindowLongPtrW, SetWindowPos,
                 UpdateLayeredWindow, GWL_EXSTYLE, HWND_BOTTOM, SMTO_NORMAL, SWP_NOACTIVATE,
-                SWP_NOMOVE, SWP_NOSIZE, ULW_ALPHA, WS_EX_LAYERED,
+                SWP_NOMOVE, SWP_NOSIZE, ULW_ALPHA, WS_EX_LAYERED, WS_EX_TRANSPARENT,
             },
         },
     },
@@ -152,6 +152,37 @@ pub fn make_layered(window: &tauri::window::Window) {
             &disable_transitions as *const i32 as *const core::ffi::c_void,
             size_of::<i32>() as u32,
         );
+    }
+}
+
+/// Toggles OS-level click-through by flipping only `WS_EX_TRANSPARENT`
+/// on the window's existing exstyle, in place of tao's own
+/// `set_ignore_cursor_events`. That goes through tao's `WindowState::
+/// apply_diff`, which recomputes the *entire* exstyle from tao's own
+/// tracked flags and replaces it outright (`SetWindowLongW`, not an OR)
+/// -- tao's flag set has no idea `make_layered` set `WS_EX_LAYERED`
+/// separately at pet-window creation, so disabling ignore-cursor-events
+/// through tao silently drops that bit too. Patching `WS_EX_LAYERED`
+/// back in afterwards (an earlier version of this fix) stopped the pet
+/// getting stuck, but tao's `SetWindowLongW` + `SWP_FRAMECHANGED` still
+/// briefly leaves the window non-layered in between, which Windows
+/// paints as an ordinary (white-background) window for one frame --
+/// visible as a flash. Never touching `WS_EX_LAYERED` at all avoids
+/// that gap entirely: nothing else in tao reads back the
+/// `IGNORE_CURSOR_EVENT` flag we're bypassing (only `to_window_styles`
+/// does), so going around it here is safe.
+pub fn set_click_through(window: &tauri::window::Window, enable: bool) {
+    let Some(hwnd) = hwnd_of(window) else { return };
+    unsafe {
+        let current = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let new = if enable {
+            current | WS_EX_TRANSPARENT.0 as isize
+        } else {
+            current & !(WS_EX_TRANSPARENT.0 as isize)
+        };
+        if new != current {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, new);
+        }
     }
 }
 
