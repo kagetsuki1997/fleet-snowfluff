@@ -179,7 +179,7 @@ fn on_menu_event(app: &AppHandle, event: MenuEvent) {
     refresh_labels(app);
 }
 
-fn refresh_labels(app: &AppHandle) {
+pub(crate) fn refresh_labels(app: &AppHandle) {
     let (lang, paused, visible, follow_mouse, click_through) = {
         let manager = app.state::<Mutex<PetManager>>();
         let m = manager.lock().unwrap();
@@ -198,6 +198,10 @@ fn refresh_labels(app: &AppHandle) {
             translate(lang, "menu.pause")
         })
         .ok();
+    items.follow_mouse.set_text(translate(lang, "menu.follow_mouse")).ok();
     items.follow_mouse.set_checked(follow_mouse).ok();
+    items.click_through.set_text(translate(lang, "menu.click_through")).ok();
     items.click_through.set_checked(click_through).ok();
+    items.settings.set_text(translate(lang, "menu.settings")).ok();
+    items.quit.set_text(translate(lang, "menu.quit")).ok();
 }
