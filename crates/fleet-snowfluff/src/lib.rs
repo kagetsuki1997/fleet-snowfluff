@@ -72,7 +72,15 @@ pub fn run() {
             // that's `%APPDATA%/fleet-snowfluff/
             // logs/`.
             app.handle().plugin(
-                tauri_plugin_log::Builder::default().level(log::LevelFilter::Info).build(),
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    // Mesa's lavapipe/llvmpipe X11 WSI reports every
+                    // present as suboptimal (a known Mesa software-
+                    // rasterizer quirk, not an actual problem here) --
+                    // spamming one warning per frame per pet window
+                    // otherwise.
+                    .level_for("wgpu_hal::vulkan", log::LevelFilter::Error)
+                    .build(),
             )?;
             log::info!(
                 "fleet-snowfluff {} (build {}) starting",

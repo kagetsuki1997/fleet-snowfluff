@@ -10,6 +10,7 @@
   <img src="https://img.shields.io/badge/Windows-0078D6?style=flat-square&logo=windows11&logoColor=white" alt="Windows">
   <img src="https://img.shields.io/badge/macOS-000000?style=flat-square&logo=apple&logoColor=white" alt="macOS">
   <img src="https://img.shields.io/badge/Linux-FCC624?style=flat-square&logo=linux&logoColor=black" alt="Linux">
+  <a href="DEVELOP.md#nix--nixos"><img src="https://img.shields.io/badge/Nix-flake-5277C3?style=flat-square&logo=nixos&logoColor=white" alt="Nix flake"></a>
 </p>
 
 <p align="center">
@@ -65,6 +66,10 @@ Grab the installer for your platform from
 This project is under active development — if there isn't a release yet, or
 you'd like to try the latest code or contribute, see
 [`DEVELOP.md`](DEVELOP.md) for building from source.
+
+NixOS/Nix users can also build or run it directly via this repo's flake
+(`nix build`/`nix run`), or add it as a flake input to their own system
+config — see [`DEVELOP.md`](DEVELOP.md#nix--nixos) for details.
 
 ## 🧑‍💻 Development
 

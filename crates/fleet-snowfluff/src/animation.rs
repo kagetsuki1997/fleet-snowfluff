@@ -111,10 +111,12 @@ pub fn load_animation_set() -> AnimationSet {
     let move_right = AnimationClip::from_rgba_frames(move_source.clone());
     let move_left = move_right.flipped_horizontally(&move_source);
 
-    let idle = (1..=4).map(|i| load_clip(&format!("idle{i}.gif"))).collect();
+    let idle: Vec<AnimationClip> = (1..=4).map(|i| load_clip(&format!("idle{i}.gif"))).collect();
     let screen = (1..=7).map(|i| load_clip(&format!("screen{i}.gif"))).collect();
     let drag = load_clip("drag.gif");
-    let paused = load_clip("idle2.gif");
+    // idle2.gif doubles as the paused pose -- reuse the already-decoded
+    // clip instead of decoding the same GIF a second time.
+    let paused = idle[1].clone();
 
     AnimationSet { move_right, move_left, idle, drag, paused, screen }
 }

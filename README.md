@@ -10,6 +10,7 @@
   <img src="https://img.shields.io/badge/Windows-0078D6?style=flat-square&logo=windows11&logoColor=white" alt="Windows">
   <img src="https://img.shields.io/badge/macOS-000000?style=flat-square&logo=apple&logoColor=white" alt="macOS">
   <img src="https://img.shields.io/badge/Linux-FCC624?style=flat-square&logo=linux&logoColor=black" alt="Linux">
+  <a href="DEVELOP.md#nix--nixos"><img src="https://img.shields.io/badge/Nix-flake-5277C3?style=flat-square&logo=nixos&logoColor=white" alt="Nix flake"></a>
 </p>
 
 <p align="center">
@@ -49,6 +50,10 @@ Fleet Snowfluff 是一隻跨平台的桌面寵物，將原始 Python 專案
 前往 [GitHub Releases](https://github.com/kagetsuki1997/fleet-snowfluff/releases)
 下載對應平台的安裝包。專案仍在活躍開發中，若尚未有正式發行版，或想搶先體驗、參與開發，
 可參考 [`DEVELOP.md`](DEVELOP.md) 從原始碼建置。
+
+另外，NixOS／Nix 使用者可透過本專案提供的 flake 直接建置或執行（`nix build`／
+`nix run`），或作為 flake input 加入自己的系統設定，詳見
+[`DEVELOP.md`](DEVELOP.md#nix--nixos)。
 
 ## 🧑‍💻 開發
 

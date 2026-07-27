@@ -190,6 +190,7 @@ pub fn set_ui_language(
         .cloned()
         .unwrap_or_default();
     crate::settings_window::refresh_title(&app, &title);
+    crate::tray::refresh_labels(&app);
 }
 
 #[tauri::command]

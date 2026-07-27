@@ -148,6 +148,82 @@ crate itself (no system libraries on a macOS host to link against), so
 anything touching `platform/linux.rs` still needs `just build-linux` for real
 verification.
 
+### Nix / NixOS
+
+`.deb` and AppImage (the two Linux artifacts `release.yaml` ships) both
+assume a standard FHS layout, which NixOS deliberately doesn't have —
+AppImage in particular is known to need extra shims (`nix-alien`,
+`appimage-run`) to run on NixOS at all. `flake.nix` exposes a native
+`packages.default` (built from [`devshell/package.nix`](devshell/package.nix)
+via [crane](https://github.com/ipetkov/crane), with the frontend prebuilt
+separately by [`devshell/ui.nix`](devshell/ui.nix)) as a NixOS/Nix-native
+alternative install path, **not a replacement** for the `.deb`/AppImage —
+those still matter for everyone else on Linux, and a `nix build` output only
+runs on a machine that has Nix itself (resolving the exact `/nix/store` paths
+it was linked against), not on an arbitrary Linux system.
+
+```sh
+nix build          # produces ./result/bin/fleet-snowfluff
+nix run             # build + run in one step
+```
+
+**Consuming it from your own NixOS/home-manager config** — add this repo as a
+flake input and reference its `packages.<system>.default`:
+
+```nix
+# flake.nix
+inputs.fleet-snowfluff.url = "github:kagetsuki1997/fleet-snowfluff";
+
+# then, wherever you build your system/home-manager config, with
+# `system` resolved to your host's (e.g. "x86_64-linux"):
+environment.systemPackages = [
+  inputs.fleet-snowfluff.packages.${system}.default
+];
+# or, for home-manager:
+home.packages = [ inputs.fleet-snowfluff.packages.${system}.default ];
+```
+
+Or try it without installing anything: `nix run github:kagetsuki1997/fleet-snowfluff`.
+
+**Known limitations, currently unverified on real hardware:**
+
+- `packages.default` is Linux-only in practice (built via GTK-specific
+  tooling — `wrapGAppsHook3`, `webkitgtk_4_1`) even though `flake-utils`'
+  `eachDefaultSystem` technically evaluates it for Darwin systems too; macOS
+  building/running through this path isn't a supported or tested
+  configuration. Use `just build`/`just macos-signing` on macOS instead.
+- **Pet-window transparency works inside a VirtualBox VM guest**, confirmed
+  on a NixOS guest: VirtualBox's Guest Additions only pass through OpenGL
+  (as `SVGA3D`/llvmpipe), not Vulkan, so no real Vulkan ICD is present —
+  `vulkaninfo` only ever finds Mesa's Lavapipe (software Vulkan). wgpu's
+  default backend selection (`Backends::all()`) enumerated both GL and
+  Vulkan adapters and picked GLES/EGL, whose X11 surface only ever
+  advertises the `Opaque` composite alpha mode, so pets rendered fully
+  opaque regardless of what was actually behind it. `PetManager`'s instance
+  now explicitly prefers Vulkan (`select_wgpu_backends` in `manager.rs`,
+  falling back to every backend only when no Vulkan ICD exists at all) —
+  Lavapipe's X11 surface correctly advertises `PreMultiplied`/`PostMultiplied`
+  alpha, so software Vulkan alone is sufficient. Real hardware, with either
+  real GPU passthrough or a proper Vulkan ICD, should work at least as well;
+  treat this as confirmed-in-VM, not yet confirmed on real (non-virtualized)
+  hardware.
+- The settings webview can still render fully blank inside a VirtualBox VM
+  guest — a known WebKitGTK-on-NixOS DMABUF-compositing issue, unrelated to
+  the transparency fix above. `devshell/package.nix` wires in
+  `WEBKIT_DISABLE_COMPOSITING_MODE=1` as a best-effort fix, not confirmed
+  fixed yet.
+- **Drag, follow-mouse, and the right-click quick menu now work on Linux**,
+  confirmed on a NixOS guest. These all ride the same global mouse-position
+  poll, which used to be unconditionally disabled on Linux because
+  `device_query`'s X11 backend wraps `Rc<Display>` (not `Send`), which can't
+  live inside Tauri's `Mutex<PetManager>` managed state. `platform::linux::
+MousePoller` replaces it with a dedicated `x11rb::RustConnection` (a
+  pure-Rust, thread-safe XCB client) polling `XQueryPointer` directly —
+  `mouse_available()` no longer hardcodes `false` on Linux.
+  Real-hardware/other-WM verification is still open, matching this
+  project's own "verified on GNOME/KDE" tier for the Linux platform
+  generally (design.md D5).
+
 ## CI
 
 - **Quality** ([`.github/workflows/quality.yaml`](.github/workflows/quality.yaml)) —
