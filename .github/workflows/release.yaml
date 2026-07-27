@@ -6,8 +6,65 @@ on:
       - "v*"
 
 jobs:
+  # Finds or creates the one GitHub release the three matrix jobs below
+  # all attach their platform's build to. Running this as its own,
+  # single, non-matrixed job (rather than letting each matrix job call
+  # tauri-action's own find-or-create-release logic against `tagName`)
+  # avoids a race between three parallel jobs each independently
+  # searching for a not-yet-existing release and, if unlucky enough to
+  # run first, creating their own -- which is exactly what happened
+  # when the release was manually created via the GitHub web UI (with a
+  # hand-written name/generated changelog body) at almost the same
+  # moment the tag-push webhook fired this workflow: whichever matrix
+  # job's own release lookup lost the race created a *second*,
+  # generic-placeholder-named release for the same tag, and every
+  # asset ended up attached to that one instead of the hand-edited one.
+  create-release:
+    name: Find or create release
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.result }}
+    steps:
+      - name: Find existing release or create one
+        id: release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tagName = context.ref.replace('refs/tags/', '');
+
+            // A release created via the GitHub UI as a draft (or one
+            // manually re-published after a previous run) isn't
+            // returned by getReleaseByTag -- only listReleases sees
+            // drafts, so check that first and reuse whatever's already
+            // there (name, body, and all) rather than clobbering it.
+            for await (const response of github.paginate.iterator(
+              github.rest.repos.listReleases,
+              { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 },
+            )) {
+              const existing = response.data.find((r) => r.tag_name === tagName);
+              if (existing) {
+                core.info(`Reusing existing release ${existing.id} for tag ${tagName}`);
+                return existing.id;
+              }
+            }
+
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tagName,
+              name: `Fleet Snowfluff ${tagName}`,
+              body: "See CHANGELOG or commit history for details.",
+              draft: true,
+              prerelease: false,
+            });
+            core.info(`Created release ${data.id} for tag ${tagName}`);
+            return data.id;
+
   release:
     name: Release ${{ matrix.platform }}
+    needs: create-release
     permissions:
       contents: write
     strategy:
@@ -107,10 +164,6 @@ jobs:
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
         with:
           projectPath: crates/fleet-snowfluff
-          tagName: ${{ github.ref_name }}
-          releaseName: "Fleet Snowfluff ${{ github.ref_name }}"
-          releaseBody: "See CHANGELOG or commit history for details."
-          releaseDraft: true
-          prerelease: false
+          releaseId: ${{ needs.create-release.outputs.release_id }}
           updaterJsonPreferNsis: true
           args: ${{ matrix.args }}
