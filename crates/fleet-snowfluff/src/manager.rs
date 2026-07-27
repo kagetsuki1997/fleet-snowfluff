@@ -32,14 +32,20 @@ fn next_label() -> String { format!("pet-{}", NEXT_PET_ID.fetch_add(1, Ordering:
 
 /// Picks which wgpu backends the instance enumerates adapters from.
 ///
-/// `WGPU_BACKEND` always wins when set. Otherwise this prefers Vulkan over
-/// GL: on X11, wgpu's GLES/EGL surface only ever advertises the `Opaque`
-/// composite alpha mode, so pet windows can't be see-through on that path
-/// even when a real GPU is behind it -- Vulkan (including the Lavapipe
-/// software implementation) advertises `PreMultiplied`/`PostMultiplied`
-/// instead. Falls back to every backend when no Vulkan ICD is present at
-/// all, so systems without Vulkan still render (just opaque).
-#[cfg(not(target_os = "windows"))]
+/// Linux-only: `WGPU_BACKEND` always wins when set. Otherwise this prefers
+/// Vulkan over GL: on X11, wgpu's GLES/EGL surface only ever advertises the
+/// `Opaque` composite alpha mode, so pet windows can't be see-through on
+/// that path even when a real GPU is behind it -- Vulkan (including the
+/// Lavapipe software implementation) advertises `PreMultiplied`/
+/// `PostMultiplied` instead. Falls back to every backend when no Vulkan
+/// ICD is present at all, so systems without Vulkan still render (just
+/// opaque). macOS doesn't need this probe at all -- wgpu's Metal backend
+/// already advertises real alpha compositing, so gating this to Linux
+/// avoids the extra throwaway-instance startup cost on macOS, and avoids
+/// steering a Mac that happens to have a Vulkan ICD (e.g. MoltenVK
+/// installed for other dev work) away from the native Metal path onto an
+/// untested Vulkan-translation one.
+#[cfg(target_os = "linux")]
 fn select_wgpu_backends() -> wgpu::Backends {
     if let Some(backends) = wgpu::Backends::from_env() {
         return backends;
@@ -241,11 +247,13 @@ impl PetManager {
 
         Self {
             app,
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(target_os = "linux")]
             instance: wgpu::Instance::new(&wgpu::InstanceDescriptor {
                 backends: select_wgpu_backends(),
                 ..Default::default()
             }),
+            #[cfg(target_os = "macos")]
+            instance: wgpu::Instance::new(&wgpu::InstanceDescriptor::default()),
             #[cfg(not(target_os = "windows"))]
             gpu: None,
             animations: None,
