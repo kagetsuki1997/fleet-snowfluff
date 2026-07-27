@@ -1,0 +1,54 @@
+[package]
+name                 = "fleet-snowfluff"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+description          = "Fleet Snowfluff desktop pet"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[lib]
+name       = "fleet_snowfluff_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+shadow-rs   = { workspace = true, features = ["build"] }
+tauri-build = { workspace = true }
+
+[dependencies]
+device_query           = { workspace = true }
+fleet-snowfluff-core   = { path = "../fleet-snowfluff-core" }
+image                  = { workspace = true }
+log                    = { workspace = true }
+pollster               = { workspace = true }
+rand                   = { workspace = true }
+rodio                  = { workspace = true }
+rust-embed             = { workspace = true }
+serde                  = { workspace = true }
+serde_json             = { workspace = true }
+shadow-rs              = { workspace = true }
+tauri                  = { workspace = true }
+tauri-plugin-autostart = { workspace = true }
+tauri-plugin-log       = { workspace = true }
+tauri-plugin-shell     = { workspace = true }
+tauri-plugin-updater   = { workspace = true }
+wgpu                   = { workspace = true }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = { workspace = true }
+core-graphics   = { workspace = true }
+objc2           = { workspace = true }
+objc2-app-kit   = { workspace = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { workspace = true }
+winreg  = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+gdk   = { workspace = true }
+gtk   = { workspace = true }
+x11rb = { workspace = true }
+
+[dev-dependencies]
+env_logger = { workspace = true }

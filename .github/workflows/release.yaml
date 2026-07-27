@@ -1,0 +1,169 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  # Finds or creates the one GitHub release the three matrix jobs below
+  # all attach their platform's build to. Running this as its own,
+  # single, non-matrixed job (rather than letting each matrix job call
+  # tauri-action's own find-or-create-release logic against `tagName`)
+  # avoids a race between three parallel jobs each independently
+  # searching for a not-yet-existing release and, if unlucky enough to
+  # run first, creating their own -- which is exactly what happened
+  # when the release was manually created via the GitHub web UI (with a
+  # hand-written name/generated changelog body) at almost the same
+  # moment the tag-push webhook fired this workflow: whichever matrix
+  # job's own release lookup lost the race created a *second*,
+  # generic-placeholder-named release for the same tag, and every
+  # asset ended up attached to that one instead of the hand-edited one.
+  create-release:
+    name: Find or create release
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.release.outputs.result }}
+    steps:
+      - name: Find existing release or create one
+        id: release
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tagName = context.ref.replace('refs/tags/', '');
+
+            // A release created via the GitHub UI as a draft (or one
+            // manually re-published after a previous run) isn't
+            // returned by getReleaseByTag -- only listReleases sees
+            // drafts, so check that first and reuse whatever's already
+            // there (name, body, and all) rather than clobbering it.
+            for await (const response of github.paginate.iterator(
+              github.rest.repos.listReleases,
+              { owner: context.repo.owner, repo: context.repo.repo, per_page: 100 },
+            )) {
+              const existing = response.data.find((r) => r.tag_name === tagName);
+              if (existing) {
+                core.info(`Reusing existing release ${existing.id} for tag ${tagName}`);
+                return existing.id;
+              }
+            }
+
+            const { data } = await github.rest.repos.createRelease({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              tag_name: tagName,
+              name: `Fleet Snowfluff ${tagName}`,
+              body: "See CHANGELOG or commit history for details.",
+              draft: true,
+              prerelease: false,
+            });
+            core.info(`Created release ${data.id} for tag ${tagName}`);
+            return data.id;
+
+  release:
+    name: Release ${{ matrix.platform }}
+    needs: create-release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: "macos-latest"
+            args: "--target universal-apple-darwin"
+          - platform: "ubuntu-22.04"
+            args: ""
+          - platform: "windows-latest"
+            args: ""
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install Linux bundling dependencies
+        if: matrix.platform == 'ubuntu-22.04'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libgtk-3-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libxdo-dev \
+            libssl-dev \
+            libasound2-dev \
+            patchelf
+
+      - name: Install Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
+
+      - name: Install frontend dependencies
+        run: npm ci --prefix ui
+
+      # macOS code signing (see scripts/setup-macos-signing.sh): a
+      # self-signed identity, not a real Apple Developer ID, so it
+      # doesn't satisfy Gatekeeper for other users -- it only gives the
+      # app a stable signature so Accessibility permission (drag/
+      # follow-mouse/right-click) survives across releases instead of
+      # needing to be re-granted every update.
+      #
+      # Deliberately NOT using tauri-action's own APPLE_CERTIFICATE/
+      # APPLE_CERTIFICATE_PASSWORD env vars: when those are set,
+      # tauri-bundler always tries to auto-discover the signing
+      # identity from the imported cert (tauri-macos-sign's
+      # `Keychain::with_certificate`), but that discovery only
+      # recognizes Apple's own official certificate-name prefixes
+      # ("Developer ID Application:", "Apple Development:", etc.) --
+      # our self-signed cert's Common Name ("Fleet Snowfluff
+      # Self-Signed") can never match, regardless of trust settings,
+      # and the build fails with "failed to resolve signing identity"
+      # before it ever gets to check the configured signingIdentity.
+      # Importing the cert into a keychain ourselves and leaving those
+      # two env vars unset makes tauri-bundler take its other path
+      # (`Keychain::with_signing_identity`), which just trusts
+      # tauri.conf.json's `bundle.macOS.signingIdentity` directly with
+      # no discovery/filtering involved.
+      - name: Import macOS signing certificate
+        if: matrix.platform == 'macos-latest'
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/fleet-snowfluff-signing.keychain-db"
+          KEYCHAIN_PASSWORD=$(uuidgen)
+          CERT_PATH="$RUNNER_TEMP/fleet-snowfluff-codesign.p12"
+
+          echo "$APPLE_CERTIFICATE" | base64 --decode -o "$CERT_PATH"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security set-keychain-settings -t 3600 -u "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          security import "$CERT_PATH" -P "$APPLE_CERTIFICATE_PASSWORD" -A \
+            -T /usr/bin/codesign -T /usr/bin/security -k "$KEYCHAIN_PATH"
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+          EXISTING_KEYCHAINS=$(security list-keychain -d user | tr -d '"')
+          security list-keychain -d user -s "$KEYCHAIN_PATH" $EXISTING_KEYCHAINS
+
+          rm -f "$CERT_PATH"
+
+      - name: Build and release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: crates/fleet-snowfluff
+          releaseId: ${{ needs.create-release.outputs.release_id }}
+          updaterJsonPreferNsis: true
+          args: ${{ matrix.args }}

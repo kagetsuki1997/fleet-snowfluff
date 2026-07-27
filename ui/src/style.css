@@ -1,0 +1,225 @@
+/* Pico.css (imported in main.ts) styles every plain element -- inputs,
+   selects, buttons, headings, links -- automatically, including light/
+   dark mode. Everything below is just the small amount Pico has no
+   opinion on: the tab strip, and a compact label-left/control-right
+   row layout for the personalization form (Pico's default stacks
+   label above control, too tall for ~13 rows in a small window). */
+
+/* zpix (legacy's pixel-art font, `legacy/ameath/fonts.py`) covers Latin,
+   CJK, and most kana (~93%) but has zero Hangul coverage -- checked
+   directly against its `cmap` table, not just eyeballed. The fallback
+   chain lets the browser pick up Hangul (and any missed kana glyphs)
+   from whichever of these the OS has installed; on a system with none
+   of them it falls through to Pico's own sans-serif stack, never to
+   tofu boxes for a language zpix can't render. Overriding Pico's
+   `--pico-font-family` variable (rather than setting `font-family`
+   directly on `html`/`body`) is what makes this reach headings,
+   `code`/`pre`, and every other element Pico's own rules already
+   reference the variable from. */
+@font-face {
+  font-family: "zpix";
+  src: url("/fonts/zpix.ttf") format("truetype");
+  font-display: swap;
+}
+
+:root {
+  --pico-font-family:
+    "zpix", "Noto Sans JP", "Noto Sans KR", "Noto Sans SC", "Noto Sans TC",
+    var(--pico-font-family-sans-serif);
+}
+
+/* Legacy Ameath's own settings/quick-menu palette (`legacy/ameath/
+   quick_menu.py`'s `self.colors`), ported here so this window matches
+   it rather than following the OS's light/dark preference -- fixed
+   pink-and-white regardless of system theme, same as legacy always
+   was. Overriding Pico's variables (rather than hand-styling each
+   element) is what makes every Pico-provided component -- buttons,
+   inputs, selects, links, `hr` -- pick this up for free.
+   `!important` on every value is load-bearing, not decorative: Pico's
+   own light-theme rule is scoped to `:root:not([data-theme=dark])`,
+   which is *more specific* than a plain `:root` selector (the `:not()`
+   argument counts toward specificity) -- so a plain override here
+   loses to Pico's own default even though it's later in the
+   stylesheet. `!important` is the reliable way to win against a
+   selector we don't control the specificity of. */
+:root {
+  color-scheme: light;
+  --pico-background-color: #fff1f6 !important;
+  --pico-color: #4a2a3a !important;
+  --pico-h1-color: #4a2a3a !important;
+  --pico-h2-color: #4a2a3a !important;
+  --pico-h3-color: #4a2a3a !important;
+  --pico-h4-color: #4a2a3a !important;
+  --pico-h5-color: #4a2a3a !important;
+  --pico-h6-color: #4a2a3a !important;
+  --pico-muted-color: #7a5564 !important;
+  --pico-muted-border-color: #f3c2d4 !important;
+  --pico-border-color: #f3c2d4 !important;
+  --pico-primary: #ff69b4 !important;
+  --pico-primary-background: #ff69b4 !important;
+  --pico-primary-border: #ff69b4 !important;
+  --pico-primary-hover: #e84d8e !important;
+  --pico-primary-hover-background: #e84d8e !important;
+  --pico-primary-hover-border: #e84d8e !important;
+  --pico-primary-focus: rgb(255 105 180 / 35%) !important;
+  --pico-primary-inverse: #fff !important;
+  --pico-primary-underline: #ff69b4 !important;
+  --pico-secondary-background: #ffe1ee !important;
+  --pico-secondary-border: #f3c2d4 !important;
+  --pico-secondary-hover-background: #f3c2d4 !important;
+  --pico-secondary-hover-border: #f3c2d4 !important;
+  --pico-secondary-inverse: #4a2a3a !important;
+  --pico-card-background-color: #fff !important;
+  --pico-card-sectioning-background-color: #fff !important;
+  --pico-card-border-color: #f3c2d4 !important;
+  --pico-form-element-background-color: #fff !important;
+  --pico-form-element-border-color: #f3c2d4 !important;
+  --pico-form-element-color: #4a2a3a !important;
+  --pico-form-element-placeholder-color: #7a5564 !important;
+  --pico-form-element-active-background-color: #fff !important;
+  --pico-form-element-active-border-color: #ff69b4 !important;
+  --pico-form-element-selected-background-color: #ffe1ee !important;
+  --pico-switch-background-color: #f3c2d4 !important;
+  --pico-switch-checked-background-color: #ff69b4 !important;
+  --pico-range-border-color: #f3c2d4 !important;
+  --pico-range-thumb-color: #ff69b4 !important;
+  --pico-range-thumb-border-color: #ff69b4 !important;
+}
+
+html {
+  font-size: 14px;
+}
+
+body {
+  margin: 0;
+}
+
+#app {
+  height: 100vh;
+  box-sizing: border-box;
+}
+
+.settings-window {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0;
+}
+
+.tabs {
+  display: flex;
+  border-bottom: 1px solid var(--pico-muted-border-color);
+  flex-shrink: 0;
+  padding: 0 1rem;
+}
+
+.tab-button {
+  flex: 1;
+  margin: 0;
+  border: none;
+  border-radius: 0;
+  border-bottom: 2px solid transparent;
+  background: none;
+  box-shadow: none;
+  /* Pico's own `button` selector redefines the --pico-color *custom
+     property* itself to --pico-primary-inverse (light text meant to
+     sit on the colored background Pico's default buttons have) --
+     referencing var(--pico-color) here would resolve to that same
+     locally-shadowed value even after `background: none` removes the
+     background it was meant to contrast against, leaving light text
+     on Pico's light theme (invisible) and only working in dark mode by
+     coincidence. `inherit` takes the parent `.tabs`/body's actual
+     computed text color instead, bypassing the shadowed variable
+     entirely. */
+  color: inherit;
+}
+
+.tab-button.active {
+  border-bottom-color: var(--pico-primary);
+  color: var(--pico-primary);
+  font-weight: 600;
+}
+
+.panel {
+  display: none;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 1rem;
+  overflow-y: auto;
+}
+
+.panel.active {
+  display: flex;
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin: 0;
+}
+
+.field-row span {
+  flex-shrink: 0;
+}
+
+.field-row select,
+.field-row input:not([type="checkbox"]):not([type="range"]) {
+  width: auto;
+  min-width: 8rem;
+  margin: 0;
+}
+
+.field-row input[type="checkbox"] {
+  margin: 0;
+}
+
+.field-row input[type="range"] {
+  flex: 1;
+  margin: 0;
+}
+
+.panel[data-panel="about"] {
+  align-items: center;
+  text-align: center;
+}
+
+.panel[data-panel="about"] p,
+.panel[data-panel="about"] h3,
+.panel[data-panel="about"] hr {
+  margin: 0;
+  width: 100%;
+}
+
+.panel[data-panel="about"] .app-icon {
+  width: 64px;
+  height: 64px;
+}
+
+.panel[data-panel="about"] .version {
+  font-weight: 600;
+}
+
+.panel[data-panel="about"] .build {
+  opacity: 0.75;
+  font-size: 0.85em;
+}
+
+.panel[data-panel="about"] .disclaimer {
+  opacity: 0.75;
+  font-size: 0.9em;
+}
+
+.error {
+  color: var(--pico-del-color);
+  font-size: 0.9em;
+  word-break: break-word;
+}
+
+.hint {
+  color: var(--pico-muted-color);
+  font-size: 0.8em;
+  margin: -0.5rem 0 0;
+  word-break: break-word;
+}

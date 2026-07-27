@@ -1,0 +1,13 @@
+[package]
+name                 = "fleet-snowfluff-core"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+description          = "Pure behavior engine, config, and locale logic for Fleet Snowfluff"
+
+[dependencies]
+rand       = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+sys-locale = { workspace = true }
