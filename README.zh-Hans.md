@@ -25,8 +25,7 @@ Fleet Snowfluff 是一只跨平台的桌面宠物，将原始 Python 项目
 [Ameath](https://gitee.com/lzy-buaa-jdi/ameath) 用 Rust 重写而成。它会在屏幕上游荡、
 跟随你的鼠标、被拖动时会有反应——原生支持 **Windows**、**macOS** 与 **Linux（X11）**。
 
-> **开发状态：** 本项目正朝 `v0.1.0` 迈进，核心功能已在三个平台上可运行。原始 Python
-> 版本仍保留在 [`legacy/`](legacy/)，作为行为对照的参考版本。想了解开发脉络、设计
+> **开发状态：** 本项目正朝 `v0.1.0` 迈进，核心功能已在三个平台上可运行。想了解开发脉络、设计
 > 决策与规格文档，请见 [`openspec/changes/`](openspec/changes/)。
 
 ## ✨ 特色功能
