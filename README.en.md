@@ -27,8 +27,7 @@ wanders your screen, follows your cursor, and reacts when you drag it —
 running natively on **Windows**, **macOS**, and **Linux (X11)**.
 
 > **Status:** this project is closing in on `v0.1.0`, with core functionality
-> already working on all three platforms. The original Python app still lives
-> at [`legacy/`](legacy/) as the behavior reference. For the development
+> already working on all three platforms. For the development
 > history, design decisions, and specs, see
 > [`openspec/changes/`](openspec/changes/).
 
