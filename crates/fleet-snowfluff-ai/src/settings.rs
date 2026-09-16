@@ -53,11 +53,13 @@ pub struct OllamaSettings {
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct MockSettings {}
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiSettings {
     /// Master switch (`ai-provider`'s "AI features disabled by
     /// default"): even a fully configured provider does nothing while
-    /// this is `false`.
+    /// this is `false`. `bool`'s own `Default` (`false`) is exactly the
+    /// value this needs, so `#[derive(Default)]` above is correct as-is
+    /// -- no manual impl needed.
     #[serde(default)]
     pub ai_enabled: bool,
     /// `None` means "no provider configured" (`ai-provider`'s "No
@@ -73,19 +75,6 @@ pub struct AiSettings {
     pub ollama: OllamaSettings,
     #[serde(default)]
     pub mock: MockSettings,
-}
-
-impl Default for AiSettings {
-    fn default() -> Self {
-        Self {
-            ai_enabled: false,
-            active_provider: None,
-            openai: OpenAiSettings::default(),
-            anthropic: AnthropicSettings::default(),
-            ollama: OllamaSettings::default(),
-            mock: MockSettings::default(),
-        }
-    }
 }
 
 fn sub_settings<T: Default + for<'de> Deserialize<'de>>(value: Option<&Value>) -> T {
@@ -196,11 +185,16 @@ mod tests {
 
     #[test]
     fn round_trips_through_json() {
-        let mut settings = AiSettings::default();
-        settings.ai_enabled = true;
-        settings.active_provider = Some(ProviderKind::OpenAi);
-        settings.openai.model = Some("gpt-4o".to_string());
-        settings.openai.disclosure_acknowledged = true;
+        let settings = AiSettings {
+            ai_enabled: true,
+            active_provider: Some(ProviderKind::OpenAi),
+            openai: OpenAiSettings {
+                model: Some("gpt-4o".to_string()),
+                disclosure_acknowledged: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
 
         let json_str = to_json_string(&settings);
         let reloaded = load_from_str(&json_str);

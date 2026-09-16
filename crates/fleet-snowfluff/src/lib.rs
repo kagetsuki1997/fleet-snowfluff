@@ -1,3 +1,4 @@
+pub mod ai_commands;
 pub mod ai_config_store;
 pub mod animation;
 pub mod assets;
@@ -65,6 +66,14 @@ pub fn run() {
             commands::pending_update,
             commands::check_for_update,
             commands::install_update,
+            ai_commands::get_ai_settings,
+            ai_commands::set_ai_enabled,
+            ai_commands::set_active_provider,
+            ai_commands::acknowledge_provider_disclosure,
+            ai_commands::set_provider_model,
+            ai_commands::set_provider_base_url,
+            ai_commands::set_provider_api_key,
+            ai_commands::fetch_provider_models,
         ])
         .setup(|app| {
             // Always on (not just debug builds) -- otherwise a release
@@ -156,8 +165,23 @@ pub fn run() {
                 }
             }
 
+            // AI settings/credentials load independently of the
+            // personalization Config above -- separate files
+            // (ai-config.json, secrets.json), separate crate
+            // (fleet-snowfluff-ai) owning their shape, per
+            // add-ai-chat-companion's design (core/personalization
+            // config stays untouched by any of this).
+            let ai_settings = ai_config_store::load(&app_handle);
+            let credentials = secrets_store::load(&app_handle);
+            // Seeds personas/aemeath.yaml into the user's config dir on
+            // first run so there's a file to inspect/edit later; a
+            // no-op if one already exists.
+            persona_store::seed_if_missing(&app_handle);
+
             app.manage(Mutex::new(pet_manager));
             app.manage(Mutex::new(config));
+            app.manage(Mutex::new(ai_settings));
+            app.manage(Mutex::new(credentials));
             app.manage(Mutex::<Option<tauri_plugin_updater::Update>>::new(None));
             tray::build(&app_handle)?;
             updater::spawn_startup_check(app_handle.clone());

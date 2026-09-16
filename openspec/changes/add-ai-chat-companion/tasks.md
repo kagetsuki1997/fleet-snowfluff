@@ -27,11 +27,11 @@
 
 ## 5. App crate: settings UI — AI tab
 
-- [ ] 5.1 Add `get_ai_settings`/apply-and-save commands for the AI tab (master switch, active provider, per-provider fields), following the existing `get_personalization` pattern in `commands.rs`; verify the tab reflects previously saved state on reopen.
-- [ ] 5.2 Add a command to fetch live models for the currently selected provider and surface fetch failures inline in the settings form; verify against `ai-provider`'s "Invalid credentials surface at model-selection time" scenario.
-- [ ] 5.3 Add the one-time cloud-provider disclosure flow for OpenAI/Anthropic, blocking activation until acknowledged, with no such flow for Ollama/Mock; verify against `settings-ui`'s "Cloud provider disclosure in AI tab" scenarios.
-- [ ] 5.4 Add the AI tab to the settings webview's tab list; verify the settings window shows four tabs (personalization, AI, update, about) per the modified `settings-ui` "Settings window" requirement.
-- [ ] 5.5 Add every new AI-tab string (master switch, provider labels, disclosure text) to all five `locales/*.json` files; verify `locale_dictionary` returns them for each `UiLanguage`.
+- [x] 5.1 Add `get_ai_settings`/apply-and-save commands for the AI tab (master switch, active provider, per-provider fields), following the existing `get_personalization` pattern in `commands.rs`; verify the tab reflects previously saved state on reopen. New `ai_commands.rs` module (parallel to `commands.rs`) holds these; `get_ai_settings` never round-trips actual API keys back to the frontend, only `openai_key_set`/`anthropic_key_set` booleans.
+- [x] 5.2 Add a command to fetch live models for the currently selected provider and surface fetch failures inline in the settings form; verify against `ai-provider`'s "Invalid credentials surface at model-selection time" scenario. `fetch_provider_models` builds the right concrete provider from current settings+credentials and calls `list_models()`, dropping both locks before the `.await` (same rule `updater.rs` establishes).
+- [x] 5.3 Add the one-time cloud-provider disclosure flow for OpenAI/Anthropic, blocking activation until acknowledged, with no such flow for Ollama/Mock; verify against `settings-ui`'s "Cloud provider disclosure in AI tab" scenarios. Frontend shows the disclosure inline (accept/cancel) before ever calling `set_active_provider`; accepting calls `acknowledge_provider_disclosure` first (persisted per-provider, so it never repeats).
+- [x] 5.4 Add the AI tab to the settings webview's tab list; verify the settings window shows four tabs (personalization, AI, update, about) per the modified `settings-ui` "Settings window" requirement. Also fixed two `clippy -D warnings` findings surfaced while implementing this group (a derivable `impl Default` and a field-reassignment-after-default in a test) -- both in `settings.rs` from group 4, not new code from this group.
+- [x] 5.5 Add every new AI-tab string (master switch, provider labels, disclosure text) to all five `locales/*.json` files; verify `locale_dictionary` returns them for each `UiLanguage`. `every_locale_parses_and_shares_the_same_key_set` passes with the new `ai.*`/`settings.tab.ai` keys added identically to all five files.
 
 ## 6. App crate: chat window
 

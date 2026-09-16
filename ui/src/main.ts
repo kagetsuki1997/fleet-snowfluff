@@ -36,6 +36,40 @@ interface PersonalizationSnapshot {
   config_path: string;
 }
 
+type ProviderKind = "open_ai" | "anthropic" | "ollama" | "mock";
+
+interface ProviderSettings {
+  base_url: string | null;
+  model: string | null;
+  disclosure_acknowledged?: boolean;
+}
+
+interface AiSettings {
+  ai_enabled: boolean;
+  active_provider: ProviderKind | null;
+  openai: ProviderSettings;
+  anthropic: ProviderSettings;
+  ollama: ProviderSettings;
+  mock: Record<string, never>;
+}
+
+interface AiSettingsSnapshot {
+  settings: AiSettings;
+  openai_key_set: boolean;
+  anthropic_key_set: boolean;
+  persona_warning: string | null;
+}
+
+interface ModelInfo {
+  id: string;
+  display_name: string;
+}
+
+interface ModelListResult {
+  models: ModelInfo[];
+  error: string | null;
+}
+
 const UI_LANGUAGES = ["zh-hant", "zh-hans", "en", "ja", "ko"];
 
 let dict: Dictionary = {};
@@ -53,7 +87,7 @@ async function loadDictionary(): Promise<void> {
   dict = JSON.parse(raw) as Dictionary;
 }
 
-type Tab = "personalization" | "update" | "about";
+type Tab = "personalization" | "ai" | "update" | "about";
 let activeTab: Tab = "personalization";
 
 interface UpdateInfo {
@@ -99,10 +133,12 @@ async function render(): Promise<void> {
     <main class="container-fluid settings-window">
       <nav class="tabs">
         <button class="tab-button" data-tab="personalization">${t("settings.tab.personalization")}</button>
+        <button class="tab-button" data-tab="ai">${t("settings.tab.ai")}</button>
         <button class="tab-button" data-tab="update">${t("settings.tab.update")}</button>
         <button class="tab-button" data-tab="about">${t("settings.tab.about")}</button>
       </nav>
       <section class="panel" data-panel="personalization"></section>
+      <section class="panel" data-panel="ai"></section>
       <section class="panel" data-panel="update"></section>
       <section class="panel" data-panel="about"></section>
     </main>
@@ -123,6 +159,7 @@ async function render(): Promise<void> {
 
   await Promise.allSettled([
     renderPersonalization().catch((err) => renderError("personalization", err)),
+    renderAi().catch((err) => renderError("ai", err)),
     renderUpdate().catch((err) => renderError("update", err)),
     renderAbout().catch((err) => renderError("about", err)),
   ]);
@@ -277,6 +314,177 @@ async function renderPersonalization(): Promise<void> {
   byId<HTMLSelectElement>("voice-language-select").addEventListener("change", (e) => {
     invoke("set_voice_language", { language: (e.target as HTMLSelectElement).value });
   });
+}
+
+function providerSettingsFor(settings: AiSettings, provider: ProviderKind): ProviderSettings {
+  if (provider === "open_ai") return settings.openai;
+  if (provider === "anthropic") return settings.anthropic;
+  if (provider === "ollama") return settings.ollama;
+  return { base_url: null, model: null };
+}
+
+function needsDisclosure(settings: AiSettings, provider: ProviderKind): boolean {
+  return (
+    (provider === "open_ai" || provider === "anthropic") &&
+    !providerSettingsFor(settings, provider).disclosure_acknowledged
+  );
+}
+
+async function renderAi(): Promise<void> {
+  const panel = document.querySelector<HTMLElement>('[data-panel="ai"]')!;
+  const snapshot = await invoke<AiSettingsSnapshot>("get_ai_settings");
+  renderAiPanel(panel, snapshot);
+}
+
+function renderAiPanel(panel: HTMLElement, snapshot: AiSettingsSnapshot): void {
+  const { settings, persona_warning } = snapshot;
+
+  const providerOptionsHtml = (
+    [
+      [null, "ai.provider.none"],
+      ["open_ai", "ai.provider.openai"],
+      ["anthropic", "ai.provider.anthropic"],
+      ["ollama", "ai.provider.ollama"],
+      ["mock", "ai.provider.mock"],
+    ] as const
+  )
+    .map(
+      ([value, key]) =>
+        `<option value="${value ?? ""}" ${value === settings.active_provider ? "selected" : ""}>${t(key)}</option>`,
+    )
+    .join("");
+
+  panel.innerHTML = `
+    ${field(t("ai.enabled_label"), `<input type="checkbox" id="ai-enabled-checkbox" ${settings.ai_enabled ? "checked" : ""} />`)}
+    ${field(t("ai.provider_label"), `<select id="ai-provider-select">${providerOptionsHtml}</select>`)}
+    <div id="ai-disclosure"></div>
+    <div id="ai-provider-config"></div>
+    ${persona_warning ? `<p class="error">${t("ai.persona_warning", { error: persona_warning })}</p>` : ""}
+  `;
+
+  panel.querySelector<HTMLInputElement>("#ai-enabled-checkbox")!.addEventListener("change", (e) => {
+    invoke("set_ai_enabled", { enabled: (e.target as HTMLInputElement).checked });
+  });
+
+  const providerSelect = panel.querySelector<HTMLSelectElement>("#ai-provider-select")!;
+  providerSelect.addEventListener("change", () => {
+    void handleProviderChange(panel, snapshot, providerSelect);
+  });
+
+  renderProviderConfig(panel, snapshot, settings.active_provider);
+}
+
+// A provider change goes through the disclosure prompt first (only for
+// OpenAI/Anthropic, only until acknowledged once -- ai-provider's
+// "Cloud provider data disclosure") rather than switching immediately,
+// unlike every other live-apply control on this settings window.
+async function handleProviderChange(
+  panel: HTMLElement,
+  snapshot: AiSettingsSnapshot,
+  select: HTMLSelectElement,
+): Promise<void> {
+  const newProvider = (select.value || null) as ProviderKind | null;
+  const disclosureEl = panel.querySelector<HTMLElement>("#ai-disclosure")!;
+
+  if (newProvider && needsDisclosure(snapshot.settings, newProvider)) {
+    disclosureEl.innerHTML = `
+      <p class="hint">${t(`ai.disclosure.${newProvider}`)}</p>
+      <button id="ai-disclosure-accept">${t("ai.disclosure.accept")}</button>
+      <button id="ai-disclosure-cancel" class="secondary">${t("ai.disclosure.cancel")}</button>
+    `;
+    disclosureEl
+      .querySelector<HTMLButtonElement>("#ai-disclosure-accept")!
+      .addEventListener("click", async () => {
+        await invoke("acknowledge_provider_disclosure", { provider: newProvider });
+        await invoke("set_active_provider", { provider: newProvider });
+        await renderAi();
+      });
+    disclosureEl
+      .querySelector<HTMLButtonElement>("#ai-disclosure-cancel")!
+      .addEventListener("click", () => {
+        select.value = snapshot.settings.active_provider ?? "";
+        disclosureEl.innerHTML = "";
+      });
+    return;
+  }
+
+  await invoke("set_active_provider", { provider: newProvider });
+  await renderAi();
+}
+
+function renderProviderConfig(
+  panel: HTMLElement,
+  snapshot: AiSettingsSnapshot,
+  provider: ProviderKind | null,
+): void {
+  const configEl = panel.querySelector<HTMLElement>("#ai-provider-config")!;
+
+  if (provider === null) {
+    configEl.innerHTML = `<p class="hint">${t("ai.provider.none_hint")}</p>`;
+    return;
+  }
+  if (provider === "mock") {
+    configEl.innerHTML = `<p class="hint">${t("ai.provider.mock_hint")}</p>`;
+    return;
+  }
+
+  const needsKey = provider === "open_ai" || provider === "anthropic";
+  const keySet = provider === "open_ai" ? snapshot.openai_key_set : snapshot.anthropic_key_set;
+  const current = providerSettingsFor(snapshot.settings, provider);
+
+  configEl.innerHTML = `
+    ${
+      needsKey
+        ? field(
+            t("ai.api_key_label"),
+            `<input type="password" id="ai-api-key-input" placeholder="${keySet ? t("ai.api_key.set_placeholder") : t("ai.api_key.unset_placeholder")}" />`,
+          )
+        : ""
+    }
+    ${field(t("ai.base_url_label"), `<input type="text" id="ai-base-url-input" placeholder="${t("ai.base_url.default_placeholder")}" value="${current.base_url ?? ""}" />`)}
+    ${field(t("ai.model_label"), `<input type="text" id="ai-model-input" list="ai-model-list" value="${current.model ?? ""}" />`)}
+    <datalist id="ai-model-list"></datalist>
+    <button id="ai-fetch-models-button" type="button">${t("ai.fetch_models_button")}</button>
+    <div id="ai-fetch-models-result"></div>
+  `;
+
+  if (needsKey) {
+    configEl.querySelector<HTMLInputElement>("#ai-api-key-input")!.addEventListener("change", (e) => {
+      const value = (e.target as HTMLInputElement).value;
+      if (value) void invoke("set_provider_api_key", { provider, apiKey: value });
+    });
+  }
+  configEl.querySelector<HTMLInputElement>("#ai-base-url-input")!.addEventListener("change", (e) => {
+    invoke("set_provider_base_url", { provider, baseUrl: (e.target as HTMLInputElement).value });
+  });
+  configEl.querySelector<HTMLInputElement>("#ai-model-input")!.addEventListener("change", (e) => {
+    invoke("set_provider_model", { provider, model: (e.target as HTMLInputElement).value });
+  });
+
+  const resultEl = configEl.querySelector<HTMLElement>("#ai-fetch-models-result")!;
+  configEl
+    .querySelector<HTMLButtonElement>("#ai-fetch-models-button")!
+    .addEventListener("click", async (e) => {
+      const button = e.target as HTMLButtonElement;
+      button.disabled = true;
+      resultEl.innerHTML = `<p>${t("ai.fetch_models.loading")}</p>`;
+      try {
+        const result = await invoke<ModelListResult>("fetch_provider_models", { provider });
+        if (result.error) {
+          resultEl.innerHTML = `<p class="error">${t("ai.fetch_models.error", { error: result.error })}</p>`;
+        } else {
+          const datalist = configEl.querySelector<HTMLDataListElement>("#ai-model-list")!;
+          datalist.innerHTML = result.models
+            .map((m) => `<option value="${m.id}">${m.display_name}</option>`)
+            .join("");
+          resultEl.innerHTML = `<p>${t("ai.fetch_models.success", { count: result.models.length })}</p>`;
+        }
+      } catch (err) {
+        resultEl.innerHTML = `<p class="error">${String(err)}</p>`;
+      } finally {
+        button.disabled = false;
+      }
+    });
 }
 
 async function renderUpdate(): Promise<void> {
