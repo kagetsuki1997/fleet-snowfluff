@@ -6,10 +6,10 @@
 
 ## 2. `ai` crate: types, trait, prompt assembly
 
-- [ ] 2.1 Define `Message`, `Response`/`StreamChunk`, `Persona`, and `ProviderKind` types (with `Serialize`/`Deserialize` where needed for IPC); verify the crate compiles with unit tests for basic (de)serialization round-trips.
-- [ ] 2.2 Define the `AiProvider` trait with a streaming chat method; verify a trivial in-crate implementation compiles against it.
-- [ ] 2.3 Implement persona YAML loading with graceful fallback on parse failure, mirroring `fleet-snowfluff-core::config::sanitize`'s pure-function style; verify with unit tests covering the `ai-persona` spec's scenarios (no user file, malformed file, corrected file).
-- [ ] 2.4 Implement prompt assembly (persona + a capped recent-turn history window + the new user message → final request messages), selecting few-shot examples by `response_language`; verify with unit tests covering `ai-provider`'s "Bounded conversation context" requirement.
+- [x] 2.1 Define `Message`, `Response`/`StreamChunk`, `Persona`, and `ProviderKind` types (with `Serialize`/`Deserialize` where needed for IPC); verify the crate compiles with unit tests for basic (de)serialization round-trips. (`Response` folded into `Message`/`StreamChunk`+the caller assembling the final text from chunks; no separate type needed.)
+- [x] 2.2 Define the `AiProvider` trait with a streaming chat method; verify a trivial in-crate implementation compiles against it. Used `async-trait` to keep the trait object-safe (`Box<dyn AiProvider>`), `futures-core`/`futures-util` for the boxed `Stream` return type.
+- [x] 2.3 Implement persona YAML loading with graceful fallback on parse failure, mirroring `fleet-snowfluff-core::config::sanitize`'s pure-function style; verify with unit tests covering the `ai-persona` spec's scenarios (no user file, malformed file, corrected file). Also verified the real, committed `personas/aemeath.yaml` parses successfully against the `Persona` struct.
+- [x] 2.4 Implement prompt assembly (persona + a capped recent-turn history window + the new user message → final request messages), selecting few-shot examples by `response_language`; verify with unit tests covering `ai-provider`'s "Bounded conversation context" requirement. `Auto` response-language resolution is left to the caller (app crate, via `core`'s detected UI language) since resolving it is `core`'s concern, not this crate's — `assemble_messages` always takes an already-concrete `Language`.
 
 ## 3. `ai` crate: provider implementations
 

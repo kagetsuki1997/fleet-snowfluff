@@ -9,10 +9,13 @@ license    = "MIT"
 repository = "https://github.com/kagetsuki1997/fleet-snowfluff"
 
 [workspace.dependencies]
+async-trait = "0.1.92"
 core-foundation = "0.10"
 core-graphics = "0.25"
 device_query = "4"
 env_logger = "0.11"
+futures-core = "0.3.34"
+futures-util = "0.3.34"
 gdk = "0.18"
 gtk = "0.18"
 image = { version = "0.25", default-features = false, features = ["gif"] }
