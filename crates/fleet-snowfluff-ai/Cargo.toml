@@ -1,0 +1,16 @@
+[package]
+name                 = "fleet-snowfluff-ai"
+version.workspace    = true
+edition.workspace    = true
+license.workspace    = true
+repository.workspace = true
+description          = "AI provider abstraction, persona loading, and prompt assembly for Fleet Snowfluff"
+
+[dependencies]
+reqwest      = { workspace = true }
+serde        = { workspace = true }
+serde-saphyr = { workspace = true }
+serde_json   = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
