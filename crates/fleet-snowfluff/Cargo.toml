@@ -18,6 +18,7 @@ tauri-build = { workspace = true }
 
 [dependencies]
 device_query           = { workspace = true }
+fleet-snowfluff-ai     = { path = "../fleet-snowfluff-ai" }
 fleet-snowfluff-core   = { path = "../fleet-snowfluff-core" }
 image                  = { workspace = true }
 log                    = { workspace = true }

@@ -1349,6 +1349,7 @@ dependencies = [
  "core-graphics",
  "device_query",
  "env_logger",
+ "fleet-snowfluff-ai",
  "fleet-snowfluff-core",
  "gdk",
  "gtk",

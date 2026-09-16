@@ -1,7 +1,10 @@
+pub mod ai_config_store;
 pub mod animation;
 pub mod assets;
 pub mod commands;
 pub mod config_store;
+pub mod persona_store;
+pub mod secrets_store;
 // Pet windows on Windows render via GDI instead (platform::windows's
 // LayeredSurface) -- see that module's doc comment for why. Nothing on
 // Windows references this module at all.
