@@ -13,11 +13,11 @@
 
 ## 3. `ai` crate: provider implementations
 
-- [ ] 3.1 Implement `OpenAiCompatible` as a `build_request`/`parse_response`/`parse_chunk` pure-function split plus a thin HTTP-call glue function; verify with fixture-based unit tests (success, error, malformed body) and a manual `#[ignore]`d integration test gated on a real API key (never run in CI).
-- [ ] 3.2 Implement `Anthropic` with the same split, using `x-api-key`/`anthropic-version` headers and its distinct request/response shape; verify with fixture-based unit tests and a manual `#[ignore]`d integration test.
-- [ ] 3.3 Implement `Ollama` with the same split, no auth, targeting a local endpoint; verify with fixture-based unit tests and a manual `#[ignore]`d integration test requiring a locally running Ollama.
-- [ ] 3.4 Implement `Mock`, echoing the input in artificially-delayed chunks to exercise the streaming path; verify with a unit test asserting the echoed content and that more than one chunk is produced.
-- [ ] 3.5 Implement live model-listing for OpenAI (`GET /v1/models`), Anthropic (`GET /v1/models`, paginated), and Ollama (`GET /api/tags`); verify with fixture-based unit tests parsing sample list responses, per `ai-provider`'s "Live model listing" requirement.
+- [x] 3.1 Implement `OpenAiCompatible` as a `build_request`/`parse_response`/`parse_chunk` pure-function split plus a thin HTTP-call glue function; verify with fixture-based unit tests (success, error, malformed body) and a manual `#[ignore]`d integration test gated on a real API key (never run in CI).
+- [x] 3.2 Implement `Anthropic` with the same split, using `x-api-key`/`anthropic-version` headers and its distinct request/response shape; verify with fixture-based unit tests and a manual `#[ignore]`d integration test.
+- [x] 3.3 Implement `Ollama` with the same split, no auth, targeting a local endpoint; verify with fixture-based unit tests and a manual `#[ignore]`d integration test requiring a locally running Ollama.
+- [x] 3.4 Implement `Mock`, echoing the input in artificially-delayed chunks to exercise the streaming path; verify with a unit test asserting the echoed content and that more than one chunk is produced.
+- [x] 3.5 Implement live model-listing for OpenAI (`GET /v1/models`), Anthropic (`GET /v1/models`, paginated), and Ollama (`GET /api/tags`); verify with fixture-based unit tests parsing sample list responses, per `ai-provider`'s "Live model listing" requirement. (Built directly into each provider's `list_models`/`parse_model_list` in 3.1-3.3 rather than as a separate pass.) A shared `providers::http_stream` glue module (send → check status → line-buffer → parse) factors out the one non-pure part common to all three real providers, keeping each provider file itself down to pure `build_*`/`parse_*` functions plus a thin trait impl.
 
 ## 4. App crate: config & secrets storage
 

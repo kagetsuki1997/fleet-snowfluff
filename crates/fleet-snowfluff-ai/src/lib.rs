@@ -10,7 +10,9 @@ pub mod message;
 pub mod persona;
 pub mod prompt;
 pub mod provider;
+pub mod providers;
 
 pub use message::{Message, ModelInfo, ProviderError, ProviderKind, Role, StreamChunk};
 pub use persona::{FewShotExample, Language, Persona, PersonaParseError, ResponseLanguage};
 pub use provider::{AiProvider, ChatStream};
+pub use providers::{Anthropic, Mock, Ollama, OpenAiCompatible};
