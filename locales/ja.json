@@ -61,6 +61,13 @@
   "ai.fetch_models.error": "モデルの取得に失敗しました：{error}",
   "ai.persona_warning": "persona.yaml の読み込みに失敗しました：{error}",
 
+  "chat.input_placeholder": "何か話しかけてみて…",
+  "chat.send_button": "送信",
+  "chat.stop_button": "停止",
+  "chat.new_chat_button": "新しいチャット",
+  "chat.not_ready.disabled": "AI 機能は現在無効です。「設定 → AI」で有効にしてください。",
+  "chat.not_ready.no_provider": "AI プロバイダーが未設定です。「設定 → AI」で設定してください。",
+
   "language.zh_hant": "繁体字中国語",
   "language.zh_hans": "簡体字中国語",
   "language.zh": "中国語",

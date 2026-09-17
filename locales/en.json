@@ -61,6 +61,13 @@
   "ai.fetch_models.error": "Failed to fetch models: {error}",
   "ai.persona_warning": "persona.yaml failed to load: {error}",
 
+  "chat.input_placeholder": "Say something…",
+  "chat.send_button": "Send",
+  "chat.stop_button": "Stop",
+  "chat.new_chat_button": "New Chat",
+  "chat.not_ready.disabled": "AI features are disabled. Enable them in Settings → AI.",
+  "chat.not_ready.no_provider": "No AI provider configured. Set one up in Settings → AI.",
+
   "language.zh_hant": "Traditional Chinese",
   "language.zh_hans": "Simplified Chinese",
   "language.zh": "Chinese",

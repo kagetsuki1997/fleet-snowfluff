@@ -7,6 +7,7 @@
 
 pub mod credentials;
 pub mod limits;
+pub mod log;
 pub mod message;
 pub mod persona;
 pub mod prompt;
@@ -15,6 +16,7 @@ pub mod providers;
 pub mod settings;
 
 pub use credentials::ProviderCredentials;
+pub use log::{LogEntry, LogRole};
 pub use message::{Message, ModelInfo, ProviderError, ProviderKind, Role, StreamChunk};
 pub use persona::{FewShotExample, Language, Persona, PersonaParseError, ResponseLanguage};
 pub use provider::{AiProvider, ChatStream};

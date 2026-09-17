@@ -61,6 +61,13 @@
   "ai.fetch_models.error": "모델을 가져오지 못했습니다: {error}",
   "ai.persona_warning": "persona.yaml 로드 실패: {error}",
 
+  "chat.input_placeholder": "무슨 말이든 해보세요…",
+  "chat.send_button": "전송",
+  "chat.stop_button": "중지",
+  "chat.new_chat_button": "새 대화",
+  "chat.not_ready.disabled": "AI 기능이 비활성화되어 있습니다. '설정 → AI'에서 활성화하세요.",
+  "chat.not_ready.no_provider": "설정된 AI 제공자가 없습니다. '설정 → AI'에서 설정하세요.",
+
   "language.zh_hant": "번체 중국어",
   "language.zh_hans": "간체 중국어",
   "language.zh": "중국어",

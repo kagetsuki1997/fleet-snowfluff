@@ -145,7 +145,7 @@ pub struct ModelListResult {
     error: Option<String>,
 }
 
-fn build_provider(
+pub(crate) fn build_provider(
     settings: &AiSettings,
     credentials: &ProviderCredentials,
     provider: ProviderKind,

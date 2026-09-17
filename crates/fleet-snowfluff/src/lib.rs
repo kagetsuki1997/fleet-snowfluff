@@ -2,6 +2,9 @@ pub mod ai_commands;
 pub mod ai_config_store;
 pub mod animation;
 pub mod assets;
+pub mod chat_commands;
+pub mod chat_log_store;
+pub mod chat_window;
 pub mod commands;
 pub mod config_store;
 pub mod persona_store;
@@ -74,6 +77,10 @@ pub fn run() {
             ai_commands::set_provider_base_url,
             ai_commands::set_provider_api_key,
             ai_commands::fetch_provider_models,
+            chat_commands::get_chat_state,
+            chat_commands::send_chat_message,
+            chat_commands::stop_generation,
+            chat_commands::new_chat_session,
         ])
         .setup(|app| {
             // Always on (not just debug builds) -- otherwise a release
@@ -182,6 +189,7 @@ pub fn run() {
             app.manage(Mutex::new(config));
             app.manage(Mutex::new(ai_settings));
             app.manage(Mutex::new(credentials));
+            app.manage(chat_commands::ChatRuntimeState::default());
             app.manage(Mutex::<Option<tauri_plugin_updater::Update>>::new(None));
             tray::build(&app_handle)?;
             updater::spawn_startup_check(app_handle.clone());

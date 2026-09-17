@@ -1,6 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-shell";
 import "@picocss/pico/css/pico.min.css";
 import "./style.css";
@@ -70,6 +71,29 @@ interface ModelListResult {
   error: string | null;
 }
 
+type LogRole = "user" | "assistant" | "error";
+
+interface LogEntry {
+  role: LogRole;
+  content: string;
+  timestamp: string;
+}
+
+type NotReadyReason = "disabled" | "no_provider";
+
+interface ChatStateSnapshot {
+  entries: LogEntry[];
+  is_pending: boolean;
+  partial_text: string;
+  ai_ready: boolean;
+  not_ready_reason: NotReadyReason | null;
+}
+
+type ChatEvent =
+  | { type: "chunk"; delta: string }
+  | { type: "done"; content: string }
+  | { type: "error"; message: string };
+
 const UI_LANGUAGES = ["zh-hant", "zh-hans", "en", "ja", "ko"];
 
 let dict: Dictionary = {};
@@ -102,6 +126,16 @@ interface UpdateInfo {
 let pendingUpdate: UpdateInfo | null = null;
 
 async function main(): Promise<void> {
+  // The chat window shares this same index.html/main.ts entry point
+  // (chat_window.rs's own comment explains why: WebviewUrl::App is
+  // only reliable for the literal "index.html" path with this
+  // project's custom-protocol setup) -- branch on the window's own
+  // label rather than trying to ship a second HTML page.
+  if (getCurrentWindow().label === "chat") {
+    await mainChat();
+    return;
+  }
+
   try {
     await loadDictionary();
     pendingUpdate = await invoke<UpdateInfo | null>("pending_update");
@@ -600,6 +634,149 @@ async function renderAbout(): Promise<void> {
       open(link.href);
     });
   }
+}
+
+function escapeHtml(text: string): string {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function entryHtml(entry: LogEntry): string {
+  if (entry.role === "error") {
+    return `<p class="chat-entry chat-entry-error">⚠️ ${escapeHtml(entry.content)}</p>`;
+  }
+  return `<p class="chat-entry chat-entry-${entry.role}">${escapeHtml(entry.content)}</p>`;
+}
+
+async function mainChat(): Promise<void> {
+  try {
+    await loadDictionary();
+    await renderChatWindow();
+  } catch (err) {
+    console.error("chat window failed to initialize:", err);
+    document.querySelector<HTMLDivElement>("#app")!.innerHTML =
+      `<p class="error">${String(err)}</p>`;
+  }
+}
+
+async function renderChatWindow(): Promise<void> {
+  const app = document.querySelector<HTMLDivElement>("#app")!;
+  app.innerHTML = `
+    <main class="container-fluid chat-window">
+      <div id="chat-transcript" class="chat-transcript"></div>
+      <div id="chat-status"></div>
+      <form id="chat-form" class="chat-form">
+        <input type="text" id="chat-input" autocomplete="off" placeholder="${t("chat.input_placeholder")}" />
+        <button type="submit" id="chat-send-button">${t("chat.send_button")}</button>
+        <button type="button" id="chat-stop-button" class="secondary" hidden>${t("chat.stop_button")}</button>
+      </form>
+      <button type="button" id="chat-new-button" class="secondary outline">${t("chat.new_chat_button")}</button>
+    </main>
+  `;
+
+  const transcriptEl = app.querySelector<HTMLElement>("#chat-transcript")!;
+  const statusEl = app.querySelector<HTMLElement>("#chat-status")!;
+  const form = app.querySelector<HTMLFormElement>("#chat-form")!;
+  const input = app.querySelector<HTMLInputElement>("#chat-input")!;
+  const sendButton = app.querySelector<HTMLButtonElement>("#chat-send-button")!;
+  const stopButton = app.querySelector<HTMLButtonElement>("#chat-stop-button")!;
+  const newButton = app.querySelector<HTMLButtonElement>("#chat-new-button")!;
+
+  // The canonical transcript, replaced wholesale by every `refresh()`.
+  // A just-sent message is appended here optimistically (not through a
+  // refresh) so the streamed reply's partial text never has to
+  // reconcile against a server snapshot that might already be ahead of
+  // it -- see chat_commands.rs's own note on this simplification.
+  let committedEntries: LogEntry[] = [];
+
+  function renderTranscript(pendingText: string | null): void {
+    const pendingHtml =
+      pendingText !== null
+        ? `<p class="chat-entry chat-entry-assistant chat-entry-pending">${escapeHtml(pendingText)}</p>`
+        : "";
+    transcriptEl.innerHTML = committedEntries.map(entryHtml).join("") + pendingHtml;
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
+
+  function setPendingUi(pending: boolean): void {
+    input.disabled = pending;
+    sendButton.hidden = pending;
+    stopButton.hidden = !pending;
+  }
+
+  function updateReadiness(ready: boolean, reason: NotReadyReason | null): void {
+    if (!ready) {
+      statusEl.innerHTML = reason ? `<p class="hint">${t(`chat.not_ready.${reason}`)}</p>` : "";
+      input.disabled = true;
+      sendButton.disabled = true;
+    } else {
+      statusEl.innerHTML = "";
+      sendButton.disabled = false;
+    }
+  }
+
+  // A generation that outlives this window (started before it was
+  // (re)opened, or before a close/reopen) has no channel this window
+  // instance ever attached to -- Tauri's Channel<T> is scoped to the
+  // invocation that created it, with no reattachment mechanism. Rather
+  // than inventing one, a still-pending state just polls this snapshot
+  // until it resolves; the common case (window stays open throughout)
+  // never touches this path at all, since the channel handles it live.
+  async function refresh(): Promise<void> {
+    const state = await invoke<ChatStateSnapshot>("get_chat_state");
+    committedEntries = state.entries;
+    renderTranscript(state.is_pending ? state.partial_text : null);
+    setPendingUi(state.is_pending);
+    updateReadiness(state.ai_ready, state.not_ready_reason);
+    if (state.is_pending) {
+      setTimeout(() => void refresh(), 1000);
+    }
+  }
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const message = input.value.trim();
+    if (!message || sendButton.disabled) return;
+    input.value = "";
+
+    committedEntries = [
+      ...committedEntries,
+      { role: "user", content: message, timestamp: new Date().toISOString() },
+    ];
+    renderTranscript("");
+    setPendingUi(true);
+
+    const channel = new Channel<ChatEvent>();
+    let partial = "";
+    channel.onmessage = (event) => {
+      if (event.type === "chunk") {
+        partial += event.delta;
+        renderTranscript(partial);
+      } else {
+        // "done" and "error" both resolve to the same next step: the
+        // backend has already appended the final entry (assistant
+        // reply or error) to the session log, so re-fetch the
+        // canonical state rather than trying to reconstruct it here.
+        void refresh();
+      }
+    };
+
+    invoke("send_chat_message", { channel, message }).catch((err: unknown) => {
+      setPendingUi(false);
+      statusEl.innerHTML = `<p class="error">${String(err)}</p>`;
+    });
+  });
+
+  stopButton.addEventListener("click", () => {
+    void invoke("stop_generation").then(() => refresh());
+  });
+
+  newButton.addEventListener("click", () => {
+    void invoke("new_chat_session").then(() => refresh());
+  });
+
+  await refresh();
 }
 
 main();

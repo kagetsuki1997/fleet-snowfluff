@@ -573,8 +573,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
+ "js-sys",
  "num-traits",
  "serde",
+ "wasm-bindgen",
  "windows-link 0.2.1",
 ]
 
@@ -1345,12 +1347,14 @@ dependencies = [
 name = "fleet-snowfluff"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "core-foundation 0.10.1",
  "core-graphics",
  "device_query",
  "env_logger",
  "fleet-snowfluff-ai",
  "fleet-snowfluff-core",
+ "futures-util",
  "gdk",
  "gtk",
  "image",
@@ -1370,6 +1374,7 @@ dependencies = [
  "tauri-plugin-log",
  "tauri-plugin-shell",
  "tauri-plugin-updater",
+ "tokio",
  "wgpu",
  "windows 0.61.3",
  "winreg 0.56.0",

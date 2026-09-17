@@ -223,3 +223,68 @@ body {
   margin: -0.5rem 0 0;
   word-break: break-word;
 }
+
+.chat-window {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0.75rem;
+  gap: 0.5rem;
+  box-sizing: border-box;
+}
+
+.chat-transcript {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.chat-entry {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 1rem;
+  max-width: 85%;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.chat-entry-user {
+  align-self: flex-end;
+  background: var(--pico-primary);
+  color: var(--pico-primary-inverse);
+}
+
+.chat-entry-assistant {
+  align-self: flex-start;
+  background: var(--pico-secondary-background);
+}
+
+.chat-entry-pending {
+  opacity: 0.75;
+}
+
+.chat-entry-error {
+  align-self: stretch;
+  background: none;
+  border: 1px solid var(--pico-del-color);
+  color: var(--pico-del-color);
+}
+
+.chat-form {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.chat-form input {
+  flex: 1;
+  margin: 0;
+}
+
+.chat-form button {
+  flex-shrink: 0;
+  margin: 0;
+  width: auto;
+}

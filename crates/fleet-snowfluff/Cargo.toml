@@ -17,9 +17,11 @@ shadow-rs   = { workspace = true, features = ["build"] }
 tauri-build = { workspace = true }
 
 [dependencies]
+chrono                 = { workspace = true }
 device_query           = { workspace = true }
 fleet-snowfluff-ai     = { path = "../fleet-snowfluff-ai" }
 fleet-snowfluff-core   = { path = "../fleet-snowfluff-core" }
+futures-util           = { workspace = true }
 image                  = { workspace = true }
 log                    = { workspace = true }
 pollster               = { workspace = true }
@@ -34,6 +36,7 @@ tauri-plugin-autostart = { workspace = true }
 tauri-plugin-log       = { workspace = true }
 tauri-plugin-shell     = { workspace = true }
 tauri-plugin-updater   = { workspace = true }
+tokio                  = { workspace = true }
 wgpu                   = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]

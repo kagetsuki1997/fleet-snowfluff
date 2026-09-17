@@ -61,6 +61,13 @@
   "ai.fetch_models.error": "取得模型列表失敗：{error}",
   "ai.persona_warning": "persona.yaml 載入失敗：{error}",
 
+  "chat.input_placeholder": "說點什麼吧…",
+  "chat.send_button": "傳送",
+  "chat.stop_button": "停止",
+  "chat.new_chat_button": "開新對話",
+  "chat.not_ready.disabled": "AI 功能目前已停用，請至「設定 → AI」啟用。",
+  "chat.not_ready.no_provider": "尚未設定 AI 提供者，請至「設定 → AI」設定。",
+
   "language.zh_hant": "繁體中文",
   "language.zh_hans": "簡體中文",
   "language.zh": "中文",
