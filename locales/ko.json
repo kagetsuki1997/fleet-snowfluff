@@ -9,6 +9,7 @@
   "menu.quit": "종료",
 
   "settings.window_title": "Fleet Snowfluff 설정",
+  "chat.window_title": "Fleet Snowfluff 채팅",
   "settings.tab.personalization": "개인화",
   "settings.tab.ai": "AI",
   "settings.tab.update": "업데이트",

@@ -4,11 +4,13 @@ pub mod animation;
 pub mod assets;
 pub mod chat_commands;
 pub mod chat_log_store;
+pub mod chat_pause;
 pub mod chat_window;
 pub mod commands;
 pub mod config_store;
 pub mod persona_store;
 pub mod secrets_store;
+pub mod status_bubble;
 // Pet windows on Windows render via GDI instead (platform::windows's
 // LayeredSurface) -- see that module's doc comment for why. Nothing on
 // Windows references this module at all.
@@ -190,6 +192,7 @@ pub fn run() {
             app.manage(Mutex::new(ai_settings));
             app.manage(Mutex::new(credentials));
             app.manage(chat_commands::ChatRuntimeState::default());
+            app.manage(chat_pause::ChatPauseState::default());
             app.manage(Mutex::<Option<tauri_plugin_updater::Update>>::new(None));
             tray::build(&app_handle)?;
             updater::spawn_startup_check(app_handle.clone());
@@ -203,18 +206,30 @@ pub fn run() {
                 std::thread::sleep(Duration::from_millis(MOVE_INTERVAL_MS as u64));
                 let handle = tick_handle.clone();
                 let result = tick_handle.run_on_main_thread(move || {
-                    let pending_quick_menu = {
+                    let actions = {
                         let state = handle.state::<Mutex<PetManager>>();
                         let mut manager = state.lock().unwrap();
                         manager.tick(MOVE_INTERVAL_MS)
                         // lock released at the end of this block --
-                        // quick_menu::popup below needs to read
-                        // PetManager state itself (see tick's doc
-                        // comment), which would deadlock if it ran
-                        // while still holding this same lock.
+                        // quick_menu::popup and opening the chat window
+                        // below both need to read PetManager state
+                        // themselves (see tick's doc comment), which
+                        // would deadlock if either ran while still
+                        // holding this same lock.
                     };
-                    if let Some(window) = pending_quick_menu {
+                    if let Some(window) = actions.pending_quick_menu {
                         quick_menu::popup(&handle, &window);
+                    }
+                    if actions.open_chat {
+                        let title = {
+                            let state = handle.state::<Mutex<PetManager>>();
+                            let manager = state.lock().unwrap();
+                            fleet_snowfluff_core::dictionary(manager.ui_language())
+                                .get("chat.window_title")
+                                .cloned()
+                                .unwrap_or_default()
+                        };
+                        chat_window::open_or_focus_chat(&handle, &title);
                     }
                 });
                 if result.is_err() {

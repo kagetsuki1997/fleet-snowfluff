@@ -21,17 +21,62 @@ use fleet_snowfluff_ai::{
 use futures_util::StreamExt;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
 
-use crate::{ai_commands, chat_log_store, manager::PetManager, persona_store};
+use crate::{
+    ai_commands, chat_log_store, chat_pause, chat_window, manager::PetManager, persona_store,
+    status_bubble,
+};
 
 pub struct PendingGeneration {
     handle: tokio::task::JoinHandle<()>,
     partial_text: Arc<Mutex<String>>,
 }
 
+/// What the status bubble should show once a generation resolves while
+/// the chat window isn't focused to see it happen
+/// (`ai-chat`'s "Status bubble").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnreadKind {
+    Reply,
+    Failure,
+}
+
 #[derive(Default)]
 pub struct ChatRuntimeState {
     session_path: Mutex<Option<PathBuf>>,
     pending: Mutex<Option<PendingGeneration>>,
+    unread: Mutex<Option<UnreadKind>>,
+}
+
+impl ChatRuntimeState {
+    pub fn is_pending(&self) -> bool { self.pending.lock().unwrap().is_some() }
+
+    pub fn unread(&self) -> Option<UnreadKind> { *self.unread.lock().unwrap() }
+
+    pub fn clear_unread(&self) { *self.unread.lock().unwrap() = None; }
+}
+
+/// Called from every point where "is a generation pending" or "is
+/// there an unread result" could have changed: keeps the pause
+/// (`chat_pause::recompute`) and the status bubble's visibility
+/// (`status_bubble::sync`) both in sync with the same underlying
+/// state, rather than each call site remembering to update both.
+fn on_chat_activity_changed(app: &AppHandle) {
+    chat_pause::recompute(app);
+    status_bubble::sync(app);
+}
+
+/// Marks `kind` as unread unless the chat window is currently focused
+/// -- a user actively watching the reply arrive doesn't need a bubble
+/// telling them it arrived.
+fn mark_unread_unless_focused(app: &AppHandle, kind: UnreadKind) {
+    let is_focused = app
+        .get_webview_window(chat_window::CHAT_WINDOW_LABEL)
+        .and_then(|w| w.is_focused().ok())
+        .unwrap_or(false);
+    if !is_focused {
+        *app.state::<ChatRuntimeState>().unread.lock().unwrap() = Some(kind);
+        on_chat_activity_changed(app);
+    }
 }
 
 #[derive(Clone, serde::Serialize)]
@@ -191,6 +236,7 @@ pub async fn send_chat_message(
     });
 
     *chat_state.pending.lock().unwrap() = Some(PendingGeneration { handle, partial_text });
+    on_chat_activity_changed(&app);
     Ok(())
 }
 
@@ -234,6 +280,7 @@ async fn run_generation(
     );
     channel.send(ChatEvent::Done { content: final_text }).ok();
     clear_pending(&app);
+    mark_unread_unless_focused(&app, UnreadKind::Reply);
 }
 
 fn finish_with_error(
@@ -248,10 +295,12 @@ fn finish_with_error(
     );
     channel.send(ChatEvent::Error { message: message.to_string() }).ok();
     clear_pending(app);
+    mark_unread_unless_focused(app, UnreadKind::Failure);
 }
 
 fn clear_pending(app: &AppHandle) {
     *app.state::<ChatRuntimeState>().pending.lock().unwrap() = None;
+    on_chat_activity_changed(app);
 }
 
 /// Explicit cancellation (`ai-chat`'s "Explicit stop cancels"). Aborts
@@ -259,10 +308,11 @@ fn clear_pending(app: &AppHandle) {
 /// completion code, so nothing is appended to the log for this turn,
 /// matching the spec exactly ("no further content is appended").
 #[tauri::command]
-pub fn stop_generation(chat_state: State<ChatRuntimeState>) {
+pub fn stop_generation(app: AppHandle, chat_state: State<ChatRuntimeState>) {
     if let Some(pending) = chat_state.pending.lock().unwrap().take() {
         pending.handle.abort();
     }
+    on_chat_activity_changed(&app);
 }
 
 /// Starts a fresh session, implicitly cancelling any pending
@@ -273,6 +323,8 @@ pub fn new_chat_session(app: AppHandle, chat_state: State<ChatRuntimeState>) {
     if let Some(pending) = chat_state.pending.lock().unwrap().take() {
         pending.handle.abort();
     }
+    chat_state.clear_unread();
+    on_chat_activity_changed(&app);
     if let Some(new_path) = chat_log_store::create_new_session(&app) {
         *chat_state.session_path.lock().unwrap() = Some(new_path);
     }

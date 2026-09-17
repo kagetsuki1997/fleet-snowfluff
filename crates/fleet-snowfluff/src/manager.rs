@@ -23,8 +23,30 @@ use crate::{
     voice::VoicePlayer,
 };
 
+/// What `PetManager::tick` found this tick that the caller needs to
+/// act on *after* releasing the `Mutex<PetManager>` lock `tick` runs
+/// under (both a quick-menu popup and opening the chat window read
+/// manager state to build themselves, which would deadlock a
+/// non-reentrant `std::sync::Mutex` if done while still holding it).
+#[derive(Default)]
+pub struct TickActions {
+    pub pending_quick_menu: Option<tauri::window::Window>,
+    /// Set on the second stationary tap of a double-click
+    /// (`ai-chat`'s "Chat opened by double-click").
+    pub open_chat: bool,
+}
+
 const MIN_INSTANCES: usize = fleet_snowfluff_core::swarm::MIN_INSTANCES;
 const MAX_INSTANCES: usize = fleet_snowfluff_core::swarm::MAX_INSTANCES;
+
+/// Movement (logical px) a press-to-release can drift by and still
+/// count as a stationary tap rather than a real drag, for double-click
+/// detection. Tunable -- see design.md's open question on real-hardware
+/// tuning for these two constants.
+const TAP_MOVEMENT_THRESHOLD_PX: f64 = 6.0;
+/// Maximum gap between two stationary taps on the same pet to count as
+/// a double-click.
+const DOUBLE_CLICK_WINDOW: std::time::Duration = std::time::Duration::from_millis(400);
 
 static NEXT_PET_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -209,6 +231,15 @@ pub struct PetManager {
     #[cfg(target_os = "linux")]
     mouse_poller: Option<crate::platform::linux::MousePoller>,
     drag_owner: Option<usize>,
+    /// Cursor position when the current drag started, compared against
+    /// the release position to tell a real drag from a stationary tap
+    /// (`ai-chat`'s "Chat opened by double-click" -- a tap is a
+    /// candidate for the double-click gesture, a real drag never is).
+    drag_start_cursor: (f64, f64),
+    /// The most recent stationary tap (which pet, when), for pairing
+    /// with the next one into a double-click. `None` once paired,
+    /// timed out, or invalidated by an intervening real drag.
+    last_tap: Option<(usize, std::time::Instant)>,
     was_left_down: bool,
     was_right_down: bool,
     tick_count: u64,
@@ -278,6 +309,8 @@ impl PetManager {
             #[cfg(target_os = "linux")]
             mouse_poller,
             drag_owner: None,
+            drag_start_cursor: (0.0, 0.0),
+            last_tap: None,
             was_left_down: false,
             was_right_down: false,
             tick_count: 0,
@@ -540,6 +573,15 @@ impl PetManager {
 
     pub fn set_ui_language(&mut self, language: UiLanguage) { self.ui_language = language; }
 
+    /// The first pet instance's current logical position -- the only
+    /// one the status bubble ever anchors to (`ai-chat`'s "Status
+    /// bubble", anchored to `pets[0]`; stable across any live
+    /// instance-count change, since `set_instance_count` only ever
+    /// pushes/pops from the end of `pets`).
+    pub fn primary_pet_position(&self) -> Option<(f64, f64)> {
+        self.pets.first().map(|pet| (pet.state.x, pet.state.y))
+    }
+
     /// The active UI language's locale dictionary as raw JSON, for the
     /// settings webview to `JSON.parse` itself (task 11.2) -- the
     /// dictionary is the single source of truth for both Rust and the
@@ -569,13 +611,15 @@ impl PetManager {
     /// once (position + left-button) for both follow-mouse targeting and
     /// drag detection (task 6.6 -- Tauri's windowless Window has no
     /// click events, see design.md), advances every pet, and renders.
-    /// Returns the pet window a quick menu should open on, if any --
-    /// the caller must show it only *after* releasing the `PetManager`
-    /// lock this method runs under (see the doc comment at the
-    /// right-click detection site below for why).
-    pub fn tick(&mut self, dt_ms: i64) -> Option<tauri::window::Window> {
+    /// Returns what the caller needs to act on -- a quick-menu popup
+    /// and/or opening the chat window (double-click) -- only *after*
+    /// releasing the `PetManager` lock this method runs under (see the
+    /// doc comment at the right-click detection site below for why).
+    pub fn tick(&mut self, dt_ms: i64) -> TickActions {
         #[cfg(not(target_os = "windows"))]
-        let gpu: &Gpu = self.gpu.as_ref()?;
+        let Some(gpu): Option<&Gpu> = self.gpu.as_ref() else {
+            return TickActions::default();
+        };
         #[cfg(target_os = "windows")]
         let gpu: &Gpu = &();
 
@@ -632,18 +676,46 @@ impl PetManager {
         // this same method is called under is still held, would deadlock
         // a non-reentrant `std::sync::Mutex` against itself.
         let mut pending_quick_menu = None;
+        let mut open_chat = false;
 
         if self.mouse_available() && !self.click_through {
             if left_pressed_this_tick && self.drag_owner.is_none() {
                 if let Some(idx) = self.pets.iter().position(|p| p.bounds_contains(cursor)) {
                     self.pets[idx].start_drag(cursor);
                     self.drag_owner = Some(idx);
+                    self.drag_start_cursor = cursor;
                     self.voice.play_random();
                 }
             } else if left_released_this_tick {
                 if let Some(idx) = self.drag_owner.take() {
                     if let Some(pet) = self.pets.get_mut(idx) {
                         pet.stop_drag();
+                    }
+
+                    let dx = cursor.0 - self.drag_start_cursor.0;
+                    let dy = cursor.1 - self.drag_start_cursor.1;
+                    let moved = dx.hypot(dy);
+
+                    if moved < TAP_MOVEMENT_THRESHOLD_PX {
+                        // A stationary tap -- a candidate half of a
+                        // double-click, distinct from an actual drag
+                        // (which never touches `last_tap` at all, so it
+                        // can never accidentally complete a pair).
+                        let now = std::time::Instant::now();
+                        let is_double_click = self.last_tap.is_some_and(|(last_idx, last_time)| {
+                            last_idx == idx && now.duration_since(last_time) < DOUBLE_CLICK_WINDOW
+                        });
+                        if is_double_click {
+                            open_chat = true;
+                            self.last_tap = None;
+                        } else {
+                            self.last_tap = Some((idx, now));
+                        }
+                    } else {
+                        // A real drag invalidates any pending tap --
+                        // dragging, releasing, then tapping again isn't
+                        // a double-click.
+                        self.last_tap = None;
                     }
                 }
             }
@@ -734,6 +806,13 @@ impl PetManager {
             if Some(idx) == self.drag_owner {
                 pet.drag_to(cursor);
                 pet.apply_drag_position(gpu);
+                // The status bubble only ever anchors to pets[0], and
+                // this is the only way that pet can move at all while
+                // paused (ai-chat's "Status bubble tracks manual drag";
+                // pet-behavior's "Dragging a paused pet").
+                if idx == 0 {
+                    crate::status_bubble::reposition(&self.app, pet.state.x, pet.state.y);
+                }
             } else {
                 pet.tick(gpu, self.bounds, follow_target, self.settings, dt_ms, &mut self.rng);
                 if self.window_snap && log_positions && pet.paused {
@@ -746,7 +825,7 @@ impl PetManager {
             pet.render(gpu);
         }
 
-        pending_quick_menu
+        TickActions { pending_quick_menu, open_chat }
     }
 
     pub fn len(&self) -> usize { self.pets.len() }

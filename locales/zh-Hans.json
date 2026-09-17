@@ -9,6 +9,7 @@
   "menu.quit": "退出",
 
   "settings.window_title": "飞行雪绒设置",
+  "chat.window_title": "飞行雪绒聊天",
   "settings.tab.personalization": "个性化",
   "settings.tab.ai": "AI",
   "settings.tab.update": "更新",

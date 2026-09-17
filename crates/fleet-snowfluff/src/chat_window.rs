@@ -7,7 +7,9 @@
 //! branches on the window's own label (`getCurrentWindow().label`) to
 //! decide whether to render the settings UI or the chat UI.
 
-use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+
+use crate::{chat_commands::ChatRuntimeState, chat_pause, status_bubble};
 
 pub const CHAT_WINDOW_LABEL: &str = "chat";
 
@@ -25,7 +27,37 @@ pub fn open_or_focus_chat(app: &AppHandle, title: &str) {
             .resizable(true)
             .build();
 
-    if let Err(err) = result {
-        log::error!("failed to open chat window: {err}");
+    match result {
+        Ok(window) => {
+            let app_handle = app.clone();
+            window.on_window_event(move |event| match event {
+                // The window closing lifts the pause/hides the bubble
+                // unless a still-pending generation (or an unread
+                // result) is keeping them up regardless -- `recompute`/
+                // `sync` read that state themselves rather than
+                // assuming closing always means "done".
+                WindowEvent::Destroyed => {
+                    chat_pause::recompute(&app_handle);
+                    status_bubble::sync(&app_handle);
+                }
+                // Regaining focus is what clears an unread indicator
+                // (`ai-chat`'s "Status bubble" -- the unread state is
+                // specifically about *not yet seen*, not merely "chat
+                // window exists"), including the case where a reply
+                // arrived while this window sat open but unfocused.
+                WindowEvent::Focused(true) => {
+                    let chat_state = app_handle.state::<ChatRuntimeState>();
+                    if chat_state.unread().is_some() {
+                        chat_state.clear_unread();
+                        chat_pause::recompute(&app_handle);
+                        status_bubble::sync(&app_handle);
+                    }
+                }
+                _ => {}
+            });
+            chat_pause::recompute(app);
+            status_bubble::sync(app);
+        }
+        Err(err) => log::error!("failed to open chat window: {err}"),
     }
 }
