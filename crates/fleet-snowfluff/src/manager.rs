@@ -574,17 +574,23 @@ impl PetManager {
 
     pub fn set_ui_language(&mut self, language: UiLanguage) { self.ui_language = language; }
 
-    /// The first pet instance's current logical position -- the only
+    /// The first pet instance's current on-screen position -- the only
     /// one the status bubble ever anchors to (`ai-chat`'s "Status
     /// bubble", anchored to `pets[0]`; stable across any live
     /// instance-count change, since `set_instance_count` only ever
     /// pushes/pops from the end of `pets`). Includes size (not just
     /// top-left position) so the bubble can sit beside the pet's
-    /// actual edge rather than overlapping it.
+    /// actual edge rather than overlapping it. Uses `effective_position()`
+    /// rather than `pet.state.x/y` directly -- the chat window opening
+    /// is exactly what pauses and docks `pets[0]` in the first place, so
+    /// reading the plain resting position here would anchor the bubble
+    /// to where the pet *isn't* for as long as the chat window stays
+    /// open.
     pub fn primary_pet_rect(&self) -> Option<(f64, f64, u32, u32)> {
         self.pets.first().map(|pet| {
+            let (x, y) = pet.effective_position();
             let (w, h) = pet.size();
-            (pet.state.x, pet.state.y, w, h)
+            (x, y, w, h)
         })
     }
 
@@ -831,8 +837,9 @@ impl PetManager {
                 // paused (ai-chat's "Status bubble tracks manual drag";
                 // pet-behavior's "Dragging a paused pet").
                 if idx == 0 {
+                    let (x, y) = pet.effective_position();
                     let (w, h) = pet.size();
-                    crate::status_bubble::reposition(&self.app, pet.state.x, pet.state.y, w, h);
+                    crate::status_bubble::reposition(&self.app, x, y, w, h);
                 }
             } else {
                 pet.tick(gpu, self.bounds, follow_target, self.settings, dt_ms, &mut self.rng);
