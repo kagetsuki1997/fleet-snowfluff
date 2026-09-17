@@ -31,11 +31,24 @@ impl Ollama {
 /// `Message`'s own `Serialize` impl matches Ollama's `role` values
 /// (`system`/`user`/`assistant`) exactly, same as OpenAI-compatible --
 /// no per-role remapping needed, unlike Anthropic.
+///
+/// `"think": false` is load-bearing, not cosmetic: a "thinking"-capable
+/// local model (confirmed against a real Ollama instance running
+/// `qwen3:8b`) streams its chain-of-thought into a separate `thinking`
+/// field while `message.content` stays empty for the entire reasoning
+/// phase -- and `MAX_RESPONSE_TOKENS` counts *all* generated tokens,
+/// reasoning included. A verbose thinking phase can consume the whole
+/// budget before any visible text is ever produced, so the request
+/// "succeeds" with zero real content and the chat silently shows an
+/// empty reply. Disabling thinking also fits the persona itself far
+/// better -- a short in-character quip has no use for exposed
+/// reasoning, visible or not.
 pub fn build_chat_body(model: &str, messages: &[Message]) -> Value {
     json!({
         "model": model,
         "messages": messages,
         "stream": true,
+        "think": false,
         "options": { "num_predict": MAX_RESPONSE_TOKENS },
     })
 }
@@ -141,6 +154,17 @@ mod tests {
         assert_eq!(body["model"], "llama3.2:3b");
         assert_eq!(body["options"]["num_predict"], MAX_RESPONSE_TOKENS);
         assert!(body.get("max_tokens").is_none(), "Ollama has no top-level max_tokens field");
+    }
+
+    #[test]
+    fn build_chat_body_disables_thinking() {
+        // A "thinking"-capable model (e.g. qwen3) puts its reasoning in
+        // a separate field while `content` stays empty for the whole
+        // reasoning phase -- without this, MAX_RESPONSE_TOKENS can be
+        // entirely consumed by invisible reasoning, yielding a reply
+        // that "succeeds" with zero visible content.
+        let body = build_chat_body("qwen3:8b", &[Message::user("hi")]);
+        assert_eq!(body["think"], false);
     }
 
     #[test]

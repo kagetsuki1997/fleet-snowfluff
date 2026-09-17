@@ -49,19 +49,43 @@ pub fn set_ai_enabled(app: AppHandle, ai_settings: State<Mutex<AiSettings>>, ena
     ai_config_store::save(&app, &settings);
 }
 
-/// Sets the active provider. Does *not* touch `disclosure_acknowledged`
-/// -- the frontend calls `acknowledge_provider_disclosure` first, as a
-/// separate step, only when the user actually accepts the
-/// data-disclosure prompt for a cloud provider.
+/// Whether `provider` may become active given the disclosures already
+/// acknowledged in `settings` (`ai-provider`'s "Cloud provider data
+/// disclosure": "SHALL NOT become active until the disclosure is
+/// acknowledged"). Only OpenAI/Anthropic require one -- Ollama and Mock
+/// never send data off-device.
+fn disclosure_ok(settings: &AiSettings, provider: Option<ProviderKind>) -> bool {
+    match provider {
+        Some(ProviderKind::OpenAi) => settings.openai.disclosure_acknowledged,
+        Some(ProviderKind::Anthropic) => settings.anthropic.disclosure_acknowledged,
+        Some(ProviderKind::Ollama | ProviderKind::Mock) | None => true,
+    }
+}
+
+/// Sets the active provider. Refuses to activate OpenAI/Anthropic
+/// until that provider's disclosure has been acknowledged -- enforced
+/// here, not only in the frontend's own gating, so the guarantee holds
+/// regardless of what calls this command. The normal flow still calls
+/// `acknowledge_provider_disclosure` first, as a separate step, only
+/// when the user actually accepts the prompt; this is the backstop for
+/// everything else. Returns whether the change actually took effect,
+/// so the frontend can tell "activated" apart from "refused".
 #[tauri::command]
 pub fn set_active_provider(
     app: AppHandle,
     ai_settings: State<Mutex<AiSettings>>,
     provider: Option<ProviderKind>,
-) {
+) -> bool {
     let mut settings = ai_settings.lock().unwrap();
+
+    if !disclosure_ok(&settings, provider) {
+        log::warn!("refused to activate {provider:?}: disclosure not yet acknowledged");
+        return false;
+    }
+
     settings.active_provider = provider;
     ai_config_store::save(&app, &settings);
+    true
 }
 
 /// Records that the user has seen and accepted the cloud-provider data
@@ -197,4 +221,32 @@ pub async fn fetch_provider_models(
         Ok(models) => ModelListResult { models, error: None },
         Err(err) => ModelListResult { models: vec![], error: Some(err.to_string()) },
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn disclosure_ok_requires_acknowledgement_for_cloud_providers() {
+        let settings = AiSettings::default();
+        assert!(!disclosure_ok(&settings, Some(ProviderKind::OpenAi)));
+        assert!(!disclosure_ok(&settings, Some(ProviderKind::Anthropic)));
+    }
+
+    #[test]
+    fn disclosure_ok_never_required_for_local_providers() {
+        let settings = AiSettings::default();
+        assert!(disclosure_ok(&settings, Some(ProviderKind::Ollama)));
+        assert!(disclosure_ok(&settings, Some(ProviderKind::Mock)));
+        assert!(disclosure_ok(&settings, None));
+    }
+
+    #[test]
+    fn disclosure_ok_once_acknowledged() {
+        let mut settings = AiSettings::default();
+        settings.openai.disclosure_acknowledged = true;
+        assert!(disclosure_ok(&settings, Some(ProviderKind::OpenAi)));
+        assert!(!disclosure_ok(&settings, Some(ProviderKind::Anthropic)));
+    }
 }
