@@ -28,3 +28,17 @@ Selecting OpenAI or Anthropic as the active provider for the first time SHALL sh
 
 - **WHEN** the user selects Anthropic as the active provider for the first time and dismisses the disclosure without acknowledging it
 - **THEN** Anthropic does not become the active provider
+
+### Requirement: Settings window opacity
+
+The settings window's overall opacity SHALL follow the personalization tab's existing opacity setting, the same value applied to pet windows, applied immediately when changed while the settings window is open and applied on open to whatever value is currently configured.
+
+#### Scenario: Opacity applies live
+
+- **WHEN** the settings window is open and the user changes the opacity slider on the personalization tab
+- **THEN** the settings window's own transparency updates immediately, not only the pets'
+
+#### Scenario: Opacity applies on open
+
+- **WHEN** the user opens the settings window while a non-default opacity is already configured
+- **THEN** the settings window opens already at that opacity, not fully opaque until the next change

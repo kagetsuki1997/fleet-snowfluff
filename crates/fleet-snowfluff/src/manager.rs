@@ -19,6 +19,7 @@ use rand::{rngs::StdRng, SeedableRng};
 use crate::gfx::{GpuContext, PetSurface};
 use crate::{
     animation::{load_animation_set, AnimationSet},
+    chat_window,
     pet::{Gpu, PetWindow},
     voice::VoicePlayer,
 };
@@ -783,21 +784,33 @@ impl PetManager {
         // throttle as the fullscreen check above rather than running
         // every ~30ms tick. macOS, Windows, and Linux (7.2/8.2/9.2) all
         // have a foreground-window query wired up.
+        //
+        // The chat window, when open, always takes priority over
+        // whatever the OS reports as foreground (ai-chat's "Pause docks
+        // to the chat window") -- the platform queries below
+        // deliberately exclude this app's own windows entirely (so a
+        // pet never nonsensically docks to another pet, or to itself),
+        // which also means they can never find the chat window on
+        // their own; `chat_window::logical_rect` is the explicit path
+        // around that exclusion for this one, deliberate case.
         #[cfg(target_os = "macos")]
         let dock_window = if self.window_snap && log_positions {
-            crate::platform::macos::foreground_window().map(|w| w.rect)
+            chat_window::logical_rect(&self.app)
+                .or_else(|| crate::platform::macos::foreground_window().map(|w| w.rect))
         } else {
             None
         };
         #[cfg(target_os = "windows")]
         let dock_window = if self.window_snap && log_positions {
-            crate::platform::windows::foreground_window().map(|w| w.rect)
+            chat_window::logical_rect(&self.app)
+                .or_else(|| crate::platform::windows::foreground_window().map(|w| w.rect))
         } else {
             None
         };
         #[cfg(target_os = "linux")]
         let dock_window = if self.window_snap && log_positions {
-            crate::platform::linux::foreground_window().map(|w| w.rect)
+            chat_window::logical_rect(&self.app)
+                .or_else(|| crate::platform::linux::foreground_window().map(|w| w.rect))
         } else {
             None
         };

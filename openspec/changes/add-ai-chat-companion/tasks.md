@@ -50,9 +50,21 @@
 - [x] 7.3 Create the status bubble webview anchored to `pets[0]`, with hidden/thinking/unread-reply/unread-failure states that clear on chat-window focus; verify against `ai-chat`'s "Status bubble" scenarios. The bubble window (`status_bubble.rs`) only controls *when it exists/where it sits*; its actual glyph content is rendered client-side by polling the same `get_chat_state` command the chat window already uses, needing no new IPC. Unread state (`ChatRuntimeState::unread`) is set only when the chat window isn't currently focused (checked via `Window::is_focused`, not inferred from event history, since a window already-focused when a reply lands never gets a fresh `Focused` event) and cleared on `WindowEvent::Focused(true)`.
 - [x] 7.4 Sync the status bubble's position to `pets[0]` from the existing `apply_drag_position` call site during a manual drag; verify against `ai-chat`'s "Status bubble tracks manual drag" scenario and the modified `pet-behavior` "Dragging a paused pet" scenario. Added `PetManager::primary_pet_position()`; the tick loop's drag branch calls `status_bubble::reposition` only for `idx == 0`.
 
-## 8. Verification
+## 8. App crate: pause docks to the chat window
 
-- [ ] 8.1 Run `cargo test --workspace` and confirm all new unit tests pass with no regression to existing `core` tests (config, locale, motion).
-- [ ] 8.2 Manually exercise the Mock provider end-to-end (send a message, observe streaming, unread bubble, resume after reopen, New Chat cancellation) as a smoke test of the full pipeline before enabling any real provider.
-- [ ] 8.3 Manually verify each real provider's live model-fetch and a successful chat round-trip with valid credentials (opt-in, not part of CI).
-- [ ] 8.4 Run `openspec validate add-ai-chat-companion --strict` and resolve any reported issues.
+- [x] 8.1 Add `chat_window::logical_rect(app)` (chat window's own position/size converted to logical pixels via its `scale_factor()`, mirroring the existing physical-to-logical conversion pattern in `manager.rs`); verify against `ai-chat`'s "Pause docks to the chat window" requirement. Necessary because the existing `foreground_window()` queries on all three platforms deliberately exclude every window owned by this app's own process (confirmed by reading each platform implementation), so they can never find the chat window on their own -- this is a separate, explicit path around that exclusion, not a change to it.
+- [x] 8.2 Wire `chat_window::logical_rect` ahead of the existing foreground-window query in `manager.rs`'s `dock_window` computation (`.or_else(...)`), so the chat window takes priority when open and behavior falls back to today's foreground-window docking otherwise; verify against both of that requirement's scenarios.
+
+## 9. App crate: window opacity for settings and chat windows
+
+- [ ] 9.1 Add a `set_window_opacity` function to each platform module (`platform/macos.rs` via `NSWindow.setAlphaValue:` on the handle from `WebviewWindow::ns_window()`; `platform/windows.rs` via `SetLayeredWindowAttributes`/`WS_EX_LAYERED` on the `HWND` from `WebviewWindow::hwnd()`; `platform/linux.rs` via GTK's `WidgetExt::set_opacity` on the `gtk::ApplicationWindow` from `WebviewWindow::gtk_window()`) -- verified during design that Tauri/tao expose no cross-platform "set window opacity" call at all (confirmed by grepping the vendored `tauri`/`tao` source), unlike pet windows, which get their transparency from a custom wgpu shader uniform (non-Windows) or raw `UpdateLayeredWindow` GDI compositing (Windows) -- neither applicable to a plain webview window.
+- [ ] 9.2 Apply the current `transparency_index`-derived opacity to the settings window at open time (`settings_window.rs`) and whenever `set_opacity_index` changes it while the settings window is open.
+- [ ] 9.3 Apply the same opacity to the chat window at open time (`chat_window.rs`) and whenever `set_opacity_index` changes it while the chat window is open.
+- [ ] 9.4 Verify macOS by compiling natively on the dev machine. Verify Linux via `just build-linux`'s containerized build (this project's own established practice per `platform/mod.rs`'s module doc: "Linux is compile/link-verified only via `just build-linux`'s container"). Windows cross-compilation from this dev machine hit a pre-existing toolchain issue unrelated to this change (`cargo-xwin`'s nix-wrapped clang rejects `-fPIC` for the MSVC target while building the `ring` crate's C sources) -- flag this to the user rather than shipping the Windows path silently unverified.
+
+## 10. Verification
+
+- [ ] 10.1 Run `cargo test --workspace` and confirm all new unit tests pass with no regression to existing `core` tests (config, locale, motion).
+- [ ] 10.2 Manually exercise the Mock provider end-to-end (send a message, observe streaming, unread bubble, resume after reopen, New Chat cancellation) as a smoke test of the full pipeline before enabling any real provider.
+- [ ] 10.3 Manually verify each real provider's live model-fetch and a successful chat round-trip with valid credentials (opt-in, not part of CI).
+- [ ] 10.4 Run `openspec validate add-ai-chat-companion --strict` and resolve any reported issues.

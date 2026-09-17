@@ -7,11 +7,35 @@
 //! branches on the window's own label (`getCurrentWindow().label`) to
 //! decide whether to render the settings UI or the chat UI.
 
+use fleet_snowfluff_core::ForeignWindowRect;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 use crate::{chat_commands::ChatRuntimeState, chat_pause, status_bubble};
 
 pub const CHAT_WINDOW_LABEL: &str = "chat";
+
+/// The chat window's own rect in logical pixels, if it's currently
+/// open -- used so a paused pet can dock against the chat window
+/// itself the same way it already docks against whichever foreign app
+/// window is in the foreground (`ai-chat`'s "Pause docks to the chat
+/// window"). The platform `foreground_window()` queries this project
+/// already has deliberately exclude every window owned by this app's
+/// own process (including this one), so docking to it needs this
+/// separate, explicit path rather than relying on those.
+pub fn logical_rect(app: &AppHandle) -> Option<ForeignWindowRect> {
+    let window = app.get_webview_window(CHAT_WINDOW_LABEL)?;
+    let scale = window.scale_factor().ok()?;
+    let position = window.outer_position().ok()?;
+    let size = window.outer_size().ok()?;
+    let left = position.x as f64 / scale;
+    let top = position.y as f64 / scale;
+    Some(ForeignWindowRect {
+        left,
+        top,
+        right: left + size.width as f64 / scale,
+        bottom: top + size.height as f64 / scale,
+    })
+}
 
 pub fn open_or_focus_chat(app: &AppHandle, title: &str) {
     if let Some(window) = app.get_webview_window(CHAT_WINDOW_LABEL) {

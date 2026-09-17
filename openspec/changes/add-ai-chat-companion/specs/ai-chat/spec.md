@@ -52,7 +52,7 @@ Reopening the chat window SHALL resume the most recently active session and disp
 
 ### Requirement: Pause during chat activity
 
-Every pet instance SHALL be paused (per the pet-behavior pause mechanism) for as long as the chat window is open, or a generation is still pending, whichever is longer. Whatever pause state existed before the chat window was opened SHALL be restored once both conditions clear.
+Every pet instance SHALL be paused (per the pet-behavior pause mechanism) for as long as the chat window is open, a generation is still pending, or a reply/failure is unread, whichever is longest. Whatever pause state existed before that period began SHALL be restored once all three conditions clear.
 
 #### Scenario: Manual pause preserved
 
@@ -63,6 +63,25 @@ Every pet instance SHALL be paused (per the pet-behavior pause mechanism) for as
 
 - **WHEN** the chat window is closed while a reply is still being generated
 - **THEN** pets remain paused until that generation finishes or is cancelled
+
+#### Scenario: Pause persists while a result is unread
+
+- **WHEN** a reply finishes generating while the chat window is closed, and the user has not yet focused the chat window to see it
+- **THEN** pets remain paused until the chat window is focused, even though nothing is pending anymore
+
+### Requirement: Pause docks to the chat window
+
+While a pet is paused for chat activity and window-snap is enabled, it SHALL dock to the chat window itself, taking priority over whatever window the operating system reports as being in the foreground -- the same visual docking behavior the pause feature already provides against a third-party foreground application.
+
+#### Scenario: Pet docks to the open chat window
+
+- **WHEN** window-snap is enabled, the chat window is open, and the pause mechanism is active
+- **THEN** the paused pet(s) dock next to the chat window rather than whatever other application window is currently focused
+
+#### Scenario: Falls back to the foreground application when chat is closed
+
+- **WHEN** the chat window is not open but a pet is paused for another reason (e.g. manual pause) with window-snap enabled
+- **THEN** docking behaves exactly as it already does today, against the current foreground application window
 
 ### Requirement: Single in-flight generation
 
@@ -128,3 +147,17 @@ A failed generation SHALL be shown inline in the chat transcript with a human-re
 
 - **WHEN** a request fails
 - **THEN** the application does not automatically resend it, and the input becomes available again
+
+### Requirement: Chat window opacity
+
+The chat window's overall opacity SHALL follow the same personalization opacity setting the settings window and pet windows use, applied immediately when changed while the chat window is open and applied on open to whatever value is currently configured.
+
+#### Scenario: Opacity applies live
+
+- **WHEN** the chat window is open and the user changes the opacity slider on the personalization tab
+- **THEN** the chat window's own transparency updates immediately
+
+#### Scenario: Opacity applies on open
+
+- **WHEN** the user opens the chat window while a non-default opacity is already configured
+- **THEN** the chat window opens already at that opacity, not fully opaque until the next change

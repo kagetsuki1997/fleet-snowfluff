@@ -14,6 +14,8 @@ Fleet Snowfluff currently has no AI capability at all. The feature-planning doc 
 - Extend the existing global pause mechanism (`PetManager::set_paused`) to also hold while an AI request is pending in the background, restoring whatever pause state existed before the chat window was opened.
 - **Clarify** (not change) existing pause/drag interaction: a paused pet remains manually draggable (an existing behavior, newly load-bearing since the status bubble must track `pets[0]`'s position during a drag).
 - Impose Stage 1 guardrails: master AI-enabled switch defaulting to off, no provider configured by default, a fixed per-request output-token cap, a fixed recent-turn context window (not full session replay), plain-text-only responses (no structured emotion tag yet), at most one generation in flight globally, and no automatic retries on failure.
+- Extend the existing pause window-snap docking so a paused pet docks to the chat window itself (when open) ahead of whatever the OS reports as the foreground application, matching the existing docking behavior's visual feel rather than introducing a new one.
+- Extend the existing opacity personalization setting, currently applied only to pet windows, to also apply to the settings window and the new chat window, via new platform-specific whole-window-opacity calls (no cross-platform equivalent exists in Tauri/tao).
 
 ## Capabilities
 
