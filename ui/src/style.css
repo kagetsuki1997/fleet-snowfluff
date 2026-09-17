@@ -90,6 +90,20 @@ html {
   font-size: 14px;
 }
 
+/* Pico paints `background-color: var(--pico-background-color)` on
+   `html`/`body` itself -- a separate layer sitting *behind* #app, so
+   fading #app's own `opacity` (window-opacity, below) only ever
+   revealed that solid color, not the desktop through it. Neutralizing
+   it here and giving #app the real background instead means the
+   background is part of what fades as one group with the content,
+   which is what actually shows the desktop through a low-opacity
+   window (`.transparent(true)` on the Rust side is necessary but not
+   sufficient without this). */
+html,
+body {
+  background: transparent !important;
+}
+
 body {
   margin: 0;
 }
@@ -97,6 +111,7 @@ body {
 #app {
   height: 100vh;
   box-sizing: border-box;
+  background-color: var(--pico-background-color);
   /* Whole-window opacity (settings-ui/ai-chat's window-opacity
      requirements) is applied here as a plain inline style by main.ts;
      the transition just smooths a live slider change. */
