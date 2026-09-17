@@ -125,6 +125,19 @@ interface UpdateInfo {
 // instead of re-checking GitHub a second time.
 let pendingUpdate: UpdateInfo | null = null;
 
+function applyWindowOpacity(opacity: number): void {
+  document.querySelector<HTMLDivElement>("#app")!.style.opacity = String(opacity);
+}
+
+// Shared by both windows (settings-ui's "Settings window opacity" /
+// ai-chat's "Chat window opacity"): fetch the currently configured
+// value once on load, then stay in sync with the personalization
+// tab's slider via a broadcast event rather than each window polling.
+async function initWindowOpacity(): Promise<void> {
+  applyWindowOpacity(await invoke<number>("get_window_opacity"));
+  await listen<number>("opacity-changed", (event) => applyWindowOpacity(event.payload));
+}
+
 async function main(): Promise<void> {
   // The chat window shares this same index.html/main.ts entry point
   // (chat_window.rs's own comment explains why: WebviewUrl::App is
@@ -143,6 +156,7 @@ async function main(): Promise<void> {
       activeTab = "update";
     }
     await render();
+    await initWindowOpacity();
 
     // Only relevant if the startup check finds an update *after* this
     // window is already open (pendingUpdate above only covers the case
@@ -653,6 +667,7 @@ async function mainChat(): Promise<void> {
   try {
     await loadDictionary();
     await renderChatWindow();
+    await initWindowOpacity();
   } catch (err) {
     console.error("chat window failed to initialize:", err);
     document.querySelector<HTMLDivElement>("#app")!.innerHTML =

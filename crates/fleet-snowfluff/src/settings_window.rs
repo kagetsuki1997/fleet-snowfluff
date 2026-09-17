@@ -42,12 +42,16 @@ pub fn open_or_focus_settings(app: &AppHandle, title: &str, initial_tab: Option<
         return;
     }
 
-    let result =
-        WebviewWindowBuilder::new(app, SETTINGS_WINDOW_LABEL, WebviewUrl::App("index.html".into()))
+    let result = WebviewWindowBuilder::new(app, SETTINGS_WINDOW_LABEL, WebviewUrl::App("index.html".into()))
             .title(title)
             .inner_size(480.0, 560.0)
             .resizable(true)
             .center()
+            // Lets the personalization opacity setting fade the whole
+            // window (settings-ui's "Settings window opacity") -- CSS
+            // opacity on the page content only shows the desktop
+            // through it if the window itself allows per-pixel alpha.
+            .transparent(true)
             .build();
 
     if let Err(err) = result {

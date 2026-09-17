@@ -55,6 +55,7 @@ pub fn run() {
             commands::get_personalization,
             commands::set_scale_index,
             commands::set_opacity_index,
+            commands::get_window_opacity,
             commands::set_display_priority,
             commands::set_wander_stay_mode,
             commands::set_total_screen,

@@ -44,11 +44,15 @@ pub fn open_or_focus_chat(app: &AppHandle, title: &str) {
         return;
     }
 
-    let result =
-        WebviewWindowBuilder::new(app, CHAT_WINDOW_LABEL, WebviewUrl::App("index.html".into()))
+    let result = WebviewWindowBuilder::new(app, CHAT_WINDOW_LABEL, WebviewUrl::App("index.html".into()))
             .title(title)
             .inner_size(420.0, 560.0)
             .resizable(true)
+            // Lets the personalization opacity setting fade the whole
+            // window (ai-chat's "Chat window opacity") -- CSS opacity
+            // on the page content only shows the desktop through it if
+            // the window itself allows per-pixel alpha.
+            .transparent(true)
             .build();
 
     match result {

@@ -97,6 +97,10 @@ body {
 #app {
   height: 100vh;
   box-sizing: border-box;
+  /* Whole-window opacity (settings-ui/ai-chat's window-opacity
+     requirements) is applied here as a plain inline style by main.ts;
+     the transition just smooths a live slider change. */
+  transition: opacity 0.15s ease;
 }
 
 .settings-window {
