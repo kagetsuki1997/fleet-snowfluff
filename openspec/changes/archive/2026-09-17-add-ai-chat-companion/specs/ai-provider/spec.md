@@ -24,7 +24,7 @@ AI-dependent features (chat window, status bubble) SHALL be gated by a single ma
 
 ### Requirement: No provider configured by default
 
-On first run, no provider SHALL be pre-selected as active, including no default selection of a cloud provider.
+On first run, no provider SHALL be preselected as active, including no default selection of a cloud provider.
 
 #### Scenario: Fresh install
 

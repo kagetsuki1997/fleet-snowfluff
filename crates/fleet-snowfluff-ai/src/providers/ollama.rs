@@ -170,9 +170,9 @@ mod tests {
     #[test]
     fn parse_ndjson_line_extracts_content() {
         let line =
-            r#"{"model":"llama3.2","message":{"role":"assistant","content":"Hel"},"done":false}"#;
+            r#"{"model":"llama3.2","message":{"role":"assistant","content":"Hello"},"done":false}"#;
         let chunk = parse_ndjson_line(line).unwrap().unwrap();
-        assert_eq!(chunk.delta, "Hel");
+        assert_eq!(chunk.delta, "Hello");
     }
 
     #[test]

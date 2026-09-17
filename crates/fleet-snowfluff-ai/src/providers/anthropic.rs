@@ -224,9 +224,9 @@ mod tests {
 
     #[test]
     fn parse_sse_line_extracts_text_delta() {
-        let line = r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hel"}}"#;
+        let line = r#"data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Hello"}}"#;
         let chunk = parse_sse_line(line).unwrap().unwrap();
-        assert_eq!(chunk.delta, "Hel");
+        assert_eq!(chunk.delta, "Hello");
     }
 
     #[test]

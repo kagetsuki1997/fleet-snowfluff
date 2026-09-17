@@ -177,9 +177,9 @@ mod tests {
 
     #[test]
     fn parse_sse_line_extracts_content_delta() {
-        let line = r#"data: {"choices":[{"delta":{"content":"Hel"}}]}"#;
+        let line = r#"data: {"choices":[{"delta":{"content":"Hello"}}]}"#;
         let chunk = parse_sse_line(line).unwrap().unwrap();
-        assert_eq!(chunk.delta, "Hel");
+        assert_eq!(chunk.delta, "Hello");
     }
 
     #[test]
