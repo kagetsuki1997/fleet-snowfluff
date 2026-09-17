@@ -64,7 +64,7 @@
 
 ## 10. Verification
 
-- [ ] 10.1 Run `cargo test --workspace` and confirm all new unit tests pass with no regression to existing `core` tests (config, locale, motion).
-- [ ] 10.2 Manually exercise the Mock provider end-to-end (send a message, observe streaming, unread bubble, resume after reopen, New Chat cancellation) as a smoke test of the full pipeline before enabling any real provider.
-- [ ] 10.3 Manually verify each real provider's live model-fetch and a successful chat round-trip with valid credentials (opt-in, not part of CI).
-- [ ] 10.4 Run `openspec validate add-ai-chat-companion --strict` and resolve any reported issues.
+- [x] 10.1 Run `cargo test --workspace` and confirm all new unit tests pass with no regression to existing `core` tests (config, locale, motion). 47 core + 10 app-crate + 66 ai-crate (3 correctly ignored) all pass; `cargo clippy --workspace --all-targets -- -D warnings` also clean.
+- [ ] 10.2 Manually exercise the Mock provider end-to-end (send a message, observe streaming, unread bubble, resume after reopen, New Chat cancellation) as a smoke test of the full pipeline before enabling any real provider. **Not done by the assistant** -- this is an interactive GUI smoke test (running the real Tauri app, clicking through it) that needs a real display; the sandboxed session this was implemented in has no way to perform it. Needs a human to actually run `just dev` and click through it.
+- [ ] 10.3 Manually verify each real provider's live model-fetch and a successful chat round-trip with valid credentials (opt-in, not part of CI). **Not done by the assistant**, same reason as 10.2, plus it needs real API keys the assistant was never given.
+- [x] 10.4 Run `openspec validate add-ai-chat-companion --strict` and resolve any reported issues. Valid, no issues.
