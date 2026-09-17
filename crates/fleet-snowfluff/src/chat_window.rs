@@ -67,6 +67,13 @@ pub fn open_or_focus_chat(app: &AppHandle, title: &str) {
             // on the page content only shows the desktop through it if
             // the window itself allows per-pixel alpha.
             .transparent(true)
+            // Pets default to `always_on_top` (`display_priority: 1`,
+            // manager.rs's own default) -- a normal-level chat window
+            // sits in a *different* OS z-band than that and can never
+            // be raised above it just by focusing, on any platform.
+            // Without this, `focus_if_unfocused`'s `set_focus()` looks
+            // like a no-op whenever a pet is on top.
+            .always_on_top(true)
             .build();
 
     match result {

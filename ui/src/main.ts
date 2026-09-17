@@ -148,6 +148,14 @@ async function main(): Promise<void> {
     await mainChat();
     return;
   }
+  // The status bubble shares the same entry point too -- without this
+  // branch it fell through to the settings UI below, rendered (barely
+  // visibly) inside the bubble's tiny 180x36 window instead of the
+  // "...", success, or failure glyph it's actually meant to show.
+  if (getCurrentWindow().label === "status-bubble") {
+    await mainStatusBubble();
+    return;
+  }
 
   try {
     await loadDictionary();
@@ -497,14 +505,18 @@ function renderProviderConfig(
   `;
 
   if (needsKey) {
-    configEl.querySelector<HTMLInputElement>("#ai-api-key-input")!.addEventListener("change", (e) => {
-      const value = (e.target as HTMLInputElement).value;
-      if (value) void invoke("set_provider_api_key", { provider, apiKey: value });
-    });
+    configEl
+      .querySelector<HTMLInputElement>("#ai-api-key-input")!
+      .addEventListener("change", (e) => {
+        const value = (e.target as HTMLInputElement).value;
+        if (value) void invoke("set_provider_api_key", { provider, apiKey: value });
+      });
   }
-  configEl.querySelector<HTMLInputElement>("#ai-base-url-input")!.addEventListener("change", (e) => {
-    invoke("set_provider_base_url", { provider, baseUrl: (e.target as HTMLInputElement).value });
-  });
+  configEl
+    .querySelector<HTMLInputElement>("#ai-base-url-input")!
+    .addEventListener("change", (e) => {
+      invoke("set_provider_base_url", { provider, baseUrl: (e.target as HTMLInputElement).value });
+    });
   configEl.querySelector<HTMLInputElement>("#ai-model-input")!.addEventListener("change", (e) => {
     invoke("set_provider_model", { provider, model: (e.target as HTMLInputElement).value });
   });
@@ -661,6 +673,42 @@ function entryHtml(entry: LogEntry): string {
     return `<p class="chat-entry chat-entry-error">⚠️ ${escapeHtml(entry.content)}</p>`;
   }
   return `<p class="chat-entry chat-entry-${entry.role}">${escapeHtml(entry.content)}</p>`;
+}
+
+// Fixed literal glyphs (`ai-chat`'s "Status bubble" -- not localized
+// text), matching the persona rather than the UI language.
+const BUBBLE_THINKING = "...";
+const BUBBLE_REPLY = "Ciallo～(∠・ω< )⌒☆";
+const BUBBLE_FAILURE = "(×_×)";
+const BUBBLE_POLL_MS = 500;
+
+async function mainStatusBubble(): Promise<void> {
+  const app = document.querySelector<HTMLDivElement>("#app")!;
+  app.innerHTML = `<div id="bubble" class="status-bubble"></div>`;
+  const bubbleEl = app.querySelector<HTMLDivElement>("#bubble")!;
+
+  // `status_bubble.rs`'s own `sync()` already decides whether this
+  // window exists/is shown at all -- this loop only has to pick the
+  // right glyph for whatever moment it's asked to render, using the
+  // same snapshot the chat window already polls (no bubble-specific
+  // IPC): "pending" beats everything, otherwise the most recent log
+  // entry's role tells reply from failure.
+  async function refresh(): Promise<void> {
+    const state = await invoke<ChatStateSnapshot>("get_chat_state");
+    let text = "";
+    if (state.is_pending) {
+      text = BUBBLE_THINKING;
+    } else {
+      const last = state.entries[state.entries.length - 1];
+      text =
+        last?.role === "error" ? BUBBLE_FAILURE : last?.role === "assistant" ? BUBBLE_REPLY : "";
+    }
+    bubbleEl.textContent = text;
+    bubbleEl.hidden = text === "";
+    setTimeout(() => void refresh(), BUBBLE_POLL_MS);
+  }
+
+  await refresh();
 }
 
 async function mainChat(): Promise<void> {
