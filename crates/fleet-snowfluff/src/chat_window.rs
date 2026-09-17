@@ -37,6 +37,20 @@ pub fn logical_rect(app: &AppHandle) -> Option<ForeignWindowRect> {
     })
 }
 
+/// Brings the chat window to the front if it's open but not the
+/// focused window -- any click on a pet should do this while the chat
+/// window is up, not just the double-click that opens it fresh
+/// (`ai-chat`'s chat window is meant to stay reachable at a glance
+/// while pets keep receiving clicks around it). A no-op if the window
+/// isn't open at all, or is already focused.
+pub fn focus_if_unfocused(app: &AppHandle) {
+    if let Some(window) = app.get_webview_window(CHAT_WINDOW_LABEL) {
+        if !window.is_focused().unwrap_or(true) {
+            window.set_focus().ok();
+        }
+    }
+}
+
 pub fn open_or_focus_chat(app: &AppHandle, title: &str) {
     if let Some(window) = app.get_webview_window(CHAT_WINDOW_LABEL) {
         window.show().ok();

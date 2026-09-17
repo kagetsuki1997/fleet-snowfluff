@@ -686,6 +686,7 @@ impl PetManager {
                     self.drag_owner = Some(idx);
                     self.drag_start_cursor = cursor;
                     self.voice.play_random();
+                    chat_window::focus_if_unfocused(&self.app);
                 }
             } else if left_released_this_tick {
                 if let Some(idx) = self.drag_owner.take() {
@@ -733,6 +734,7 @@ impl PetManager {
                 match self.pets.iter().position(|p| p.bounds_contains(cursor)) {
                     Some(idx) => {
                         pending_quick_menu = Some(self.pets[idx].window.clone());
+                        chat_window::focus_if_unfocused(&self.app);
                     }
                     None => log::info!("right-click at {cursor:?} did not land on any pet"),
                 }
