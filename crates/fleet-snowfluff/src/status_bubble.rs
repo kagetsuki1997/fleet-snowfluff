@@ -18,15 +18,27 @@ pub const BUBBLE_WINDOW_LABEL: &str = "status-bubble";
 const BUBBLE_WIDTH: f64 = 180.0;
 const BUBBLE_HEIGHT: f64 = 36.0;
 
-fn bubble_position(anchor_x: f64, anchor_y: f64) -> LogicalPosition<f64> {
-    // A fixed offset above the pet's own position -- good enough for a
-    // small text bubble; not trying to account for the pet's current
-    // sprite size here.
-    LogicalPosition::new(anchor_x, anchor_y - BUBBLE_HEIGHT - 8.0)
+const BUBBLE_GAP: f64 = 8.0;
+
+/// Beside the pet's right edge, vertically centered on it -- `anchor_w`/
+/// `anchor_h` are the pet's own current on-screen size (`PetWindow::size`),
+/// not a guess, so this tracks however big the sprite actually is right
+/// now rather than a fixed offset that only happened to look right at
+/// one scale.
+fn bubble_position(
+    anchor_x: f64,
+    anchor_y: f64,
+    anchor_w: u32,
+    anchor_h: u32,
+) -> LogicalPosition<f64> {
+    LogicalPosition::new(
+        anchor_x + anchor_w as f64 + BUBBLE_GAP,
+        anchor_y + (anchor_h as f64 - BUBBLE_HEIGHT) / 2.0,
+    )
 }
 
-fn show_at(app: &AppHandle, anchor_x: f64, anchor_y: f64) {
-    let position = bubble_position(anchor_x, anchor_y);
+fn show_at(app: &AppHandle, anchor_x: f64, anchor_y: f64, anchor_w: u32, anchor_h: u32) {
+    let position = bubble_position(anchor_x, anchor_y, anchor_w, anchor_h);
     if let Some(window) = app.get_webview_window(BUBBLE_WINDOW_LABEL) {
         window.set_position(position).ok();
         window.show().ok();
@@ -65,9 +77,9 @@ pub fn sync(app: &AppHandle) {
     let should_show = chat_state.is_pending() || chat_state.unread().is_some();
 
     if should_show {
-        let position = app.state::<Mutex<PetManager>>().lock().unwrap().primary_pet_position();
-        if let Some((x, y)) = position {
-            show_at(app, x, y);
+        let rect = app.state::<Mutex<PetManager>>().lock().unwrap().primary_pet_rect();
+        if let Some((x, y, w, h)) = rect {
+            show_at(app, x, y, w, h);
         }
     } else {
         hide(app);
@@ -79,8 +91,8 @@ pub fn sync(app: &AppHandle) {
 /// tracks manual drag"), the one case `pets[0]` can move at all while
 /// the pause this bubble's visibility implies is in effect (the pet's
 /// own wander state machine never runs while paused).
-pub fn reposition(app: &AppHandle, anchor_x: f64, anchor_y: f64) {
+pub fn reposition(app: &AppHandle, anchor_x: f64, anchor_y: f64, anchor_w: u32, anchor_h: u32) {
     if let Some(window) = app.get_webview_window(BUBBLE_WINDOW_LABEL) {
-        window.set_position(bubble_position(anchor_x, anchor_y)).ok();
+        window.set_position(bubble_position(anchor_x, anchor_y, anchor_w, anchor_h)).ok();
     }
 }

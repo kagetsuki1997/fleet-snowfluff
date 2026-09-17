@@ -466,4 +466,9 @@ impl PetWindow {
             && point.1 >= self.state.y
             && point.1 <= self.state.y + h as f64
     }
+
+    /// Current on-screen size in logical pixels -- lets a caller (the
+    /// status bubble) place itself relative to the pet's actual edges
+    /// rather than just its top-left `state.x/y`.
+    pub fn size(&self) -> (u32, u32) { self.current_window_size }
 }

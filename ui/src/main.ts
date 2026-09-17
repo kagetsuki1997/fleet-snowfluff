@@ -683,6 +683,7 @@ const BUBBLE_FAILURE = "(×_×)";
 const BUBBLE_POLL_MS = 500;
 
 async function mainStatusBubble(): Promise<void> {
+  document.body.classList.add("bubble-window");
   const app = document.querySelector<HTMLDivElement>("#app")!;
   app.innerHTML = `<div id="bubble" class="status-bubble"></div>`;
   const bubbleEl = app.querySelector<HTMLDivElement>("#bubble")!;

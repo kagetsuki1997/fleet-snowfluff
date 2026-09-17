@@ -578,9 +578,14 @@ impl PetManager {
     /// one the status bubble ever anchors to (`ai-chat`'s "Status
     /// bubble", anchored to `pets[0]`; stable across any live
     /// instance-count change, since `set_instance_count` only ever
-    /// pushes/pops from the end of `pets`).
-    pub fn primary_pet_position(&self) -> Option<(f64, f64)> {
-        self.pets.first().map(|pet| (pet.state.x, pet.state.y))
+    /// pushes/pops from the end of `pets`). Includes size (not just
+    /// top-left position) so the bubble can sit beside the pet's
+    /// actual edge rather than overlapping it.
+    pub fn primary_pet_rect(&self) -> Option<(f64, f64, u32, u32)> {
+        self.pets.first().map(|pet| {
+            let (w, h) = pet.size();
+            (pet.state.x, pet.state.y, w, h)
+        })
     }
 
     /// The active UI language's locale dictionary as raw JSON, for the
@@ -826,7 +831,8 @@ impl PetManager {
                 // paused (ai-chat's "Status bubble tracks manual drag";
                 // pet-behavior's "Dragging a paused pet").
                 if idx == 0 {
-                    crate::status_bubble::reposition(&self.app, pet.state.x, pet.state.y);
+                    let (w, h) = pet.size();
+                    crate::status_bubble::reposition(&self.app, pet.state.x, pet.state.y, w, h);
                 }
             } else {
                 pet.tick(gpu, self.bounds, follow_target, self.settings, dt_ms, &mut self.rng);

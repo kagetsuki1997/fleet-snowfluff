@@ -311,9 +311,12 @@ body {
 /* The status bubble's own #app: the shared background-color rule
    above would otherwise paint a solid pink rectangle across this
    window's full transparent surface, leaving no way to show just a
-   small floating pill of text over the desktop/pets behind it. */
-body:has(.status-bubble) #app {
-  background-color: transparent;
+   small floating pill of text over the desktop/pets behind it.
+   `main.ts` adds this class itself rather than relying on `:has()`,
+   which not every target webview engine supports. */
+body.bubble-window,
+body.bubble-window #app {
+  background: transparent;
 }
 
 .status-bubble {
@@ -322,10 +325,13 @@ body:has(.status-bubble) #app {
   display: flex;
   align-items: center;
   justify-content: center;
-  padding: 0.25rem 0.6rem;
+  padding: 0.5rem 0.75rem;
   border-radius: 1rem;
-  background: var(--pico-card-background-color);
-  border: 1px solid var(--pico-border-color);
+  /* Same look as an assistant reply in the chat transcript
+     (`.chat-entry-assistant`) -- the bubble is showing the same
+     persona "speaking", just outside the chat window. */
+  background: var(--pico-secondary-background);
+  color: var(--pico-color);
   font-size: 0.85rem;
   white-space: nowrap;
   overflow: hidden;

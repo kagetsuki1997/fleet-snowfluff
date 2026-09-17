@@ -43,9 +43,20 @@ pub fn logical_rect(app: &AppHandle) -> Option<ForeignWindowRect> {
 /// (`ai-chat`'s chat window is meant to stay reachable at a glance
 /// while pets keep receiving clicks around it). A no-op if the window
 /// isn't open at all, or is already focused.
+///
+/// Pets default to `always_on_top` (`display_priority: 1`,
+/// manager.rs's own default), a different OS z-band from a
+/// normal-level window on every platform -- `set_focus()` alone can
+/// raise a window within its own band but never across bands. Rather
+/// than leaving the chat window permanently pinned above every other
+/// app forever (not wanted -- `ai-chat` only needs it above the pets,
+/// not above the user's browser or editor), it flips to
+/// `always_on_top` right before focusing here, then back off again
+/// once it's no longer the focused window (`Focused(false)` below).
 pub fn focus_if_unfocused(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(CHAT_WINDOW_LABEL) {
         if !window.is_focused().unwrap_or(true) {
+            window.set_always_on_top(true).ok();
             window.set_focus().ok();
         }
     }
@@ -67,13 +78,6 @@ pub fn open_or_focus_chat(app: &AppHandle, title: &str) {
             // on the page content only shows the desktop through it if
             // the window itself allows per-pixel alpha.
             .transparent(true)
-            // Pets default to `always_on_top` (`display_priority: 1`,
-            // manager.rs's own default) -- a normal-level chat window
-            // sits in a *different* OS z-band than that and can never
-            // be raised above it just by focusing, on any platform.
-            // Without this, `focus_if_unfocused`'s `set_focus()` looks
-            // like a no-op whenever a pet is on top.
-            .always_on_top(true)
             .build();
 
     match result {
@@ -94,12 +98,27 @@ pub fn open_or_focus_chat(app: &AppHandle, title: &str) {
                 // specifically about *not yet seen*, not merely "chat
                 // window exists"), including the case where a reply
                 // arrived while this window sat open but unfocused.
+                // Also (re)asserts always_on_top for however focus was
+                // regained -- covers the OS's own click-to-focus path,
+                // not just `focus_if_unfocused`'s explicit one.
                 WindowEvent::Focused(true) => {
+                    if let Some(window) = app_handle.get_webview_window(CHAT_WINDOW_LABEL) {
+                        window.set_always_on_top(true).ok();
+                    }
                     let chat_state = app_handle.state::<ChatRuntimeState>();
                     if chat_state.unread().is_some() {
                         chat_state.clear_unread();
                         chat_pause::recompute(&app_handle);
                         status_bubble::sync(&app_handle);
+                    }
+                }
+                // Drops back to normal level once it's no longer the
+                // active window -- staying above the pets only while
+                // actually in use, not pinned above every other app
+                // indefinitely.
+                WindowEvent::Focused(false) => {
+                    if let Some(window) = app_handle.get_webview_window(CHAT_WINDOW_LABEL) {
+                        window.set_always_on_top(false).ok();
                     }
                 }
                 _ => {}
