@@ -1,6 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-shell";
 import "@picocss/pico/css/pico.min.css";
 import "./style.css";
@@ -36,6 +37,63 @@ interface PersonalizationSnapshot {
   config_path: string;
 }
 
+type ProviderKind = "open_ai" | "anthropic" | "ollama" | "mock";
+
+interface ProviderSettings {
+  base_url: string | null;
+  model: string | null;
+  disclosure_acknowledged?: boolean;
+}
+
+interface AiSettings {
+  ai_enabled: boolean;
+  active_provider: ProviderKind | null;
+  openai: ProviderSettings;
+  anthropic: ProviderSettings;
+  ollama: ProviderSettings;
+  mock: Record<string, never>;
+}
+
+interface AiSettingsSnapshot {
+  settings: AiSettings;
+  openai_key_set: boolean;
+  anthropic_key_set: boolean;
+  persona_warning: string | null;
+}
+
+interface ModelInfo {
+  id: string;
+  display_name: string;
+}
+
+interface ModelListResult {
+  models: ModelInfo[];
+  error: string | null;
+}
+
+type LogRole = "user" | "assistant" | "error";
+
+interface LogEntry {
+  role: LogRole;
+  content: string;
+  timestamp: string;
+}
+
+type NotReadyReason = "disabled" | "no_provider";
+
+interface ChatStateSnapshot {
+  entries: LogEntry[];
+  is_pending: boolean;
+  partial_text: string;
+  ai_ready: boolean;
+  not_ready_reason: NotReadyReason | null;
+}
+
+type ChatEvent =
+  | { type: "chunk"; delta: string }
+  | { type: "done"; content: string }
+  | { type: "error"; message: string };
+
 const UI_LANGUAGES = ["zh-hant", "zh-hans", "en", "ja", "ko"];
 
 let dict: Dictionary = {};
@@ -53,7 +111,7 @@ async function loadDictionary(): Promise<void> {
   dict = JSON.parse(raw) as Dictionary;
 }
 
-type Tab = "personalization" | "update" | "about";
+type Tab = "personalization" | "ai" | "update" | "about";
 let activeTab: Tab = "personalization";
 
 interface UpdateInfo {
@@ -67,7 +125,38 @@ interface UpdateInfo {
 // instead of re-checking GitHub a second time.
 let pendingUpdate: UpdateInfo | null = null;
 
+function applyWindowOpacity(opacity: number): void {
+  document.querySelector<HTMLDivElement>("#app")!.style.opacity = String(opacity);
+}
+
+// Shared by both windows (settings-ui's "Settings window opacity" /
+// ai-chat's "Chat window opacity"): fetch the currently configured
+// value once on load, then stay in sync with the personalization
+// tab's slider via a broadcast event rather than each window polling.
+async function initWindowOpacity(): Promise<void> {
+  applyWindowOpacity(await invoke<number>("get_window_opacity"));
+  await listen<number>("opacity-changed", (event) => applyWindowOpacity(event.payload));
+}
+
 async function main(): Promise<void> {
+  // The chat window shares this same index.html/main.ts entry point
+  // (chat_window.rs's own comment explains why: WebviewUrl::App is
+  // only reliable for the literal "index.html" path with this
+  // project's custom-protocol setup) -- branch on the window's own
+  // label rather than trying to ship a second HTML page.
+  if (getCurrentWindow().label === "chat") {
+    await mainChat();
+    return;
+  }
+  // The status bubble shares the same entry point too -- without this
+  // branch it fell through to the settings UI below, rendered (barely
+  // visibly) inside the bubble's tiny 180x36 window instead of the
+  // "...", success, or failure glyph it's actually meant to show.
+  if (getCurrentWindow().label === "status-bubble") {
+    await mainStatusBubble();
+    return;
+  }
+
   try {
     await loadDictionary();
     pendingUpdate = await invoke<UpdateInfo | null>("pending_update");
@@ -75,6 +164,7 @@ async function main(): Promise<void> {
       activeTab = "update";
     }
     await render();
+    await initWindowOpacity();
 
     // Only relevant if the startup check finds an update *after* this
     // window is already open (pendingUpdate above only covers the case
@@ -99,10 +189,12 @@ async function render(): Promise<void> {
     <main class="container-fluid settings-window">
       <nav class="tabs">
         <button class="tab-button" data-tab="personalization">${t("settings.tab.personalization")}</button>
+        <button class="tab-button" data-tab="ai">${t("settings.tab.ai")}</button>
         <button class="tab-button" data-tab="update">${t("settings.tab.update")}</button>
         <button class="tab-button" data-tab="about">${t("settings.tab.about")}</button>
       </nav>
       <section class="panel" data-panel="personalization"></section>
+      <section class="panel" data-panel="ai"></section>
       <section class="panel" data-panel="update"></section>
       <section class="panel" data-panel="about"></section>
     </main>
@@ -123,6 +215,7 @@ async function render(): Promise<void> {
 
   await Promise.allSettled([
     renderPersonalization().catch((err) => renderError("personalization", err)),
+    renderAi().catch((err) => renderError("ai", err)),
     renderUpdate().catch((err) => renderError("update", err)),
     renderAbout().catch((err) => renderError("about", err)),
   ]);
@@ -279,6 +372,181 @@ async function renderPersonalization(): Promise<void> {
   });
 }
 
+function providerSettingsFor(settings: AiSettings, provider: ProviderKind): ProviderSettings {
+  if (provider === "open_ai") return settings.openai;
+  if (provider === "anthropic") return settings.anthropic;
+  if (provider === "ollama") return settings.ollama;
+  return { base_url: null, model: null };
+}
+
+function needsDisclosure(settings: AiSettings, provider: ProviderKind): boolean {
+  return (
+    (provider === "open_ai" || provider === "anthropic") &&
+    !providerSettingsFor(settings, provider).disclosure_acknowledged
+  );
+}
+
+async function renderAi(): Promise<void> {
+  const panel = document.querySelector<HTMLElement>('[data-panel="ai"]')!;
+  const snapshot = await invoke<AiSettingsSnapshot>("get_ai_settings");
+  renderAiPanel(panel, snapshot);
+}
+
+function renderAiPanel(panel: HTMLElement, snapshot: AiSettingsSnapshot): void {
+  const { settings, persona_warning } = snapshot;
+
+  const providerOptionsHtml = (
+    [
+      [null, "ai.provider.none"],
+      ["open_ai", "ai.provider.openai"],
+      ["anthropic", "ai.provider.anthropic"],
+      ["ollama", "ai.provider.ollama"],
+      ["mock", "ai.provider.mock"],
+    ] as const
+  )
+    .map(
+      ([value, key]) =>
+        `<option value="${value ?? ""}" ${value === settings.active_provider ? "selected" : ""}>${t(key)}</option>`,
+    )
+    .join("");
+
+  panel.innerHTML = `
+    ${field(t("ai.enabled_label"), `<input type="checkbox" id="ai-enabled-checkbox" ${settings.ai_enabled ? "checked" : ""} />`)}
+    ${field(t("ai.provider_label"), `<select id="ai-provider-select">${providerOptionsHtml}</select>`)}
+    <div id="ai-disclosure"></div>
+    <div id="ai-provider-config"></div>
+    ${persona_warning ? `<p class="error">${t("ai.persona_warning", { error: persona_warning })}</p>` : ""}
+  `;
+
+  panel.querySelector<HTMLInputElement>("#ai-enabled-checkbox")!.addEventListener("change", (e) => {
+    invoke("set_ai_enabled", { enabled: (e.target as HTMLInputElement).checked });
+  });
+
+  const providerSelect = panel.querySelector<HTMLSelectElement>("#ai-provider-select")!;
+  providerSelect.addEventListener("change", () => {
+    void handleProviderChange(panel, snapshot, providerSelect);
+  });
+
+  renderProviderConfig(panel, snapshot, settings.active_provider);
+}
+
+// A provider change goes through the disclosure prompt first (only for
+// OpenAI/Anthropic, only until acknowledged once -- ai-provider's
+// "Cloud provider data disclosure") rather than switching immediately,
+// unlike every other live-apply control on this settings window.
+async function handleProviderChange(
+  panel: HTMLElement,
+  snapshot: AiSettingsSnapshot,
+  select: HTMLSelectElement,
+): Promise<void> {
+  const newProvider = (select.value || null) as ProviderKind | null;
+  const disclosureEl = panel.querySelector<HTMLElement>("#ai-disclosure")!;
+
+  if (newProvider && needsDisclosure(snapshot.settings, newProvider)) {
+    disclosureEl.innerHTML = `
+      <p class="hint">${t(`ai.disclosure.${newProvider}`)}</p>
+      <button id="ai-disclosure-accept">${t("ai.disclosure.accept")}</button>
+      <button id="ai-disclosure-cancel" class="secondary">${t("ai.disclosure.cancel")}</button>
+    `;
+    disclosureEl
+      .querySelector<HTMLButtonElement>("#ai-disclosure-accept")!
+      .addEventListener("click", async () => {
+        await invoke("acknowledge_provider_disclosure", { provider: newProvider });
+        await invoke("set_active_provider", { provider: newProvider });
+        await renderAi();
+      });
+    disclosureEl
+      .querySelector<HTMLButtonElement>("#ai-disclosure-cancel")!
+      .addEventListener("click", () => {
+        select.value = snapshot.settings.active_provider ?? "";
+        disclosureEl.innerHTML = "";
+      });
+    return;
+  }
+
+  await invoke("set_active_provider", { provider: newProvider });
+  await renderAi();
+}
+
+function renderProviderConfig(
+  panel: HTMLElement,
+  snapshot: AiSettingsSnapshot,
+  provider: ProviderKind | null,
+): void {
+  const configEl = panel.querySelector<HTMLElement>("#ai-provider-config")!;
+
+  if (provider === null) {
+    configEl.innerHTML = `<p class="hint">${t("ai.provider.none_hint")}</p>`;
+    return;
+  }
+  if (provider === "mock") {
+    configEl.innerHTML = `<p class="hint">${t("ai.provider.mock_hint")}</p>`;
+    return;
+  }
+
+  const needsKey = provider === "open_ai" || provider === "anthropic";
+  const keySet = provider === "open_ai" ? snapshot.openai_key_set : snapshot.anthropic_key_set;
+  const current = providerSettingsFor(snapshot.settings, provider);
+
+  configEl.innerHTML = `
+    ${
+      needsKey
+        ? field(
+            t("ai.api_key_label"),
+            `<input type="password" id="ai-api-key-input" placeholder="${keySet ? t("ai.api_key.set_placeholder") : t("ai.api_key.unset_placeholder")}" />`,
+          )
+        : ""
+    }
+    ${field(t("ai.base_url_label"), `<input type="text" id="ai-base-url-input" placeholder="${t("ai.base_url.default_placeholder")}" value="${current.base_url ?? ""}" />`)}
+    ${field(t("ai.model_label"), `<input type="text" id="ai-model-input" list="ai-model-list" value="${current.model ?? ""}" />`)}
+    <datalist id="ai-model-list"></datalist>
+    <button id="ai-fetch-models-button" type="button">${t("ai.fetch_models_button")}</button>
+    <div id="ai-fetch-models-result"></div>
+  `;
+
+  if (needsKey) {
+    configEl
+      .querySelector<HTMLInputElement>("#ai-api-key-input")!
+      .addEventListener("change", (e) => {
+        const value = (e.target as HTMLInputElement).value;
+        if (value) void invoke("set_provider_api_key", { provider, apiKey: value });
+      });
+  }
+  configEl
+    .querySelector<HTMLInputElement>("#ai-base-url-input")!
+    .addEventListener("change", (e) => {
+      invoke("set_provider_base_url", { provider, baseUrl: (e.target as HTMLInputElement).value });
+    });
+  configEl.querySelector<HTMLInputElement>("#ai-model-input")!.addEventListener("change", (e) => {
+    invoke("set_provider_model", { provider, model: (e.target as HTMLInputElement).value });
+  });
+
+  const resultEl = configEl.querySelector<HTMLElement>("#ai-fetch-models-result")!;
+  configEl
+    .querySelector<HTMLButtonElement>("#ai-fetch-models-button")!
+    .addEventListener("click", async (e) => {
+      const button = e.target as HTMLButtonElement;
+      button.disabled = true;
+      resultEl.innerHTML = `<p>${t("ai.fetch_models.loading")}</p>`;
+      try {
+        const result = await invoke<ModelListResult>("fetch_provider_models", { provider });
+        if (result.error) {
+          resultEl.innerHTML = `<p class="error">${t("ai.fetch_models.error", { error: result.error })}</p>`;
+        } else {
+          const datalist = configEl.querySelector<HTMLDataListElement>("#ai-model-list")!;
+          datalist.innerHTML = result.models
+            .map((m) => `<option value="${m.id}">${m.display_name}</option>`)
+            .join("");
+          resultEl.innerHTML = `<p>${t("ai.fetch_models.success", { count: result.models.length })}</p>`;
+        }
+      } catch (err) {
+        resultEl.innerHTML = `<p class="error">${String(err)}</p>`;
+      } finally {
+        button.disabled = false;
+      }
+    });
+}
+
 async function renderUpdate(): Promise<void> {
   const panel = document.querySelector<HTMLElement>('[data-panel="update"]')!;
   const version = await getVersion();
@@ -392,6 +660,187 @@ async function renderAbout(): Promise<void> {
       open(link.href);
     });
   }
+}
+
+function escapeHtml(text: string): string {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function entryHtml(entry: LogEntry): string {
+  if (entry.role === "error") {
+    return `<p class="chat-entry chat-entry-error">⚠️ ${escapeHtml(entry.content)}</p>`;
+  }
+  return `<p class="chat-entry chat-entry-${entry.role}">${escapeHtml(entry.content)}</p>`;
+}
+
+// Fixed literal glyphs (`ai-chat`'s "Status bubble" -- not localized
+// text), matching the persona rather than the UI language.
+const BUBBLE_THINKING = "...";
+const BUBBLE_REPLY = "Ciallo～(∠・ω< )⌒☆";
+const BUBBLE_FAILURE = "(×_×)";
+const BUBBLE_POLL_MS = 500;
+
+async function mainStatusBubble(): Promise<void> {
+  document.body.classList.add("bubble-window");
+  const app = document.querySelector<HTMLDivElement>("#app")!;
+  app.innerHTML = `<div id="bubble" class="status-bubble"></div>`;
+  const bubbleEl = app.querySelector<HTMLDivElement>("#bubble")!;
+
+  // `status_bubble.rs`'s own `sync()` already decides whether this
+  // window exists/is shown at all -- this loop only has to pick the
+  // right glyph for whatever moment it's asked to render, using the
+  // same snapshot the chat window already polls (no bubble-specific
+  // IPC): "pending" beats everything, otherwise the most recent log
+  // entry's role tells reply from failure.
+  async function refresh(): Promise<void> {
+    const state = await invoke<ChatStateSnapshot>("get_chat_state");
+    let text = "";
+    if (state.is_pending) {
+      text = BUBBLE_THINKING;
+    } else {
+      const last = state.entries[state.entries.length - 1];
+      text =
+        last?.role === "error" ? BUBBLE_FAILURE : last?.role === "assistant" ? BUBBLE_REPLY : "";
+    }
+    bubbleEl.textContent = text;
+    bubbleEl.hidden = text === "";
+    setTimeout(() => void refresh(), BUBBLE_POLL_MS);
+  }
+
+  await refresh();
+}
+
+async function mainChat(): Promise<void> {
+  try {
+    await loadDictionary();
+    await renderChatWindow();
+    await initWindowOpacity();
+  } catch (err) {
+    console.error("chat window failed to initialize:", err);
+    document.querySelector<HTMLDivElement>("#app")!.innerHTML =
+      `<p class="error">${String(err)}</p>`;
+  }
+}
+
+async function renderChatWindow(): Promise<void> {
+  const app = document.querySelector<HTMLDivElement>("#app")!;
+  app.innerHTML = `
+    <main class="container-fluid chat-window">
+      <div id="chat-transcript" class="chat-transcript"></div>
+      <div id="chat-status"></div>
+      <form id="chat-form" class="chat-form">
+        <input type="text" id="chat-input" autocomplete="off" placeholder="${t("chat.input_placeholder")}" />
+        <button type="submit" id="chat-send-button">${t("chat.send_button")}</button>
+        <button type="button" id="chat-stop-button" class="secondary" hidden>${t("chat.stop_button")}</button>
+      </form>
+      <button type="button" id="chat-new-button" class="secondary outline">${t("chat.new_chat_button")}</button>
+    </main>
+  `;
+
+  const transcriptEl = app.querySelector<HTMLElement>("#chat-transcript")!;
+  const statusEl = app.querySelector<HTMLElement>("#chat-status")!;
+  const form = app.querySelector<HTMLFormElement>("#chat-form")!;
+  const input = app.querySelector<HTMLInputElement>("#chat-input")!;
+  const sendButton = app.querySelector<HTMLButtonElement>("#chat-send-button")!;
+  const stopButton = app.querySelector<HTMLButtonElement>("#chat-stop-button")!;
+  const newButton = app.querySelector<HTMLButtonElement>("#chat-new-button")!;
+
+  // The canonical transcript, replaced wholesale by every `refresh()`.
+  // A just-sent message is appended here optimistically (not through a
+  // refresh) so the streamed reply's partial text never has to
+  // reconcile against a server snapshot that might already be ahead of
+  // it -- see chat_commands.rs's own note on this simplification.
+  let committedEntries: LogEntry[] = [];
+
+  function renderTranscript(pendingText: string | null): void {
+    const pendingHtml =
+      pendingText !== null
+        ? `<p class="chat-entry chat-entry-assistant chat-entry-pending">${escapeHtml(pendingText)}</p>`
+        : "";
+    transcriptEl.innerHTML = committedEntries.map(entryHtml).join("") + pendingHtml;
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
+
+  function setPendingUi(pending: boolean): void {
+    input.disabled = pending;
+    sendButton.hidden = pending;
+    stopButton.hidden = !pending;
+  }
+
+  function updateReadiness(ready: boolean, reason: NotReadyReason | null): void {
+    if (!ready) {
+      statusEl.innerHTML = reason ? `<p class="hint">${t(`chat.not_ready.${reason}`)}</p>` : "";
+      input.disabled = true;
+      sendButton.disabled = true;
+    } else {
+      statusEl.innerHTML = "";
+      sendButton.disabled = false;
+    }
+  }
+
+  // A generation that outlives this window (started before it was
+  // (re)opened, or before a close/reopen) has no channel this window
+  // instance ever attached to -- Tauri's Channel<T> is scoped to the
+  // invocation that created it, with no reattachment mechanism. Rather
+  // than inventing one, a still-pending state just polls this snapshot
+  // until it resolves; the common case (window stays open throughout)
+  // never touches this path at all, since the channel handles it live.
+  async function refresh(): Promise<void> {
+    const state = await invoke<ChatStateSnapshot>("get_chat_state");
+    committedEntries = state.entries;
+    renderTranscript(state.is_pending ? state.partial_text : null);
+    setPendingUi(state.is_pending);
+    updateReadiness(state.ai_ready, state.not_ready_reason);
+    if (state.is_pending) {
+      setTimeout(() => void refresh(), 1000);
+    }
+  }
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const message = input.value.trim();
+    if (!message || sendButton.disabled) return;
+    input.value = "";
+
+    committedEntries = [
+      ...committedEntries,
+      { role: "user", content: message, timestamp: new Date().toISOString() },
+    ];
+    renderTranscript("");
+    setPendingUi(true);
+
+    const channel = new Channel<ChatEvent>();
+    let partial = "";
+    channel.onmessage = (event) => {
+      if (event.type === "chunk") {
+        partial += event.delta;
+        renderTranscript(partial);
+      } else {
+        // "done" and "error" both resolve to the same next step: the
+        // backend has already appended the final entry (assistant
+        // reply or error) to the session log, so re-fetch the
+        // canonical state rather than trying to reconstruct it here.
+        void refresh();
+      }
+    };
+
+    invoke("send_chat_message", { channel, message }).catch((err: unknown) => {
+      setPendingUi(false);
+      statusEl.innerHTML = `<p class="error">${String(err)}</p>`;
+    });
+  });
+
+  stopButton.addEventListener("click", () => {
+    void invoke("stop_generation").then(() => refresh());
+  });
+
+  newButton.addEventListener("click", () => {
+    void invoke("new_chat_session").then(() => refresh());
+  });
+
+  await refresh();
 }
 
 main();
