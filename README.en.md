@@ -23,22 +23,23 @@
 
 A cross-platform desktop pet, rewritten in Rust from the original Python
 project [Ameath](https://gitee.com/lzy-buaa-jdi/ameath). Fleet Snowfluff
-wanders your screen, follows your cursor, and reacts when you drag it —
+wanders your screen, follows your cursor, and reacts when you drag her —
 running natively on **Windows**, **macOS**, and **Linux (X11)**.
-
-> **Status:** this project is closing in on `v0.1.0`, with core functionality
-> already working on all three platforms. For the development
-> history, design decisions, and specs, see
-> [`openspec/changes/`](openspec/changes/).
 
 ## ✨ Features
 
 - 🐾 **Smart motion system** — wander/follow/curious/rest state machine with
-  an inertia-based movement model, so it never feels robotic
+  an inertia-based movement model, so she never feels robotic
 - 🖱️ **Follows your cursor** — distance-aware: actively follows from far
   away, curiously watches up close
 - 🎭 **Rich animation set** — move, idle, drag, and pause-reaction
   animations; draggable with a voice reaction
+- 💬 **AI chat companion** — double-click the pet to open a chat window and
+  talk with her in character; a status bubble shows when she's thinking or
+  has a reply waiting, even while the window is closed
+- 🔌 **Choose your own AI provider** — OpenAI, Anthropic (Claude), a local
+  Ollama model, or a built-in offline demo mode; off by default, and cloud
+  providers ask for one-time confirmation before anything leaves your device
 - 👥 **Multiple instances** — several pets on screen at once, with settings
   applying live to every one
 - 📏 **Adjustable scale and opacity** — both apply immediately, no restart
@@ -87,7 +88,7 @@ originate from that project. The Rust rewrite (architecture, rendering,
 and platform support) is maintained by
 [kagetsuki1997](https://github.com/kagetsuki1997).
 
-The pet character and its assets belong to **Wuthering Waves** by
+The pet character and her assets belong to **Wuthering Waves** by
 **Kuro Games**. This is an unofficial fan project; it is not affiliated
 with or endorsed by Kuro Games. Assets will be removed promptly upon any
 legitimate infringement request.
