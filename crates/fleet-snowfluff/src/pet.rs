@@ -270,6 +270,27 @@ impl PetWindow {
         }
     }
 
+    /// Clears any leftover dock bookkeeping. `apply_dock`'s own
+    /// cleanup (the `None if self.docked` arm above) only runs while
+    /// still paused -- manager.rs only calls `apply_dock` at all when
+    /// `pet.paused` is true -- so it would otherwise never fire again
+    /// once pause itself ends, leaving `docked`/`dock_position` stuck
+    /// at the last dock spot forever. That silently broke every mouse
+    /// interaction with the pet from then on (reported as "the pet
+    /// won't release any mouse event, needs a restart"): the real
+    /// window/render position self-heals back to `state.x/y` on the
+    /// very next unpaused `tick()` regardless, but `effective_position()`
+    /// -- what hit-testing and the status bubble anchor to -- kept
+    /// reading the stale `dock_position` override instead, so clicks on
+    /// the pet's real (now-wandering) location never matched. The
+    /// caller (`PetManager::set_paused`) calls this whenever pause ends,
+    /// independent of `apply_dock`'s own once-a-second eligibility
+    /// recheck.
+    pub fn clear_dock(&mut self) {
+        self.docked = false;
+        self.dock_position = None;
+    }
+
     fn size_for(&self, native_w: u32, native_h: u32) -> PetSize {
         PetSize { w: native_w as f64 * self.scale, h: native_h as f64 * self.scale }
     }

@@ -509,6 +509,12 @@ impl PetManager {
         self.paused = paused;
         for pet in &mut self.pets {
             pet.paused = paused;
+            // `apply_dock` only ever runs while still paused, so ending
+            // pause here is the only reliable place to clear a pet's
+            // leftover dock bookkeeping -- see `PetWindow::clear_dock`.
+            if !paused {
+                pet.clear_dock();
+            }
         }
     }
 
