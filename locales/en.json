@@ -38,6 +38,7 @@
   "personalization.voice_language_label": "Voice Language",
 
   "ai.enabled_label": "Enable AI Features",
+  "ai.profiles_section_title": "AI Providers",
   "ai.profile.anthropic.subscription": "Anthropic — Claude (Subscription)",
   "ai.profile.anthropic.api_key": "Anthropic — API Key",
   "ai.profile.open_ai.subscription": "OpenAI — ChatGPT/Codex (Subscription)",
@@ -45,7 +46,9 @@
   "ai.profile.ollama.local": "Ollama (Local)",
   "ai.profile.mock.local": "Offline Demo",
   "ai.profile_enabled_label": "Enable this profile",
+  "ai.default_section_title": "Default",
   "ai.default_label": "Use as default",
+  "ai.default.none_enabled_option": "No profile enabled yet",
   "ai.experimental_badge": "Experimental",
   "ai.disclosure.anthropic.api_key": "Messages you send will be sent to Anthropic's servers over the internet, using your API key.",
   "ai.disclosure.anthropic.subscription": "Messages you send will be sent to Anthropic's servers over the internet, using your signed-in Claude account (via the Claude Code CLI) rather than a separate API key.",

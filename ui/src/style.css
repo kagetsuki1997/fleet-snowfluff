@@ -338,8 +338,24 @@ body.bubble-window #app {
   text-overflow: ellipsis;
 }
 
-/* AI tab's profile list (subscription-first-chat) -- one <details> per
-   selectable (provider, auth method) combination. */
+/* AI tab's titled sections (subscription-first-chat) -- Pico's own
+   `fieldset` is border-0 by default (meant for a bare group of
+   radios/checkboxes under a bold label, not a visually distinct box),
+   so this adds the border/padding a "section with a title" actually
+   needs. */
+.ai-section {
+  border: 1px solid var(--pico-border-color);
+  border-radius: var(--pico-border-radius);
+  padding: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.ai-section legend {
+  font-weight: 600;
+  padding: 0 0.25rem;
+}
+
+/* One <details> per selectable (provider, auth method) combination. */
 #ai-profiles {
   display: flex;
   flex-direction: column;
@@ -373,8 +389,17 @@ body.bubble-window #app {
   text-transform: uppercase;
   padding: 0.1rem 0.4rem;
   border-radius: 0.25rem;
-  background: var(--pico-mark-background-color);
+  /* Not `--pico-mark-background-color` -- that one still follows
+     `@media (prefers-color-scheme: dark)` (this app overrides Pico's
+     light-theme variables but never its `mark` colors), so on a
+     system in dark mode it resolves to a dark navy background paired
+     here with this app's own dark maroon text -- unreadable. Every
+     variable below is unconditionally overridden in this app's own
+     `:root` block regardless of OS theme, so this pairing can't drift
+     the same way. */
+  background: var(--pico-secondary-background);
   color: var(--pico-color);
+  border: 1px solid var(--pico-border-color);
   flex-shrink: 0;
 }
 

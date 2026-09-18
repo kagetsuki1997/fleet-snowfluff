@@ -92,8 +92,21 @@ const PROFILE_SLOTS: { provider: ProviderKind; auth_method: AuthMethod; experime
     { provider: "mock", auth_method: "local", experimental: false },
   ];
 
+// `--` not `:` -- a colon is legal in an HTML `id` attribute value, but
+// breaks `querySelector` when used bare (`#ai-model-list-anthropic:subscription`
+// parses `:subscription` as a pseudo-class and throws `SyntaxError:
+// ... is not a valid selector`, for every single profile since every
+// slot's key contains a colon). `data-slot="..."` attribute-selector
+// lookups (`[data-slot="..."]`) would have been fine either way, but
+// the bare `#id` lookups below aren't, so the key itself stays
+// selector-safe everywhere it's used.
 function slotKey(slot: ProfileKey): string {
-  return `${slot.provider}:${slot.auth_method}`;
+  return `${slot.provider}--${slot.auth_method}`;
+}
+
+function parseSlotKey(key: string): ProfileKey {
+  const [provider, auth_method] = key.split("--") as [ProviderKind, AuthMethod];
+  return { provider, auth_method };
 }
 
 function findProfile(settings: AiSettings, slot: ProfileKey): ProviderProfile | undefined {
@@ -430,15 +443,43 @@ function renderAiPanel(panel: HTMLElement, snapshot: AiSettingsSnapshot): void {
   const { settings, persona_warning } = snapshot;
 
   const rowsHtml = PROFILE_SLOTS.map((slot) => renderProfileRow(snapshot, slot)).join("");
+  const enabledSlots = PROFILE_SLOTS.filter((slot) => findProfile(settings, slot) !== undefined);
+  const defaultOptionsHtml = enabledSlots.length
+    ? enabledSlots
+        .map((slot) => {
+          const key = slotKey(slot);
+          return `<option value="${key}" ${isDefaultProfile(settings, slot) ? "selected" : ""}>${t(`ai.profile.${slot.provider}.${slot.auth_method}`)}</option>`;
+        })
+        .join("")
+    : `<option value="">${t("ai.default.none_enabled_option")}</option>`;
 
   panel.innerHTML = `
     ${field(t("ai.enabled_label"), `<input type="checkbox" id="ai-enabled-checkbox" ${settings.ai_enabled ? "checked" : ""} />`)}
-    <div id="ai-profiles">${rowsHtml}</div>
+    <fieldset class="ai-section">
+      <legend>${t("ai.profiles_section_title")}</legend>
+      <div id="ai-profiles">${rowsHtml}</div>
+    </fieldset>
+    <fieldset class="ai-section">
+      <legend>${t("ai.default_section_title")}</legend>
+      ${field(t("ai.default_label"), `<select id="ai-default-select" ${enabledSlots.length ? "" : "disabled"}>${defaultOptionsHtml}</select>`)}
+    </fieldset>
     ${persona_warning ? `<p class="error">${t("ai.persona_warning", { error: persona_warning })}</p>` : ""}
   `;
 
   panel.querySelector<HTMLInputElement>("#ai-enabled-checkbox")!.addEventListener("change", (e) => {
     invoke("set_ai_enabled", { enabled: (e.target as HTMLInputElement).checked });
+  });
+
+  const defaultSelect = panel.querySelector<HTMLSelectElement>("#ai-default-select")!;
+  defaultSelect.addEventListener("change", async () => {
+    if (!defaultSelect.value) return;
+    const slot = parseSlotKey(defaultSelect.value);
+    const ok = await invoke<boolean>("set_default_profile", {
+      provider: slot.provider,
+      authMethod: slot.auth_method,
+    });
+    if (!ok) defaultSelect.value = settings.default_profile ? slotKey(settings.default_profile) : "";
+    await renderAi();
   });
 
   for (const slot of PROFILE_SLOTS) {
@@ -468,7 +509,6 @@ function renderProfileRow(
   const configHtml = enabled
     ? `
       ${field(t("ai.profile_enabled_label"), `<input type="checkbox" class="ai-profile-enable" data-slot="${key}" checked />`)}
-      ${field(t("ai.default_label"), `<input type="radio" name="ai-default" class="ai-default-radio" data-slot="${key}" ${isDefaultProfile(settings, slot) ? "checked" : ""} />`)}
       ${
         needsKey
           ? field(
@@ -565,16 +605,6 @@ function wireProfileRow(
           disclosureEl.innerHTML = "";
         });
     });
-
-  const defaultRadio = row.querySelector<HTMLInputElement>(".ai-default-radio");
-  defaultRadio?.addEventListener("change", async () => {
-    const ok = await invoke<boolean>("set_default_profile", {
-      provider: slot.provider,
-      authMethod: slot.auth_method,
-    });
-    if (!ok) defaultRadio.checked = false;
-    await renderAi();
-  });
 
   row.querySelector<HTMLInputElement>(".ai-api-key-input")?.addEventListener("change", (e) => {
     const value = (e.target as HTMLInputElement).value;

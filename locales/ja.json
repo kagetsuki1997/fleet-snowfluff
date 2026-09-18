@@ -38,6 +38,7 @@
   "personalization.voice_language_label": "音声言語",
 
   "ai.enabled_label": "AI 機能を有効にする",
+  "ai.profiles_section_title": "AI プロバイダー",
   "ai.profile.anthropic.subscription": "Anthropic — Claude（サブスクリプション）",
   "ai.profile.anthropic.api_key": "Anthropic — API キー",
   "ai.profile.open_ai.subscription": "OpenAI — ChatGPT/Codex（サブスクリプション）",
@@ -45,7 +46,9 @@
   "ai.profile.ollama.local": "Ollama（ローカル）",
   "ai.profile.mock.local": "オフラインデモ",
   "ai.profile_enabled_label": "このプロファイルを有効にする",
+  "ai.default_section_title": "デフォルト",
   "ai.default_label": "デフォルトとして使用",
+  "ai.default.none_enabled_option": "有効なプロファイルがありません",
   "ai.experimental_badge": "実験的機能",
   "ai.disclosure.anthropic.api_key": "送信したメッセージは、あなたの API キーを使用してインターネット経由で Anthropic のサーバーに送信されます。",
   "ai.disclosure.anthropic.subscription": "送信したメッセージは、個別の API キーではなく、あなたがサインイン済みの Claude アカウント（Claude Code CLI 経由）を使用してインターネット経由で Anthropic のサーバーに送信されます。",

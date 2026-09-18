@@ -38,6 +38,7 @@
   "personalization.voice_language_label": "음성 언어",
 
   "ai.enabled_label": "AI 기능 사용",
+  "ai.profiles_section_title": "AI 제공자",
   "ai.profile.anthropic.subscription": "Anthropic — Claude（구독）",
   "ai.profile.anthropic.api_key": "Anthropic — API 키",
   "ai.profile.open_ai.subscription": "OpenAI — ChatGPT/Codex（구독）",
@@ -45,7 +46,9 @@
   "ai.profile.ollama.local": "Ollama（로컬）",
   "ai.profile.mock.local": "오프라인 데모",
   "ai.profile_enabled_label": "이 프로필 사용",
+  "ai.default_section_title": "기본값",
   "ai.default_label": "기본값으로 사용",
+  "ai.default.none_enabled_option": "활성화된 프로필이 없습니다",
   "ai.experimental_badge": "실험적 기능",
   "ai.disclosure.anthropic.api_key": "보낸 메시지는 회원님의 API 키를 사용하여 인터넷을 통해 Anthropic 서버로 전송됩니다.",
   "ai.disclosure.anthropic.subscription": "보낸 메시지는 별도의 API 키가 아닌, 로그인된 Claude 계정(Claude Code CLI 경유)을 사용하여 인터넷을 통해 Anthropic 서버로 전송됩니다.",

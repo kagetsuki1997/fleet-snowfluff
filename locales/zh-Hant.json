@@ -38,6 +38,7 @@
   "personalization.voice_language_label": "語音語言",
 
   "ai.enabled_label": "啟用 AI 功能",
+  "ai.profiles_section_title": "AI 提供者",
   "ai.profile.anthropic.subscription": "Anthropic — Claude（訂閱）",
   "ai.profile.anthropic.api_key": "Anthropic — API 金鑰",
   "ai.profile.open_ai.subscription": "OpenAI — ChatGPT/Codex（訂閱）",
@@ -45,7 +46,9 @@
   "ai.profile.ollama.local": "Ollama（本機）",
   "ai.profile.mock.local": "離線示範模式",
   "ai.profile_enabled_label": "啟用此設定",
+  "ai.default_section_title": "預設",
   "ai.default_label": "設為預設",
+  "ai.default.none_enabled_option": "尚未啟用任何設定",
   "ai.experimental_badge": "實驗性",
   "ai.disclosure.anthropic.api_key": "你傳送的訊息將透過網路傳送至 Anthropic 的伺服器，使用你的 API 金鑰。",
   "ai.disclosure.anthropic.subscription": "你傳送的訊息將透過網路傳送至 Anthropic 的伺服器，使用你已登入的 Claude 帳號（透過 Claude Code CLI），而非另外設定的 API 金鑰。",
