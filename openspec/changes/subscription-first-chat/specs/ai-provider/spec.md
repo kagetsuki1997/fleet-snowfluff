@@ -14,6 +14,20 @@ The application SHALL support chat completions through a common provider interfa
 - **WHEN** a profile's auth method is switched from API key to subscription for the same provider brand
 - **THEN** chat continues to work through the same `AiProvider` interface, with no change visible to callers other than which credential source is used
 
+### Requirement: Live model listing
+
+For each provider brand using API-key or local auth (OpenAI, Anthropic, Ollama), the set of selectable models SHALL be fetched live from that provider rather than hardcoded, and a failure to fetch SHALL be shown as a configuration error at the point of selection. For a subscription auth method backed by a CLI with no live model-listing capability of its own, the set of selectable models SHALL instead be a fixed set of that CLI's own documented model identifiers/aliases (not an arbitrary guess at values the CLI's own documentation doesn't confirm), and leaving the model unset SHALL be valid and SHALL mean "use that CLI's own default."
+
+#### Scenario: Invalid credentials surface at model-selection time
+
+- **WHEN** the user enters an invalid API key and opens the model selector for that provider
+- **THEN** the model list fails to load and the failure reason is shown inline, without requiring a chat message to be sent first
+
+#### Scenario: A CLI-backed subscription profile still offers a model choice
+
+- **WHEN** the user opens the model selector for a subscription auth method backed by a CLI with no live listing capability
+- **THEN** the selector shows that CLI's own documented model identifiers/aliases rather than an empty list, and leaving no model selected is a valid choice
+
 ### Requirement: No provider configured by default
 
 On first run, no provider profile SHALL be enabled, including no default selection of a cloud provider or auth method.

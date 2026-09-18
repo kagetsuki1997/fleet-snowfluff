@@ -385,12 +385,36 @@ impl AiProvider for ClaudeCodeCli {
         Ok(Box::pin(stream))
     }
 
-    /// `claude -p` has no model-listing surface of its own -- selecting
-    /// which underlying model a subscription session uses is a
-    /// `--model` flag on `chat()`, not a discoverable list. Mirrors
-    /// `Mock`'s precedent: an empty list is not an error here.
-    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> { Ok(vec![]) }
+    /// `claude -p` has no live model-listing surface of its own -- no
+    /// `/models`-style endpoint exists for a CLI, unlike the HTTP
+    /// providers `ai-provider`'s "Live model listing" requirement was
+    /// originally written for. Returning an empty list here (as a first
+    /// pass did) left the settings UI with no way to pick a model at
+    /// all for this profile. Instead: the curated set of aliases
+    /// Claude Code itself offers for model selection. Leaving the
+    /// profile's model unset is still valid and means "no `--model`
+    /// flag, Claude Code's own default."
+    async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
+        Ok(CLAUDE_MODEL_ALIASES
+            .iter()
+            .map(|&(id, display_name)| ModelInfo { id: id.to_string(), display_name: display_name.to_string() })
+            .collect())
+    }
 }
+
+/// `claude --help`'s own `--model` flag documentation (Claude Code
+/// v2.1.275) gives "'fable', 'opus', or 'sonnet'" as examples, not an
+/// exhaustive list -- confirmed separately that `haiku` is also a valid
+/// alias (it appears in Claude Code's own `/model` picker). Not a live
+/// list -- there is nothing to fetch it from -- so kept as a small,
+/// explicitly-sourced constant rather than an open-ended guess at every
+/// alias that might exist.
+const CLAUDE_MODEL_ALIASES: &[(&str, &str)] = &[
+    ("sonnet", "Sonnet (latest)"),
+    ("opus", "Opus (latest)"),
+    ("fable", "Fable (latest)"),
+    ("haiku", "Haiku (latest)"),
+];
 
 #[cfg(test)]
 mod tests {
@@ -587,6 +611,17 @@ mod tests {
     #[test]
     fn parses_a_logged_out_status() {
         assert_eq!(parse_auth_status(r#"{"loggedIn": false}"#).unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn list_models_offers_the_known_aliases_not_an_empty_list() {
+        let models = ClaudeCodeCli::new(None, None).list_models().await.unwrap();
+        assert!(!models.is_empty(), "settings UI needs something to show in the model picker");
+        let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"sonnet"));
+        assert!(ids.contains(&"opus"));
+        assert!(ids.contains(&"fable"));
+        assert!(ids.contains(&"haiku"));
     }
 
     #[test]
