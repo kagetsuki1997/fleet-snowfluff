@@ -20,5 +20,5 @@ pub use log::{LogEntry, LogRole};
 pub use message::{Message, ModelInfo, ProviderError, ProviderKind, Role, StreamChunk};
 pub use persona::{FewShotExample, Language, Persona, PersonaParseError, ResponseLanguage};
 pub use provider::{AiProvider, ChatStream};
-pub use providers::{Anthropic, Mock, Ollama, OpenAiCompatible};
+pub use providers::{Anthropic, ClaudeCodeCli, Mock, Ollama, OpenAiCompatible};
 pub use settings::{AiSettings, AuthMethod, ProfileKey, ProviderProfile};

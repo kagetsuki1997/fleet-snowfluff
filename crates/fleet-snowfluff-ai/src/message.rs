@@ -37,7 +37,7 @@ impl Message {
 }
 
 /// One incremental piece of a streamed reply.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StreamChunk {
     pub delta: String,
 }

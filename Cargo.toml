@@ -45,7 +45,7 @@ tauri-plugin-autostart = "2"
 tauri-plugin-log = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
-tokio = { version = "1.53.1", features = ["rt", "macros", "time"] }
+tokio = { version = "1.53.1", features = ["rt", "macros", "time", "process"] }
 wgpu = "27"
 windows = { version = "0.61", features = [
   "Win32_Foundation",

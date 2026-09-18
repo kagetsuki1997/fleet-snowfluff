@@ -108,3 +108,17 @@ A provider implementation that has not been manually verified end-to-end SHALL b
 
 - **WHEN** the OpenAI subscription auth method is enabled
 - **THEN** the settings UI shows it as experimental/unverified, distinctly from a provider that has been verified
+
+### Requirement: Session continuity for CLI-backed subscription providers
+
+Where a subscription-auth provider's underlying CLI supports resuming a prior session, the application SHALL reuse that session across consecutive messages within the same chat session rather than starting a new one for every message, to avoid repeatedly resending full conversation context. If a resume attempt fails (the underlying session is no longer valid), the application SHALL fall back to starting a fresh session automatically rather than failing the request.
+
+#### Scenario: Consecutive messages reuse the underlying session
+
+- **WHEN** the user sends a second chat message in the same session, using a subscription profile whose CLI supports session resumption
+- **THEN** the request reuses the CLI session established by the first message rather than starting a new one
+
+#### Scenario: A stale session falls back to a fresh one automatically
+
+- **WHEN** a resume attempt fails because the underlying CLI session is no longer valid
+- **THEN** the application starts a fresh session for that message automatically, without surfacing this as a failure to the user beyond the normal loss of that session's conversational memory
