@@ -34,6 +34,25 @@ pub trait AiProvider: Send + Sync {
     /// to list; its implementation returns an empty list rather than
     /// treating this as an error.
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError>;
+
+    /// Checks whether this provider is currently usable without sending
+    /// a chat request (`subscription-first-chat`'s "Provider status
+    /// display" -- "checked fresh, not cached"). Default `Ok(())` for
+    /// every provider that has no separate notion of availability
+    /// beyond "can I be constructed at all" (API-key and local
+    /// providers); CLI-backed subscription providers override this to
+    /// check login status. Additive on purpose -- existing providers
+    /// need no changes to pick up the default.
+    async fn check_availability(&self) -> Result<(), ProviderError> { Ok(()) }
+
+    /// The underlying runtime's own session/thread id, if this
+    /// provider's last `chat()` call captured one -- `None` for every
+    /// provider without a resumable session concept. Not part of the
+    /// request/response flow itself (see `ClaudeCodeCli`/`Codex`'s own
+    /// docs for why this lives outside `chat()`'s signature); read by
+    /// the app crate after a generation completes to persist across
+    /// the next `chat()` call for the same profile.
+    fn session_id(&self) -> Option<String> { None }
 }
 
 #[cfg(test)]

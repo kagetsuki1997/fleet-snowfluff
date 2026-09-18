@@ -286,6 +286,10 @@ async fn read_line(
 impl AiProvider for Codex {
     fn kind(&self) -> ProviderKind { ProviderKind::OpenAi }
 
+    async fn check_availability(&self) -> Result<(), ProviderError> { check_logged_in().await }
+
+    fn session_id(&self) -> Option<String> { Codex::session_id(self) }
+
     /// See module doc for the two confirmed limitations this works
     /// around: synthesized chunking (no real incremental text from
     /// Codex) and `model_instructions_file` (no system-prompt flag).

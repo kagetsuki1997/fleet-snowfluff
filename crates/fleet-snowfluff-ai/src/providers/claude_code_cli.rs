@@ -292,6 +292,10 @@ async fn read_line(
 impl AiProvider for ClaudeCodeCli {
     fn kind(&self) -> ProviderKind { ProviderKind::Anthropic }
 
+    async fn check_availability(&self) -> Result<(), ProviderError> { check_logged_in().await }
+
+    fn session_id(&self) -> Option<String> { ClaudeCodeCli::session_id(self) }
+
     /// Genuinely incremental: `claude -p`'s stdout is read line-by-line
     /// inside the returned stream's own generator (same shape as
     /// `providers/http_stream.rs::stream_lines`), not drained before
