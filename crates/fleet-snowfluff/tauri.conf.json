@@ -1,7 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Fleet Snowfluff",
-  "version": "0.1.0",
   "identifier": "fleet-snowfluff",
   "build": {
     "frontendDist": "../../ui/dist",

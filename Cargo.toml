@@ -3,7 +3,7 @@ resolver = "2"
 members  = ["crates/fleet-snowfluff-ai", "crates/fleet-snowfluff-core", "crates/fleet-snowfluff"]
 
 [workspace.package]
-version    = "0.1.0"
+version    = "0.2.0"
 edition    = "2021"
 license    = "MIT"
 repository = "https://github.com/kagetsuki1997/fleet-snowfluff"
