@@ -337,3 +337,60 @@ body.bubble-window #app {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+/* AI tab's profile list (subscription-first-chat) -- one <details> per
+   selectable (provider, auth method) combination. */
+#ai-profiles {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.ai-profile-row summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+.ai-profile-name {
+  flex: 1;
+}
+
+.ai-profile-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-top: 0.5rem;
+}
+
+/* Deliberately visible on the row itself, not only inside the expanded
+   body -- `ai-provider`'s "Experimental provider marking" requires it
+   be seen "wherever the provider can be selected," before enabling. */
+.badge-experimental {
+  font-size: 0.7em;
+  font-weight: 600;
+  text-transform: uppercase;
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.25rem;
+  background: var(--pico-mark-background-color);
+  color: var(--pico-color);
+  flex-shrink: 0;
+}
+
+.ai-profile-status {
+  font-size: 0.8em;
+  color: var(--pico-muted-color);
+  flex-shrink: 0;
+}
+
+.ai-profile-status--connected {
+  color: var(--pico-ins-color);
+}
+
+.ai-profile-status--runtime_unavailable,
+.ai-profile-status--not_logged_in,
+.ai-profile-status--quota_exhausted,
+.ai-profile-status--error {
+  color: var(--pico-del-color);
+}
