@@ -12,6 +12,26 @@ Check the following locations and load every file that exists:
 
 ---
 
+## Commit Message Rules
+
+This repo enforces [Conventional Commits](https://www.conventionalcommits.org/) on every commit via `commitlint.config.mjs` (extends `@commitlint/config-conventional`) and the `wagoid/commitlint-github-action` `Lint commit` job in `.github/workflows/quality.yaml`, which runs on every push to `main`/`develop` and on every pull request. A commit that violates it fails CI.
+
+**Any commit an agent creates — including one submitted automatically without an explicit per-commit request — MUST pass this linter.** Concretely:
+
+- Header format: `type(scope): subject`, e.g. `feat(ai): add subscription auth`. `scope` is optional but conventional in this repo's own history.
+- `type` MUST be one of: `build`, `chore`, `ci`, `docs`, `feat`, `fix`, `perf`, `refactor`, `revert`, `style`, `test` — lower-case, never empty.
+- `subject` MUST NOT be empty and MUST NOT end with a period.
+- Header line MUST be ≤150 characters; each body line MUST also be ≤150 characters (this repo's own override of the default preset — see `commitlint.config.mjs`).
+- Match this repo's existing commit style (`git log --oneline`) as the working example: `feat(ai): ...`, `fix(ui): ...`, `docs(openspec): ...`.
+
+If unsure whether a message passes, run it through commitlint locally before committing (unset `IN_NIX_SHELL`/`COMMITLINT_PRESET` if set outside this project's own `nix develop` shell — `commitlint.config.mjs` picks a Nix-provided preset when `IN_NIX_SHELL` is set, and an inherited value from an unrelated shell will point it at a preset that doesn't exist here):
+
+```
+echo "<commit message>" | env -u IN_NIX_SHELL -u COMMITLINT_PRESET npx commitlint
+```
+
+---
+
 ## Code Discovery with codebase-memory-mcp (optional)
 
 This repo declares the `codebase-memory-mcp` server in `.mcp.json`. It provides a code

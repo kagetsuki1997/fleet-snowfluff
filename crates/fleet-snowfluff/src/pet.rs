@@ -35,13 +35,17 @@ pub struct PetWindow {
     surface: PetSurface,
     #[cfg(target_os = "windows")]
     layered: crate::platform::windows::LayeredSurface,
-    /// Overrides the position `render()` draws at, while pause-mode
-    /// window-snap docking (task 6.8) is active -- `state.x/y` stays
-    /// the pre-dock resting position to restore on undock, unchanged
-    /// by docking itself. Only needed on Windows: elsewhere, docking
-    /// moves the *window* directly via `window.set_position()` and
-    /// `render()` never needs to know about position at all.
-    #[cfg(target_os = "windows")]
+    /// The pet's current on-screen position while pause-mode window-
+    /// snap docking (task 6.8) is active -- `state.x/y` stays the
+    /// pre-dock resting position to restore on undock, unchanged by
+    /// docking itself. On Windows this also overrides where `render()`
+    /// draws (docking there never moves the real OS window at all);
+    /// elsewhere docking moves the *window* directly via
+    /// `window.set_position()`, but this is still tracked so
+    /// `effective_position()` (hit-testing, the status bubble anchor)
+    /// has a platform-independent source of truth for "where is this
+    /// pet actually visible right now" instead of the stale resting
+    /// position.
     dock_position: Option<(f64, f64)>,
     pub state: PetState,
     animations: Arc<AnimationSet>,
@@ -98,6 +102,7 @@ impl PetWindow {
         Self {
             window,
             surface,
+            dock_position: None,
             state,
             animations,
             pause_scheduler: PauseAnimationScheduler::new(),
@@ -242,18 +247,16 @@ impl PetWindow {
         match compute_dock_position(window, bounds, size) {
             Some((x, y)) => {
                 self.docked = true;
+                self.dock_position = Some((x, y));
                 self.apply_window_size(gpu);
                 #[cfg(not(target_os = "windows"))]
                 self.window
                     .set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)))
                     .ok();
-                #[cfg(target_os = "windows")]
-                {
-                    self.dock_position = Some((x, y));
-                }
             }
             None if self.docked => {
                 self.docked = false;
+                self.dock_position = None;
                 self.apply_window_size(gpu);
                 #[cfg(not(target_os = "windows"))]
                 {
@@ -262,13 +265,30 @@ impl PetWindow {
                         .set_position(tauri::Position::Logical(tauri::LogicalPosition::new(x, y)))
                         .ok();
                 }
-                #[cfg(target_os = "windows")]
-                {
-                    self.dock_position = None;
-                }
             }
             None => {}
         }
+    }
+
+    /// Clears any leftover dock bookkeeping. `apply_dock`'s own
+    /// cleanup (the `None if self.docked` arm above) only runs while
+    /// still paused -- manager.rs only calls `apply_dock` at all when
+    /// `pet.paused` is true -- so it would otherwise never fire again
+    /// once pause itself ends, leaving `docked`/`dock_position` stuck
+    /// at the last dock spot forever. That silently broke every mouse
+    /// interaction with the pet from then on (reported as "the pet
+    /// won't release any mouse event, needs a restart"): the real
+    /// window/render position self-heals back to `state.x/y` on the
+    /// very next unpaused `tick()` regardless, but `effective_position()`
+    /// -- what hit-testing and the status bubble anchor to -- kept
+    /// reading the stale `dock_position` override instead, so clicks on
+    /// the pet's real (now-wandering) location never matched. The
+    /// caller (`PetManager::set_paused`) calls this whenever pause ends,
+    /// independent of `apply_dock`'s own once-a-second eligibility
+    /// recheck.
+    pub fn clear_dock(&mut self) {
+        self.docked = false;
+        self.dock_position = None;
     }
 
     fn size_for(&self, native_w: u32, native_h: u32) -> PetSize {
@@ -311,9 +331,13 @@ impl PetWindow {
     }
 
     /// Starts a drag: `cursor` is the global cursor position at press time.
+    /// Computed from `effective_position()`, not raw `state.x/y` --
+    /// while docked those two disagree, and anchoring the offset to the
+    /// stale resting position would jump the pet the moment it moves.
     pub fn start_drag(&mut self, cursor: (f64, f64)) {
+        let (x, y) = self.effective_position();
         self.dragging = true;
-        self.drag_offset = (cursor.0 - self.state.x, cursor.1 - self.state.y);
+        self.drag_offset = (cursor.0 - x, cursor.1 - y);
         self.set_cue(AnimationCue::Drag);
     }
 
@@ -443,7 +467,13 @@ impl PetWindow {
         #[cfg(target_os = "windows")]
         {
             let _ = gpu;
-            let (x, y) = self.dock_position.unwrap_or((self.state.x, self.state.y));
+            // `effective_position()`, not raw `dock_position`, so a
+            // drag started while docked draws at the live drag
+            // position rather than the stale dock spot -- `apply_dock`
+            // (the only thing that otherwise updates `dock_position`)
+            // is skipped for whichever pet the tick loop is currently
+            // dragging.
+            let (x, y) = self.effective_position();
             let (scaled_w, scaled_h) = self.current_window_size;
             self.layered.update(
                 &self.window,
@@ -459,11 +489,33 @@ impl PetWindow {
         }
     }
 
-    pub fn bounds_contains(&self, point: (f64, f64)) -> bool {
-        let (w, h) = self.current_window_size;
-        point.0 >= self.state.x
-            && point.0 <= self.state.x + w as f64
-            && point.1 >= self.state.y
-            && point.1 <= self.state.y + h as f64
+    /// Where this pet is actually visible right now: the dock position
+    /// while docked (`ai-chat`'s "Pause docks to the chat window"), the
+    /// live drag position while being dragged (dock and drag can never
+    /// both apply -- the tick loop skips `apply_dock` for whichever pet
+    /// is the current drag owner), otherwise the plain resting
+    /// `state.x/y`. Docking never touches `state.x/y` itself (it stays
+    /// the pre-dock resting position to restore on undock), so anything
+    /// that needs "where is this pet drawn" -- hit-testing, the status
+    /// bubble anchor -- must go through this rather than reading
+    /// `state.x/y` directly, or it'll act on the wrong position for as
+    /// long as the pet stays docked.
+    pub fn effective_position(&self) -> (f64, f64) {
+        if self.dragging {
+            (self.state.x, self.state.y)
+        } else {
+            self.dock_position.unwrap_or((self.state.x, self.state.y))
+        }
     }
+
+    pub fn bounds_contains(&self, point: (f64, f64)) -> bool {
+        let (x, y) = self.effective_position();
+        let (w, h) = self.current_window_size;
+        point.0 >= x && point.0 <= x + w as f64 && point.1 >= y && point.1 <= y + h as f64
+    }
+
+    /// Current on-screen size in logical pixels -- lets a caller (the
+    /// status bubble) place itself relative to the pet's actual edges
+    /// rather than just its top-left `state.x/y`.
+    pub fn size(&self) -> (u32, u32) { self.current_window_size }
 }

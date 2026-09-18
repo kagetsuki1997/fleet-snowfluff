@@ -90,6 +90,20 @@ html {
   font-size: 14px;
 }
 
+/* Pico paints `background-color: var(--pico-background-color)` on
+   `html`/`body` itself -- a separate layer sitting *behind* #app, so
+   fading #app's own `opacity` (window-opacity, below) only ever
+   revealed that solid color, not the desktop through it. Neutralizing
+   it here and giving #app the real background instead means the
+   background is part of what fades as one group with the content,
+   which is what actually shows the desktop through a low-opacity
+   window (`.transparent(true)` on the Rust side is necessary but not
+   sufficient without this). */
+html,
+body {
+  background: transparent !important;
+}
+
 body {
   margin: 0;
 }
@@ -97,6 +111,11 @@ body {
 #app {
   height: 100vh;
   box-sizing: border-box;
+  background-color: var(--pico-background-color);
+  /* Whole-window opacity (settings-ui/ai-chat's window-opacity
+     requirements) is applied here as a plain inline style by main.ts;
+     the transition just smooths a live slider change. */
+  transition: opacity 0.15s ease;
 }
 
 .settings-window {
@@ -222,4 +241,189 @@ body {
   font-size: 0.8em;
   margin: -0.5rem 0 0;
   word-break: break-word;
+}
+
+.chat-window {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  padding: 0.75rem;
+  gap: 0.5rem;
+  box-sizing: border-box;
+}
+
+.chat-transcript {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+
+.chat-entry {
+  margin: 0;
+  padding: 0.5rem 0.75rem;
+  border-radius: 1rem;
+  max-width: 85%;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.chat-entry-user {
+  align-self: flex-end;
+  background: var(--pico-primary);
+  color: var(--pico-primary-inverse);
+}
+
+.chat-entry-assistant {
+  align-self: flex-start;
+  background: var(--pico-secondary-background);
+}
+
+.chat-entry-pending {
+  opacity: 0.75;
+}
+
+.chat-entry-error {
+  align-self: stretch;
+  background: none;
+  border: 1px solid var(--pico-del-color);
+  color: var(--pico-del-color);
+}
+
+.chat-form {
+  display: flex;
+  gap: 0.5rem;
+  margin: 0;
+}
+
+.chat-form input {
+  flex: 1;
+  margin: 0;
+}
+
+.chat-form button {
+  flex-shrink: 0;
+  margin: 0;
+  width: auto;
+}
+
+/* The status bubble's own #app: the shared background-color rule
+   above would otherwise paint a solid pink rectangle across this
+   window's full transparent surface, leaving no way to show just a
+   small floating pill of text over the desktop/pets behind it.
+   `main.ts` adds this class itself rather than relying on `:has()`,
+   which not every target webview engine supports. */
+body.bubble-window,
+body.bubble-window #app {
+  background: transparent;
+}
+
+.status-bubble {
+  height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.5rem 0.75rem;
+  border-radius: 1rem;
+  /* Same look as an assistant reply in the chat transcript
+     (`.chat-entry-assistant`) -- the bubble is showing the same
+     persona "speaking", just outside the chat window. */
+  background: var(--pico-secondary-background);
+  color: var(--pico-color);
+  font-size: 0.85rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* AI tab's titled sections (subscription-first-chat) -- Pico's own
+   `fieldset` is border-0 by default (meant for a bare group of
+   radios/checkboxes under a bold label, not a visually distinct box),
+   so this adds the border/padding a "section with a title" actually
+   needs. */
+.ai-section {
+  border: 1px solid var(--pico-border-color);
+  border-radius: var(--pico-border-radius);
+  padding: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.ai-section legend {
+  font-weight: 600;
+  padding: 0 0.25rem;
+}
+
+/* One <details> per selectable (provider, auth method) combination. */
+#ai-profiles {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+
+.ai-profile-row summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+}
+
+.ai-profile-name {
+  flex: 1;
+}
+
+.ai-profile-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  padding-top: 0.5rem;
+}
+
+/* Deliberately visible on the row itself, not only inside the expanded
+   body -- `ai-provider`'s "Experimental provider marking" requires it
+   be seen "wherever the provider can be selected," before enabling. */
+.badge-experimental {
+  font-size: 0.7em;
+  font-weight: 600;
+  text-transform: uppercase;
+  padding: 0.1rem 0.4rem;
+  border-radius: 0.25rem;
+  /* Not `--pico-mark-background-color` -- that one still follows
+     `@media (prefers-color-scheme: dark)` (this app overrides Pico's
+     light-theme variables but never its `mark` colors), so on a
+     system in dark mode it resolves to a dark navy background paired
+     here with this app's own dark maroon text -- unreadable. Every
+     variable below is unconditionally overridden in this app's own
+     `:root` block regardless of OS theme, so this pairing can't drift
+     the same way. */
+  background: var(--pico-secondary-background);
+  color: var(--pico-color);
+  border: 1px solid var(--pico-border-color);
+  flex-shrink: 0;
+}
+
+.ai-profile-status {
+  font-size: 0.8em;
+  color: var(--pico-muted-color);
+  flex-shrink: 0;
+}
+
+.ai-profile-status--connected {
+  color: var(--pico-ins-color);
+}
+
+.ai-profile-status--runtime_unavailable,
+.ai-profile-status--not_logged_in,
+.ai-profile-status--quota_exhausted,
+.ai-profile-status--error {
+  color: var(--pico-del-color);
+}
+
+.ai-profile-login-button {
+  width: auto;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.8em;
 }

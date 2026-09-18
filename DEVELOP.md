@@ -34,8 +34,6 @@ assets/                   # GIFs, voice clips, fonts -- embedded into the
                           # binary at build time (rust-embed)
 locales/                  # one flat JSON dictionary per UI language,
                           # shared source of truth for Rust and the webview
-legacy/                   # the original Python/tkinter app, kept
-                          # permanently as a behavior reference
 scripts/                  # maintenance scripts (see inline docs in each)
 docker/                   # the Linux build container definition
 devshell/                 # Nix devshell package list and formatter config
@@ -58,8 +56,6 @@ for the short version.
 | `just build-windows` | Cross-compile a portable Windows `.exe` from macOS/Linux (see below)  |
 | `just build-linux`   | Build for Linux inside a real container (see below)                   |
 | `just macos-signing` | (Re)generate/install/sync the self-signed macOS code-signing identity |
-| `just legacy-dev`    | Run the original Python app (`legacy/`) for behavior comparison       |
-| `just legacy-build`  | Build the original Python app's PyInstaller executable                |
 
 **Always use `just dev`/`just build`** (or `cargo tauri dev`/`cargo tauri
 build` directly) rather than a plain `cargo run`/`cargo build`. The settings

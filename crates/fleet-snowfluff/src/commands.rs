@@ -14,7 +14,7 @@
 use std::sync::Mutex;
 
 use fleet_snowfluff_core::{constants, Config, UiLanguage, VoiceLanguage, WanderStayMode};
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Emitter, State};
 
 use crate::{config_store, manager::PetManager};
 
@@ -105,6 +105,22 @@ pub fn set_opacity_index(
     let index = index.min(options.len() - 1);
     manager.lock().unwrap().set_opacity(options[index] as f32);
     apply_and_save(&app, &config, |c| c.transparency_index = index);
+    // Broadcasts to every open window (settings, chat, any future one)
+    // rather than a one-off `emit_to` -- each window's own frontend
+    // applies this to its own root element's CSS opacity
+    // (settings-ui's "Settings window opacity" / ai-chat's "Chat window
+    // opacity"), the same value that already applies to pet windows.
+    app.emit("opacity-changed", options[index]).ok();
+}
+
+/// The currently configured opacity value (`ai-chat`/`settings-ui`'s
+/// window-opacity requirements) -- a small, purpose-built command
+/// rather than routing through `get_personalization`, since the chat
+/// window needs this value too and has no other reason to fetch
+/// pet-specific personalization data.
+#[tauri::command]
+pub fn get_window_opacity(config: State<Mutex<Config>>) -> f64 {
+    constants::transparency_options()[config.lock().unwrap().transparency_index]
 }
 
 #[tauri::command]

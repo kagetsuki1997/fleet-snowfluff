@@ -65,9 +65,3 @@ fmt:
 # or `all`.
 macos-signing *args:
     scripts/setup-macos-signing.sh {{ args }}
-
-legacy-dev:
-    cd legacy; uv run ./main.py
-
-legacy-build:
-    cd legacy; uv run pyinstaller ameath.spec --noconfirm

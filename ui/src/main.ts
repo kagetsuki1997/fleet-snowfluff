@@ -1,6 +1,7 @@
-import { invoke } from "@tauri-apps/api/core";
+import { Channel, invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open } from "@tauri-apps/plugin-shell";
 import "@picocss/pico/css/pico.min.css";
 import "./style.css";
@@ -36,6 +37,124 @@ interface PersonalizationSnapshot {
   config_path: string;
 }
 
+type ProviderKind = "open_ai" | "anthropic" | "ollama" | "mock";
+type AuthMethod = "api_key" | "subscription" | "local";
+
+interface ProfileKey {
+  provider: ProviderKind;
+  auth_method: AuthMethod;
+}
+
+interface ProviderProfile {
+  provider: ProviderKind;
+  auth_method: AuthMethod;
+  model: string | null;
+  base_url: string | null;
+}
+
+interface AiSettings {
+  ai_enabled: boolean;
+  enabled_profiles: ProviderProfile[];
+  default_profile: ProfileKey | null;
+}
+
+interface AiSettingsSnapshot {
+  settings: AiSettings;
+  openai_key_set: boolean;
+  anthropic_key_set: boolean;
+  persona_warning: string | null;
+}
+
+// Mirrors `ai_commands::ProfileStatus` (`#[serde(tag = "state", rename_all
+// = "snake_case")]`) -- checked fresh every time the AI tab opens, never
+// cached (`ai-provider`'s "Provider status display").
+type ProfileStatus =
+  | { state: "not_configured" }
+  | { state: "disclosure_pending" }
+  | { state: "connected" }
+  | { state: "runtime_unavailable"; detail: string }
+  | { state: "not_logged_in"; detail: string }
+  | { state: "quota_exhausted"; detail: string }
+  | { state: "error"; detail: string };
+
+// The fixed, fully-enumerable set of selectable profiles -- six total
+// (OpenAI and Anthropic each get two auth methods; Ollama and Mock have
+// only Local). Grouped for display as OpenAI / Anthropic / Local,
+// subscription before API key within each cloud provider (matching the
+// source doc's own "subscription-first" mockup).
+const PROFILE_SLOTS: { provider: ProviderKind; auth_method: AuthMethod; experimental: boolean }[] =
+  [
+    { provider: "anthropic", auth_method: "subscription", experimental: false },
+    { provider: "anthropic", auth_method: "api_key", experimental: false },
+    { provider: "open_ai", auth_method: "subscription", experimental: true },
+    { provider: "open_ai", auth_method: "api_key", experimental: false },
+    { provider: "ollama", auth_method: "local", experimental: false },
+    { provider: "mock", auth_method: "local", experimental: false },
+  ];
+
+// `--` not `:` -- a colon is legal in an HTML `id` attribute value, but
+// breaks `querySelector` when used bare (`#ai-model-list-anthropic:subscription`
+// parses `:subscription` as a pseudo-class and throws `SyntaxError:
+// ... is not a valid selector`, for every single profile since every
+// slot's key contains a colon). `data-slot="..."` attribute-selector
+// lookups (`[data-slot="..."]`) would have been fine either way, but
+// the bare `#id` lookups below aren't, so the key itself stays
+// selector-safe everywhere it's used.
+function slotKey(slot: ProfileKey): string {
+  return `${slot.provider}--${slot.auth_method}`;
+}
+
+function parseSlotKey(key: string): ProfileKey {
+  const [provider, auth_method] = key.split("--") as [ProviderKind, AuthMethod];
+  return { provider, auth_method };
+}
+
+function findProfile(settings: AiSettings, slot: ProfileKey): ProviderProfile | undefined {
+  return settings.enabled_profiles.find(
+    (p) => p.provider === slot.provider && p.auth_method === slot.auth_method,
+  );
+}
+
+function isDefaultProfile(settings: AiSettings, slot: ProfileKey): boolean {
+  return (
+    settings.default_profile?.provider === slot.provider &&
+    settings.default_profile?.auth_method === slot.auth_method
+  );
+}
+
+interface ModelInfo {
+  id: string;
+  display_name: string;
+}
+
+interface ModelListResult {
+  models: ModelInfo[];
+  error: string | null;
+}
+
+type LogRole = "user" | "assistant" | "error";
+
+interface LogEntry {
+  role: LogRole;
+  content: string;
+  timestamp: string;
+}
+
+type NotReadyReason = "disabled" | "no_provider";
+
+interface ChatStateSnapshot {
+  entries: LogEntry[];
+  is_pending: boolean;
+  partial_text: string;
+  ai_ready: boolean;
+  not_ready_reason: NotReadyReason | null;
+}
+
+type ChatEvent =
+  | { type: "chunk"; delta: string }
+  | { type: "done"; content: string }
+  | { type: "error"; message: string };
+
 const UI_LANGUAGES = ["zh-hant", "zh-hans", "en", "ja", "ko"];
 
 let dict: Dictionary = {};
@@ -53,7 +172,7 @@ async function loadDictionary(): Promise<void> {
   dict = JSON.parse(raw) as Dictionary;
 }
 
-type Tab = "personalization" | "update" | "about";
+type Tab = "personalization" | "ai" | "update" | "about";
 let activeTab: Tab = "personalization";
 
 interface UpdateInfo {
@@ -67,7 +186,38 @@ interface UpdateInfo {
 // instead of re-checking GitHub a second time.
 let pendingUpdate: UpdateInfo | null = null;
 
+function applyWindowOpacity(opacity: number): void {
+  document.querySelector<HTMLDivElement>("#app")!.style.opacity = String(opacity);
+}
+
+// Shared by both windows (settings-ui's "Settings window opacity" /
+// ai-chat's "Chat window opacity"): fetch the currently configured
+// value once on load, then stay in sync with the personalization
+// tab's slider via a broadcast event rather than each window polling.
+async function initWindowOpacity(): Promise<void> {
+  applyWindowOpacity(await invoke<number>("get_window_opacity"));
+  await listen<number>("opacity-changed", (event) => applyWindowOpacity(event.payload));
+}
+
 async function main(): Promise<void> {
+  // The chat window shares this same index.html/main.ts entry point
+  // (chat_window.rs's own comment explains why: WebviewUrl::App is
+  // only reliable for the literal "index.html" path with this
+  // project's custom-protocol setup) -- branch on the window's own
+  // label rather than trying to ship a second HTML page.
+  if (getCurrentWindow().label === "chat") {
+    await mainChat();
+    return;
+  }
+  // The status bubble shares the same entry point too -- without this
+  // branch it fell through to the settings UI below, rendered (barely
+  // visibly) inside the bubble's tiny 180x36 window instead of the
+  // "...", success, or failure glyph it's actually meant to show.
+  if (getCurrentWindow().label === "status-bubble") {
+    await mainStatusBubble();
+    return;
+  }
+
   try {
     await loadDictionary();
     pendingUpdate = await invoke<UpdateInfo | null>("pending_update");
@@ -75,6 +225,7 @@ async function main(): Promise<void> {
       activeTab = "update";
     }
     await render();
+    await initWindowOpacity();
 
     // Only relevant if the startup check finds an update *after* this
     // window is already open (pendingUpdate above only covers the case
@@ -99,10 +250,12 @@ async function render(): Promise<void> {
     <main class="container-fluid settings-window">
       <nav class="tabs">
         <button class="tab-button" data-tab="personalization">${t("settings.tab.personalization")}</button>
+        <button class="tab-button" data-tab="ai">${t("settings.tab.ai")}</button>
         <button class="tab-button" data-tab="update">${t("settings.tab.update")}</button>
         <button class="tab-button" data-tab="about">${t("settings.tab.about")}</button>
       </nav>
       <section class="panel" data-panel="personalization"></section>
+      <section class="panel" data-panel="ai"></section>
       <section class="panel" data-panel="update"></section>
       <section class="panel" data-panel="about"></section>
     </main>
@@ -112,6 +265,20 @@ async function render(): Promise<void> {
     button.addEventListener("click", () => {
       activeTab = button.dataset.tab as Tab;
       applyActiveTab();
+      // `subscription-first-chat`'s "Provider status display" requires
+      // status to be checked fresh "when the AI tab is opened," not
+      // only once when the whole settings window first opened -- a
+      // profile's CLI could have logged out or hit its quota while the
+      // user was looking at a different tab. A full `renderAi()` would
+      // also discard any in-progress, unsaved edits in the row's own
+      // inputs, so only the status (and its login-button visibility)
+      // is re-checked, not the whole panel.
+      if (activeTab === "ai") {
+        const panel = document.querySelector<HTMLElement>('[data-panel="ai"]');
+        if (panel) {
+          for (const slot of PROFILE_SLOTS) void refreshProfileStatus(panel, slot);
+        }
+      }
     });
   }
 
@@ -123,6 +290,7 @@ async function render(): Promise<void> {
 
   await Promise.allSettled([
     renderPersonalization().catch((err) => renderError("personalization", err)),
+    renderAi().catch((err) => renderError("ai", err)),
     renderUpdate().catch((err) => renderError("update", err)),
     renderAbout().catch((err) => renderError("about", err)),
   ]);
@@ -279,6 +447,292 @@ async function renderPersonalization(): Promise<void> {
   });
 }
 
+async function renderAi(): Promise<void> {
+  const panel = document.querySelector<HTMLElement>('[data-panel="ai"]')!;
+  const snapshot = await invoke<AiSettingsSnapshot>("get_ai_settings");
+  renderAiPanel(panel, snapshot);
+}
+
+function renderAiPanel(panel: HTMLElement, snapshot: AiSettingsSnapshot): void {
+  const { settings, persona_warning } = snapshot;
+
+  const rowsHtml = PROFILE_SLOTS.map((slot) => renderProfileRow(snapshot, slot)).join("");
+  const enabledSlots = PROFILE_SLOTS.filter((slot) => findProfile(settings, slot) !== undefined);
+  const defaultOptionsHtml = enabledSlots.length
+    ? enabledSlots
+        .map((slot) => {
+          const key = slotKey(slot);
+          return `<option value="${key}" ${isDefaultProfile(settings, slot) ? "selected" : ""}>${t(`ai.profile.${slot.provider}.${slot.auth_method}`)}</option>`;
+        })
+        .join("")
+    : `<option value="">${t("ai.default.none_enabled_option")}</option>`;
+
+  panel.innerHTML = `
+    ${field(t("ai.enabled_label"), `<input type="checkbox" id="ai-enabled-checkbox" ${settings.ai_enabled ? "checked" : ""} />`)}
+    <fieldset class="ai-section">
+      <legend>${t("ai.profiles_section_title")}</legend>
+      <div id="ai-profiles">${rowsHtml}</div>
+    </fieldset>
+    <fieldset class="ai-section">
+      <legend>${t("ai.default_section_title")}</legend>
+      ${field(t("ai.default_label"), `<select id="ai-default-select" ${enabledSlots.length ? "" : "disabled"}>${defaultOptionsHtml}</select>`)}
+    </fieldset>
+    ${persona_warning ? `<p class="error">${t("ai.persona_warning", { error: persona_warning })}</p>` : ""}
+  `;
+
+  panel.querySelector<HTMLInputElement>("#ai-enabled-checkbox")!.addEventListener("change", (e) => {
+    invoke("set_ai_enabled", { enabled: (e.target as HTMLInputElement).checked });
+  });
+
+  const defaultSelect = panel.querySelector<HTMLSelectElement>("#ai-default-select")!;
+  defaultSelect.addEventListener("change", async () => {
+    if (!defaultSelect.value) return;
+    const slot = parseSlotKey(defaultSelect.value);
+    const ok = await invoke<boolean>("set_default_profile", {
+      provider: slot.provider,
+      authMethod: slot.auth_method,
+    });
+    if (!ok)
+      defaultSelect.value = settings.default_profile ? slotKey(settings.default_profile) : "";
+    await renderAi();
+  });
+
+  for (const slot of PROFILE_SLOTS) {
+    wireProfileRow(panel, slot);
+    void refreshProfileStatus(panel, slot);
+  }
+}
+
+function renderProfileRow(
+  snapshot: AiSettingsSnapshot,
+  slot: { provider: ProviderKind; auth_method: AuthMethod; experimental: boolean },
+): string {
+  const { settings } = snapshot;
+  const profile = findProfile(settings, slot);
+  const enabled = profile !== undefined;
+  const key = slotKey(slot);
+
+  const needsKey = slot.auth_method === "api_key";
+  const needsBaseUrl = slot.auth_method !== "subscription";
+  const keySet =
+    slot.provider === "open_ai"
+      ? snapshot.openai_key_set
+      : slot.provider === "anthropic"
+        ? snapshot.anthropic_key_set
+        : true;
+
+  const configHtml = enabled
+    ? `
+      ${field(t("ai.profile_enabled_label"), `<input type="checkbox" class="ai-profile-enable" data-slot="${key}" checked />`)}
+      ${
+        needsKey
+          ? field(
+              t("ai.api_key_label"),
+              `<input type="password" class="ai-api-key-input" data-slot="${key}" placeholder="${keySet ? t("ai.api_key.set_placeholder") : t("ai.api_key.unset_placeholder")}" />`,
+            )
+          : ""
+      }
+      ${
+        needsBaseUrl
+          ? field(
+              t("ai.base_url_label"),
+              `<input type="text" class="ai-base-url-input" data-slot="${key}" placeholder="${t("ai.base_url.default_placeholder")}" value="${profile?.base_url ?? ""}" />`,
+            )
+          : ""
+      }
+      ${field(t("ai.model_label"), `<input type="text" class="ai-model-input" data-slot="${key}" list="ai-model-list-${key}" value="${profile?.model ?? ""}" />`)}
+      <datalist id="ai-model-list-${key}"></datalist>
+      <button type="button" class="ai-fetch-models-button secondary" data-slot="${key}">${t("ai.fetch_models_button")}</button>
+      <div class="ai-fetch-models-result" data-slot="${key}"></div>
+    `
+    : field(
+        t("ai.profile_enabled_label"),
+        `<input type="checkbox" class="ai-profile-enable" data-slot="${key}" />`,
+      );
+
+  return `
+    <details class="ai-profile-row" data-slot="${key}" ${enabled ? "open" : ""}>
+      <summary>
+        <span class="ai-profile-name">${t(`ai.profile.${slot.provider}.${slot.auth_method}`)}</span>
+        ${slot.experimental ? `<span class="badge-experimental">${t("ai.experimental_badge")}</span>` : ""}
+        <span class="ai-profile-status" data-slot="${key}">${t("ai.status.checking")}</span>
+        <button type="button" class="ai-profile-login-button secondary" data-slot="${key}" hidden>${t("ai.login_button")}</button>
+      </summary>
+      <div class="ai-profile-body" data-slot="${key}">
+        <div class="ai-disclosure" data-slot="${key}"></div>
+        ${configHtml}
+      </div>
+    </details>
+  `;
+}
+
+function wireProfileRow(
+  panel: HTMLElement,
+  slot: { provider: ProviderKind; auth_method: AuthMethod; experimental: boolean },
+): void {
+  const key = slotKey(slot);
+  const row = panel.querySelector<HTMLElement>(`.ai-profile-row[data-slot="${key}"]`)!;
+
+  row
+    .querySelector<HTMLInputElement>(".ai-profile-enable")!
+    .addEventListener("change", async (e) => {
+      const checkbox = e.target as HTMLInputElement;
+      if (!checkbox.checked) {
+        await invoke("disable_profile", { provider: slot.provider, authMethod: slot.auth_method });
+        await renderAi();
+        return;
+      }
+
+      // `enable_profile` itself is the source of truth for whether this
+      // (provider, auth method) still needs its disclosure acknowledged --
+      // the frontend doesn't try to track that (see
+      // `AiSettings::acknowledged_disclosures`'s backend doc comment for
+      // why: it must survive a disable/re-enable cycle, which the
+      // frontend has no visibility into). A `false` return means refused.
+      const enabled = await invoke<boolean>("enable_profile", {
+        provider: slot.provider,
+        authMethod: slot.auth_method,
+      });
+      if (enabled) {
+        await renderAi();
+        return;
+      }
+
+      const disclosureEl = row.querySelector<HTMLElement>(`.ai-disclosure[data-slot="${key}"]`)!;
+      disclosureEl.innerHTML = `
+      <p class="hint">${t(`ai.disclosure.${slot.provider}.${slot.auth_method}`)}</p>
+      <button type="button" class="ai-disclosure-accept">${t("ai.disclosure.accept")}</button>
+      <button type="button" class="ai-disclosure-cancel secondary">${t("ai.disclosure.cancel")}</button>
+    `;
+      disclosureEl
+        .querySelector<HTMLButtonElement>(".ai-disclosure-accept")!
+        .addEventListener("click", async () => {
+          await invoke("acknowledge_profile_disclosure", {
+            provider: slot.provider,
+            authMethod: slot.auth_method,
+          });
+          await invoke("enable_profile", { provider: slot.provider, authMethod: slot.auth_method });
+          await renderAi();
+        });
+      disclosureEl
+        .querySelector<HTMLButtonElement>(".ai-disclosure-cancel")!
+        .addEventListener("click", () => {
+          checkbox.checked = false;
+          disclosureEl.innerHTML = "";
+        });
+    });
+
+  row
+    .querySelector<HTMLButtonElement>(".ai-profile-login-button")
+    ?.addEventListener("click", async (e) => {
+      // The button lives inside <summary>, whose native click behavior
+      // toggles the enclosing <details> -- without this, clicking "Log
+      // in" would also collapse/expand the row.
+      e.preventDefault();
+      e.stopPropagation();
+      const button = e.currentTarget as HTMLButtonElement;
+      button.disabled = true;
+      try {
+        await invoke<boolean>("trigger_profile_login", {
+          provider: slot.provider,
+          authMethod: slot.auth_method,
+        });
+      } catch (err) {
+        button.title = String(err);
+      } finally {
+        button.disabled = false;
+        // Re-check status right away -- if the CLI's login flow
+        // completed instantly (unlikely, but possible for an
+        // already-valid-but-stale session) this reflects it without
+        // waiting for the next full tab render; otherwise it just
+        // leaves the button visible for another attempt.
+        void refreshProfileStatus(panel, slot);
+      }
+    });
+
+  row.querySelector<HTMLInputElement>(".ai-api-key-input")?.addEventListener("change", (e) => {
+    const value = (e.target as HTMLInputElement).value;
+    if (value) void invoke("set_provider_api_key", { provider: slot.provider, apiKey: value });
+  });
+
+  row.querySelector<HTMLInputElement>(".ai-base-url-input")?.addEventListener("change", (e) => {
+    invoke("set_profile_base_url", {
+      provider: slot.provider,
+      authMethod: slot.auth_method,
+      baseUrl: (e.target as HTMLInputElement).value,
+    });
+  });
+
+  row.querySelector<HTMLInputElement>(".ai-model-input")?.addEventListener("change", (e) => {
+    invoke("set_profile_model", {
+      provider: slot.provider,
+      authMethod: slot.auth_method,
+      model: (e.target as HTMLInputElement).value,
+    });
+  });
+
+  const resultEl = row.querySelector<HTMLElement>(`.ai-fetch-models-result[data-slot="${key}"]`);
+  row
+    .querySelector<HTMLButtonElement>(".ai-fetch-models-button")
+    ?.addEventListener("click", async (e) => {
+      const button = e.target as HTMLButtonElement;
+      button.disabled = true;
+      resultEl!.innerHTML = `<p>${t("ai.fetch_models.loading")}</p>`;
+      try {
+        const result = await invoke<ModelListResult>("fetch_provider_models", {
+          provider: slot.provider,
+          authMethod: slot.auth_method,
+        });
+        if (result.error) {
+          resultEl!.innerHTML = `<p class="error">${t("ai.fetch_models.error", { error: result.error })}</p>`;
+        } else {
+          const datalist = row.querySelector<HTMLDataListElement>(`#ai-model-list-${key}`)!;
+          datalist.innerHTML = result.models
+            .map((m) => `<option value="${m.id}">${m.display_name}</option>`)
+            .join("");
+          resultEl!.innerHTML = `<p>${t("ai.fetch_models.success", { count: result.models.length })}</p>`;
+        }
+      } catch (err) {
+        resultEl!.innerHTML = `<p class="error">${String(err)}</p>`;
+      } finally {
+        button.disabled = false;
+      }
+    });
+}
+
+async function refreshProfileStatus(
+  panel: HTMLElement,
+  slot: { provider: ProviderKind; auth_method: AuthMethod },
+): Promise<void> {
+  try {
+    const status = await invoke<ProfileStatus>("check_profile_status", {
+      provider: slot.provider,
+      authMethod: slot.auth_method,
+    });
+    // The panel may already have been re-rendered (e.g. the user toggled
+    // something else while this was in flight) -- a missing element just
+    // means this result is stale and there's nothing to update.
+    const key = slotKey(slot);
+    const el = panel.querySelector<HTMLElement>(`.ai-profile-status[data-slot="${key}"]`);
+    if (!el) return;
+    el.textContent = t(`ai.status.${status.state}`);
+    el.className = `ai-profile-status ai-profile-status--${status.state}`;
+    if ("detail" in status) el.title = status.detail;
+
+    // Only offer the login-trigger button for the one state it actually
+    // applies to (`subscription-first-chat`'s "CLI installed but not
+    // logged in" scenario) -- every other state either doesn't need a
+    // login at all or isn't fixable by triggering one (e.g. a missing
+    // CLI binary).
+    const loginButton = panel.querySelector<HTMLButtonElement>(
+      `.ai-profile-login-button[data-slot="${key}"]`,
+    );
+    if (loginButton) loginButton.hidden = status.state !== "not_logged_in";
+  } catch {
+    // Best-effort only -- leave the "checking..." placeholder in place.
+  }
+}
+
 async function renderUpdate(): Promise<void> {
   const panel = document.querySelector<HTMLElement>('[data-panel="update"]')!;
   const version = await getVersion();
@@ -392,6 +846,187 @@ async function renderAbout(): Promise<void> {
       open(link.href);
     });
   }
+}
+
+function escapeHtml(text: string): string {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function entryHtml(entry: LogEntry): string {
+  if (entry.role === "error") {
+    return `<p class="chat-entry chat-entry-error">⚠️ ${escapeHtml(entry.content)}</p>`;
+  }
+  return `<p class="chat-entry chat-entry-${entry.role}">${escapeHtml(entry.content)}</p>`;
+}
+
+// Fixed literal glyphs (`ai-chat`'s "Status bubble" -- not localized
+// text), matching the persona rather than the UI language.
+const BUBBLE_THINKING = "...";
+const BUBBLE_REPLY = "Ciallo～(∠・ω< )⌒☆";
+const BUBBLE_FAILURE = "(×_×)";
+const BUBBLE_POLL_MS = 500;
+
+async function mainStatusBubble(): Promise<void> {
+  document.body.classList.add("bubble-window");
+  const app = document.querySelector<HTMLDivElement>("#app")!;
+  app.innerHTML = `<div id="bubble" class="status-bubble"></div>`;
+  const bubbleEl = app.querySelector<HTMLDivElement>("#bubble")!;
+
+  // `status_bubble.rs`'s own `sync()` already decides whether this
+  // window exists/is shown at all -- this loop only has to pick the
+  // right glyph for whatever moment it's asked to render, using the
+  // same snapshot the chat window already polls (no bubble-specific
+  // IPC): "pending" beats everything, otherwise the most recent log
+  // entry's role tells reply from failure.
+  async function refresh(): Promise<void> {
+    const state = await invoke<ChatStateSnapshot>("get_chat_state");
+    let text = "";
+    if (state.is_pending) {
+      text = BUBBLE_THINKING;
+    } else {
+      const last = state.entries[state.entries.length - 1];
+      text =
+        last?.role === "error" ? BUBBLE_FAILURE : last?.role === "assistant" ? BUBBLE_REPLY : "";
+    }
+    bubbleEl.textContent = text;
+    bubbleEl.hidden = text === "";
+    setTimeout(() => void refresh(), BUBBLE_POLL_MS);
+  }
+
+  await refresh();
+}
+
+async function mainChat(): Promise<void> {
+  try {
+    await loadDictionary();
+    await renderChatWindow();
+    await initWindowOpacity();
+  } catch (err) {
+    console.error("chat window failed to initialize:", err);
+    document.querySelector<HTMLDivElement>("#app")!.innerHTML =
+      `<p class="error">${String(err)}</p>`;
+  }
+}
+
+async function renderChatWindow(): Promise<void> {
+  const app = document.querySelector<HTMLDivElement>("#app")!;
+  app.innerHTML = `
+    <main class="container-fluid chat-window">
+      <div id="chat-transcript" class="chat-transcript"></div>
+      <div id="chat-status"></div>
+      <form id="chat-form" class="chat-form">
+        <input type="text" id="chat-input" autocomplete="off" placeholder="${t("chat.input_placeholder")}" />
+        <button type="submit" id="chat-send-button">${t("chat.send_button")}</button>
+        <button type="button" id="chat-stop-button" class="secondary" hidden>${t("chat.stop_button")}</button>
+      </form>
+      <button type="button" id="chat-new-button" class="secondary outline">${t("chat.new_chat_button")}</button>
+    </main>
+  `;
+
+  const transcriptEl = app.querySelector<HTMLElement>("#chat-transcript")!;
+  const statusEl = app.querySelector<HTMLElement>("#chat-status")!;
+  const form = app.querySelector<HTMLFormElement>("#chat-form")!;
+  const input = app.querySelector<HTMLInputElement>("#chat-input")!;
+  const sendButton = app.querySelector<HTMLButtonElement>("#chat-send-button")!;
+  const stopButton = app.querySelector<HTMLButtonElement>("#chat-stop-button")!;
+  const newButton = app.querySelector<HTMLButtonElement>("#chat-new-button")!;
+
+  // The canonical transcript, replaced wholesale by every `refresh()`.
+  // A just-sent message is appended here optimistically (not through a
+  // refresh) so the streamed reply's partial text never has to
+  // reconcile against a server snapshot that might already be ahead of
+  // it -- see chat_commands.rs's own note on this simplification.
+  let committedEntries: LogEntry[] = [];
+
+  function renderTranscript(pendingText: string | null): void {
+    const pendingHtml =
+      pendingText !== null
+        ? `<p class="chat-entry chat-entry-assistant chat-entry-pending">${escapeHtml(pendingText)}</p>`
+        : "";
+    transcriptEl.innerHTML = committedEntries.map(entryHtml).join("") + pendingHtml;
+    transcriptEl.scrollTop = transcriptEl.scrollHeight;
+  }
+
+  function setPendingUi(pending: boolean): void {
+    input.disabled = pending;
+    sendButton.hidden = pending;
+    stopButton.hidden = !pending;
+  }
+
+  function updateReadiness(ready: boolean, reason: NotReadyReason | null): void {
+    if (!ready) {
+      statusEl.innerHTML = reason ? `<p class="hint">${t(`chat.not_ready.${reason}`)}</p>` : "";
+      input.disabled = true;
+      sendButton.disabled = true;
+    } else {
+      statusEl.innerHTML = "";
+      sendButton.disabled = false;
+    }
+  }
+
+  // A generation that outlives this window (started before it was
+  // (re)opened, or before a close/reopen) has no channel this window
+  // instance ever attached to -- Tauri's Channel<T> is scoped to the
+  // invocation that created it, with no reattachment mechanism. Rather
+  // than inventing one, a still-pending state just polls this snapshot
+  // until it resolves; the common case (window stays open throughout)
+  // never touches this path at all, since the channel handles it live.
+  async function refresh(): Promise<void> {
+    const state = await invoke<ChatStateSnapshot>("get_chat_state");
+    committedEntries = state.entries;
+    renderTranscript(state.is_pending ? state.partial_text : null);
+    setPendingUi(state.is_pending);
+    updateReadiness(state.ai_ready, state.not_ready_reason);
+    if (state.is_pending) {
+      setTimeout(() => void refresh(), 1000);
+    }
+  }
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    const message = input.value.trim();
+    if (!message || sendButton.disabled) return;
+    input.value = "";
+
+    committedEntries = [
+      ...committedEntries,
+      { role: "user", content: message, timestamp: new Date().toISOString() },
+    ];
+    renderTranscript("");
+    setPendingUi(true);
+
+    const channel = new Channel<ChatEvent>();
+    let partial = "";
+    channel.onmessage = (event) => {
+      if (event.type === "chunk") {
+        partial += event.delta;
+        renderTranscript(partial);
+      } else {
+        // "done" and "error" both resolve to the same next step: the
+        // backend has already appended the final entry (assistant
+        // reply or error) to the session log, so re-fetch the
+        // canonical state rather than trying to reconstruct it here.
+        void refresh();
+      }
+    };
+
+    invoke("send_chat_message", { channel, message }).catch((err: unknown) => {
+      setPendingUi(false);
+      statusEl.innerHTML = `<p class="error">${String(err)}</p>`;
+    });
+  });
+
+  stopButton.addEventListener("click", () => {
+    void invoke("stop_generation").then(() => refresh());
+  });
+
+  newButton.addEventListener("click", () => {
+    void invoke("new_chat_session").then(() => refresh());
+  });
+
+  await refresh();
 }
 
 main();

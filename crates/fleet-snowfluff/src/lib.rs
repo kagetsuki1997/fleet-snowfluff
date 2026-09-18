@@ -1,7 +1,17 @@
+pub mod ai_commands;
+pub mod ai_config_store;
 pub mod animation;
 pub mod assets;
+pub mod chat_commands;
+pub mod chat_log_store;
+pub mod chat_pause;
+pub mod chat_window;
 pub mod commands;
 pub mod config_store;
+pub mod persona_store;
+pub mod secrets_store;
+pub mod session_domain;
+pub mod status_bubble;
 // Pet windows on Windows render via GDI instead (platform::windows's
 // LayeredSurface) -- see that module's doc comment for why. Nothing on
 // Windows references this module at all.
@@ -46,6 +56,7 @@ pub fn run() {
             commands::get_personalization,
             commands::set_scale_index,
             commands::set_opacity_index,
+            commands::get_window_opacity,
             commands::set_display_priority,
             commands::set_wander_stay_mode,
             commands::set_total_screen,
@@ -62,6 +73,22 @@ pub fn run() {
             commands::pending_update,
             commands::check_for_update,
             commands::install_update,
+            ai_commands::get_ai_settings,
+            ai_commands::set_ai_enabled,
+            ai_commands::enable_profile,
+            ai_commands::disable_profile,
+            ai_commands::set_default_profile,
+            ai_commands::acknowledge_profile_disclosure,
+            ai_commands::set_profile_model,
+            ai_commands::set_profile_base_url,
+            ai_commands::set_provider_api_key,
+            ai_commands::fetch_provider_models,
+            ai_commands::check_profile_status,
+            ai_commands::trigger_profile_login,
+            chat_commands::get_chat_state,
+            chat_commands::send_chat_message,
+            chat_commands::stop_generation,
+            chat_commands::new_chat_session,
         ])
         .setup(|app| {
             // Always on (not just debug builds) -- otherwise a release
@@ -153,8 +180,25 @@ pub fn run() {
                 }
             }
 
+            // AI settings/credentials load independently of the
+            // personalization Config above -- separate files
+            // (ai-config.json, secrets.json), separate crate
+            // (fleet-snowfluff-ai) owning their shape, per
+            // add-ai-chat-companion's design (core/personalization
+            // config stays untouched by any of this).
+            let ai_settings = ai_config_store::load(&app_handle);
+            let credentials = secrets_store::load(&app_handle);
+            // Seeds personas/aemeath.yaml into the user's config dir on
+            // first run so there's a file to inspect/edit later; a
+            // no-op if one already exists.
+            persona_store::seed_if_missing(&app_handle);
+
             app.manage(Mutex::new(pet_manager));
             app.manage(Mutex::new(config));
+            app.manage(Mutex::new(ai_settings));
+            app.manage(Mutex::new(credentials));
+            app.manage(chat_commands::ChatRuntimeState::default());
+            app.manage(chat_pause::ChatPauseState::default());
             app.manage(Mutex::<Option<tauri_plugin_updater::Update>>::new(None));
             tray::build(&app_handle)?;
             updater::spawn_startup_check(app_handle.clone());
@@ -168,18 +212,30 @@ pub fn run() {
                 std::thread::sleep(Duration::from_millis(MOVE_INTERVAL_MS as u64));
                 let handle = tick_handle.clone();
                 let result = tick_handle.run_on_main_thread(move || {
-                    let pending_quick_menu = {
+                    let actions = {
                         let state = handle.state::<Mutex<PetManager>>();
                         let mut manager = state.lock().unwrap();
                         manager.tick(MOVE_INTERVAL_MS)
                         // lock released at the end of this block --
-                        // quick_menu::popup below needs to read
-                        // PetManager state itself (see tick's doc
-                        // comment), which would deadlock if it ran
-                        // while still holding this same lock.
+                        // quick_menu::popup and opening the chat window
+                        // below both need to read PetManager state
+                        // themselves (see tick's doc comment), which
+                        // would deadlock if either ran while still
+                        // holding this same lock.
                     };
-                    if let Some(window) = pending_quick_menu {
+                    if let Some(window) = actions.pending_quick_menu {
                         quick_menu::popup(&handle, &window);
+                    }
+                    if actions.open_chat {
+                        let title = {
+                            let state = handle.state::<Mutex<PetManager>>();
+                            let manager = state.lock().unwrap();
+                            fleet_snowfluff_core::dictionary(manager.ui_language())
+                                .get("chat.window_title")
+                                .cloned()
+                                .unwrap_or_default()
+                        };
+                        chat_window::open_or_focus_chat(&handle, &title);
                     }
                 });
                 if result.is_err() {

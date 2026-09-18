@@ -14,7 +14,7 @@
 //! `just dev` / `just build`, never a raw cargo invocation, or this
 //! window loads nothing and the page is silently blank.
 
-use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder};
+use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 const SETTINGS_WINDOW_LABEL: &str = "settings";
 
@@ -35,6 +35,21 @@ const SETTINGS_WINDOW_LABEL: &str = "settings";
 pub fn open_or_focus_settings(app: &AppHandle, title: &str, initial_tab: Option<&str>) {
     if let Some(window) = app.get_webview_window(SETTINGS_WINDOW_LABEL) {
         window.show().ok();
+        // Pets default to `always_on_top` (`display_priority: 1`,
+        // manager.rs's own default) and have no per-pixel hit-testing,
+        // so their full (mostly-transparent) rectangle silently
+        // swallows clicks meant for whatever normal-level window sits
+        // underneath -- reported as "the settings window sometimes
+        // won't take any click, right-click/inspect still works,
+        // restarting fixes it" (pets respawn elsewhere on restart,
+        // coincidentally out of the way). `set_focus()` alone can't
+        // fix this: it raises within a window's own OS z-band, never
+        // across bands, so this window needs to actually join the
+        // pets' band, at least while it's the one in use -- see this
+        // module's own `WindowEvent::Focused` handling below for how
+        // it drops back out again rather than staying pinned above
+        // every other app forever.
+        window.set_always_on_top(true).ok();
         window.set_focus().ok();
         if let Some(tab) = initial_tab {
             app.emit_to(SETTINGS_WINDOW_LABEL, "switch-tab", tab).ok();
@@ -42,16 +57,35 @@ pub fn open_or_focus_settings(app: &AppHandle, title: &str, initial_tab: Option<
         return;
     }
 
-    let result =
-        WebviewWindowBuilder::new(app, SETTINGS_WINDOW_LABEL, WebviewUrl::App("index.html".into()))
+    let result = WebviewWindowBuilder::new(app, SETTINGS_WINDOW_LABEL, WebviewUrl::App("index.html".into()))
             .title(title)
             .inner_size(480.0, 560.0)
             .resizable(true)
             .center()
+            // Lets the personalization opacity setting fade the whole
+            // window (settings-ui's "Settings window opacity") -- CSS
+            // opacity on the page content only shows the desktop
+            // through it if the window itself allows per-pixel alpha.
+            .transparent(true)
             .build();
 
-    if let Err(err) = result {
-        log::error!("failed to open settings window: {err}");
+    match result {
+        Ok(window) => {
+            window.set_always_on_top(true).ok();
+            let app_handle = app.clone();
+            window.on_window_event(move |event| {
+                // Same reasoning as `chat_window.rs`'s identical
+                // handling: above the (permanently always-on-top) pets
+                // only while actually focused, not pinned above every
+                // other app indefinitely.
+                if let WindowEvent::Focused(focused) = event {
+                    if let Some(window) = app_handle.get_webview_window(SETTINGS_WINDOW_LABEL) {
+                        window.set_always_on_top(*focused).ok();
+                    }
+                }
+            });
+        }
+        Err(err) => log::error!("failed to open settings window: {err}"),
     }
 }
 
