@@ -397,7 +397,10 @@ impl AiProvider for ClaudeCodeCli {
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         Ok(CLAUDE_MODEL_ALIASES
             .iter()
-            .map(|&(id, display_name)| ModelInfo { id: id.to_string(), display_name: display_name.to_string() })
+            .map(|&(id, display_name)| ModelInfo {
+                id: id.to_string(),
+                display_name: display_name.to_string(),
+            })
             .collect())
     }
 }

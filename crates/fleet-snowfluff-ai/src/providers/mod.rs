@@ -8,12 +8,14 @@ mod line_buffer;
 
 pub mod anthropic;
 pub mod claude_code_cli;
+pub mod codex;
 pub mod mock;
 pub mod ollama;
 pub mod openai;
 
 pub use anthropic::Anthropic;
 pub use claude_code_cli::ClaudeCodeCli;
+pub use codex::Codex;
 pub use mock::Mock;
 pub use ollama::Ollama;
 pub use openai::OpenAiCompatible;

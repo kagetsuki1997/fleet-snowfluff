@@ -80,6 +80,22 @@ impl ProviderProfile {
     pub fn key(&self) -> ProfileKey {
         ProfileKey { provider: self.provider, auth_method: self.auth_method }
     }
+
+    /// `subscription-first-chat`'s "Experimental provider marking":
+    /// true for a provider implementation that hasn't been manually
+    /// verified end-to-end. Only OpenAI's subscription auth qualifies
+    /// today -- `ClaudeCodeCli` (Anthropic, Subscription) *was*
+    /// verified live during design, and every API-key/Local profile
+    /// reuses Stage 1's already-shipped, already-used implementations.
+    /// A profile-level fact, not a provider-instance one, so this lives
+    /// here rather than on `AiProvider` -- the settings UI can check it
+    /// without ever constructing a provider.
+    pub fn is_experimental(&self) -> bool {
+        matches!(
+            (self.provider, self.auth_method),
+            (ProviderKind::OpenAi, AuthMethod::Subscription)
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,6 +296,17 @@ mod tests {
         let json = serde_json::to_string(&p).unwrap();
         let back: ProviderProfile = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn only_openai_subscription_is_marked_experimental() {
+        assert!(profile(ProviderKind::OpenAi, AuthMethod::Subscription).is_experimental());
+
+        assert!(!profile(ProviderKind::OpenAi, AuthMethod::ApiKey).is_experimental());
+        assert!(!profile(ProviderKind::Anthropic, AuthMethod::ApiKey).is_experimental());
+        assert!(!profile(ProviderKind::Anthropic, AuthMethod::Subscription).is_experimental());
+        assert!(!profile(ProviderKind::Ollama, AuthMethod::Local).is_experimental());
+        assert!(!profile(ProviderKind::Mock, AuthMethod::Local).is_experimental());
     }
 
     #[test]

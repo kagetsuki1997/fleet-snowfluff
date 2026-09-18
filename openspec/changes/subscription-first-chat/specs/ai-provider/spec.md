@@ -28,6 +28,20 @@ For each provider brand using API-key or local auth (OpenAI, Anthropic, Ollama),
 - **WHEN** the user opens the model selector for a subscription auth method backed by a CLI with no live listing capability
 - **THEN** the selector shows that CLI's own documented model identifiers/aliases rather than an empty list, and leaving no model selected is a valid choice
 
+### Requirement: Streaming responses
+
+Chat responses SHALL be delivered to the requesting surface incrementally, for every provider including Mock. For a provider whose underlying transport genuinely generates and delivers text incrementally, chunks SHALL reflect real generation progress. For a provider whose underlying transport only ever delivers one complete response with no incremental delivery of its own, the application SHALL still deliver it to the requesting surface as a paced sequence of chunks rather than a single block, so the user-visible behavior stays consistent across providers even though the underlying generation was not observed incrementally.
+
+#### Scenario: Partial text visible before completion
+
+- **WHEN** a provider is generating a multi-sentence reply
+- **THEN** earlier portions of the reply are visible before the full reply has finished generating
+
+#### Scenario: A provider with no incremental transport still paces its output
+
+- **WHEN** a provider's underlying transport delivers only one complete response with no incremental events of its own
+- **THEN** the requesting surface still receives that response as multiple chunks over time, not as a single instantaneous block
+
 ### Requirement: No provider configured by default
 
 On first run, no provider profile SHALL be enabled, including no default selection of a cloud provider or auth method.
