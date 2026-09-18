@@ -58,50 +58,73 @@ pub fn set_ai_enabled(app: AppHandle, ai_settings: State<Mutex<AiSettings>>, ena
 /// Whether `key` may become the default profile given the disclosures
 /// already acknowledged in `settings` (`ai-provider`'s "Cloud provider
 /// data disclosure", now keyed per (provider, auth method) rather than
-/// per provider). `None` (clearing the default) and any `Local`-auth
-/// profile (Ollama, Mock) never need one.
+/// per provider, and tracked independently of profile presence -- see
+/// `AiSettings::disclosure_acknowledged`'s own doc comment). `None`
+/// (clearing the default) and any `Local`-auth profile (Ollama, Mock)
+/// never need one.
 fn disclosure_ok(settings: &AiSettings, key: Option<ProfileKey>) -> bool {
     let Some(key) = key else { return true };
     match key.auth_method {
         AuthMethod::Local => true,
-        AuthMethod::ApiKey | AuthMethod::Subscription => {
-            settings.profile(key).is_some_and(|p| p.disclosure_acknowledged)
-        }
+        AuthMethod::ApiKey | AuthMethod::Subscription => settings.disclosure_acknowledged(key),
     }
 }
 
 /// Adds `key` to the enabled-profile list if it isn't already there
 /// (idempotent -- re-enabling an already-enabled profile never resets
-/// its model/base_url/disclosure state). Enabling a profile does not,
-/// by itself, make it usable for chat -- only `set_default_profile`
-/// does, and that's what the disclosure gate actually guards
-/// (`subscription-first-chat`'s "Independent per-provider
-/// configuration").
+/// its model/base_url state). Refuses (returns `false`) to enable a
+/// cloud-provider profile whose disclosure hasn't been acknowledged
+/// yet -- enforced here too, not only in the frontend's own flow
+/// (which shows the disclosure and calls `acknowledge_profile_disclosure`
+/// *before* this), so the guarantee holds regardless of what calls
+/// this command.
 #[tauri::command]
 pub fn enable_profile(
     app: AppHandle,
     ai_settings: State<Mutex<AiSettings>>,
     provider: ProviderKind,
     auth_method: AuthMethod,
-) {
-    let mut settings = ai_settings.lock().unwrap();
+) -> bool {
     let key = ProfileKey { provider, auth_method };
+    let mut settings = ai_settings.lock().unwrap();
+
+    if !disclosure_ok(&settings, Some(key)) {
+        log::warn!("refused to enable profile {key:?}: disclosure not yet acknowledged");
+        return false;
+    }
+
     if settings.profile(key).is_none() {
         settings.enabled_profiles.push(ProviderProfile {
             provider,
             auth_method,
             model: None,
             base_url: None,
-            disclosure_acknowledged: false,
         });
         ai_config_store::save(&app, &settings);
     }
+    true
 }
 
-/// Removes `key` from the enabled-profile list; clears the default
-/// profile too if it was the one being disabled.
+/// Removes the (`provider`, `auth_method`) profile from the
+/// enabled-profile list; clears the default profile too if it was the
+/// one being disabled. Every profile-identifying command below takes
+/// `provider`/`auth_method` as separate top-level parameters rather
+/// than a single `ProfileKey` struct -- deliberately: Tauri's IPC layer
+/// camelCases *top-level* command parameter names for the frontend
+/// (`auth_method` -> `authMethod`), but a struct's own fields keep
+/// whatever casing that struct's own `serde` derive uses (`ProfileKey`
+/// has no `rename_all`, so its field would stay `auth_method`). Mixing
+/// both conventions in one call is exactly the kind of wire-format
+/// mismatch that fails silently until actually exercised end to end;
+/// flattening avoids the question entirely.
 #[tauri::command]
-pub fn disable_profile(app: AppHandle, ai_settings: State<Mutex<AiSettings>>, key: ProfileKey) {
+pub fn disable_profile(
+    app: AppHandle,
+    ai_settings: State<Mutex<AiSettings>>,
+    provider: ProviderKind,
+    auth_method: AuthMethod,
+) {
+    let key = ProfileKey { provider, auth_method };
     let mut settings = ai_settings.lock().unwrap();
     settings.enabled_profiles.retain(|p| p.key() != key);
     if settings.default_profile == Some(key) {
@@ -111,52 +134,60 @@ pub fn disable_profile(app: AppHandle, ai_settings: State<Mutex<AiSettings>>, ke
 }
 
 /// Sets which enabled profile currently handles chat requests. Refuses
-/// (returns `false`) if `key` needs a disclosure that hasn't been
-/// acknowledged yet, or names a profile that isn't actually enabled --
-/// enforced here, not only in the frontend's own gating, so the
-/// guarantee holds regardless of what calls this command. Returns
-/// whether the change actually took effect, so the frontend can tell
-/// "activated" apart from "refused".
+/// (returns `false`) if the profile needs a disclosure that hasn't
+/// been acknowledged yet, or isn't actually enabled -- enforced here,
+/// not only in the frontend's own gating, so the guarantee holds
+/// regardless of what calls this command. Returns whether the change
+/// actually took effect, so the frontend can tell "activated" apart
+/// from "refused". Clearing the default entirely is not exposed here
+/// -- it only happens as a side effect of `disable_profile` disabling
+/// whichever profile was the default; the frontend never needs to set
+/// "no default" directly.
 #[tauri::command]
 pub fn set_default_profile(
     app: AppHandle,
     ai_settings: State<Mutex<AiSettings>>,
-    key: Option<ProfileKey>,
+    provider: ProviderKind,
+    auth_method: AuthMethod,
 ) -> bool {
+    let key = ProfileKey { provider, auth_method };
     let mut settings = ai_settings.lock().unwrap();
 
-    if !disclosure_ok(&settings, key) {
+    if !disclosure_ok(&settings, Some(key)) {
         log::warn!("refused to set default profile {key:?}: disclosure not yet acknowledged");
         return false;
     }
-    if let Some(k) = key {
-        if settings.profile(k).is_none() {
-            log::warn!("refused to set default profile {k:?}: profile is not enabled");
-            return false;
-        }
+    if settings.profile(key).is_none() {
+        log::warn!("refused to set default profile {key:?}: profile is not enabled");
+        return false;
     }
 
-    settings.default_profile = key;
+    settings.default_profile = Some(key);
     ai_config_store::save(&app, &settings);
     true
 }
 
 /// Records that the user has seen and accepted the cloud-provider data
-/// disclosure for `key` (`ai-provider`'s "Cloud provider data
-/// disclosure" -- persisted per (provider, auth method), so switching
-/// Anthropic from API key to subscription shows its own disclosure
-/// rather than reusing the other auth method's acknowledgment). A
-/// no-op if the profile isn't enabled yet -- `enable_profile` must run
-/// first.
+/// disclosure for the (`provider`, `auth_method`) pair (`ai-provider`'s
+/// "Cloud provider data disclosure" -- persisted per (provider, auth
+/// method), so switching Anthropic from API key to subscription shows
+/// its own disclosure rather than reusing the other auth method's
+/// acknowledgment). Independent of whether that profile is currently
+/// enabled (`AiSettings::acknowledged_disclosures`'s own doc comment)
+/// -- the intended flow shows this disclosure and calls this command
+/// *before* `enable_profile`, not after, so a profile need not exist
+/// yet for its disclosure to be acknowledged.
 #[tauri::command]
 pub fn acknowledge_profile_disclosure(
     app: AppHandle,
     ai_settings: State<Mutex<AiSettings>>,
-    key: ProfileKey,
+    provider: ProviderKind,
+    auth_method: AuthMethod,
 ) {
+    let key = ProfileKey { provider, auth_method };
     let mut settings = ai_settings.lock().unwrap();
-    if let Some(profile) = settings.profile_mut(key) {
-        profile.disclosure_acknowledged = true;
+    if !settings.acknowledged_disclosures.contains(&key) {
+        settings.acknowledged_disclosures.push(key);
         ai_config_store::save(&app, &settings);
     }
 }
@@ -165,9 +196,11 @@ pub fn acknowledge_profile_disclosure(
 pub fn set_profile_model(
     app: AppHandle,
     ai_settings: State<Mutex<AiSettings>>,
-    key: ProfileKey,
+    provider: ProviderKind,
+    auth_method: AuthMethod,
     model: String,
 ) {
+    let key = ProfileKey { provider, auth_method };
     let model = (!model.is_empty()).then_some(model);
     let mut settings = ai_settings.lock().unwrap();
     if let Some(profile) = settings.profile_mut(key) {
@@ -183,9 +216,11 @@ pub fn set_profile_model(
 pub fn set_profile_base_url(
     app: AppHandle,
     ai_settings: State<Mutex<AiSettings>>,
-    key: ProfileKey,
+    provider: ProviderKind,
+    auth_method: AuthMethod,
     base_url: String,
 ) {
+    let key = ProfileKey { provider, auth_method };
     let base_url = (!base_url.is_empty()).then_some(base_url);
     let mut settings = ai_settings.lock().unwrap();
     if let Some(profile) = settings.profile_mut(key) {
@@ -295,7 +330,6 @@ pub async fn fetch_provider_models(
             auth_method,
             model: None,
             base_url: None,
-            disclosure_acknowledged: false,
         });
         build_provider(&creds, &profile, None)
     };
@@ -341,7 +375,7 @@ pub async fn check_profile_status(
             return Ok(ProfileStatus::NotConfigured);
         };
         if matches!(provider, ProviderKind::OpenAi | ProviderKind::Anthropic)
-            && !profile.disclosure_acknowledged
+            && !settings.disclosure_acknowledged(key)
         {
             return Ok(ProfileStatus::DisclosurePending);
         }
@@ -366,17 +400,28 @@ mod tests {
     use super::*;
 
     fn profile(provider: ProviderKind, auth_method: AuthMethod) -> ProviderProfile {
-        ProviderProfile {
-            provider,
-            auth_method,
-            model: None,
-            base_url: None,
-            disclosure_acknowledged: false,
-        }
+        ProviderProfile { provider, auth_method, model: None, base_url: None }
     }
 
     fn settings_with(profiles: Vec<ProviderProfile>) -> AiSettings {
-        AiSettings { ai_enabled: false, enabled_profiles: profiles, default_profile: None }
+        AiSettings {
+            ai_enabled: false,
+            enabled_profiles: profiles,
+            default_profile: None,
+            acknowledged_disclosures: vec![],
+        }
+    }
+
+    fn settings_with_acknowledgements(
+        profiles: Vec<ProviderProfile>,
+        acknowledged: Vec<ProfileKey>,
+    ) -> AiSettings {
+        AiSettings {
+            ai_enabled: false,
+            enabled_profiles: profiles,
+            default_profile: None,
+            acknowledged_disclosures: acknowledged,
+        }
     }
 
     #[test]
@@ -410,9 +455,10 @@ mod tests {
     #[test]
     fn disclosure_ok_once_acknowledged() {
         let key = ProfileKey { provider: ProviderKind::OpenAi, auth_method: AuthMethod::ApiKey };
-        let mut p = profile(ProviderKind::OpenAi, AuthMethod::ApiKey);
-        p.disclosure_acknowledged = true;
-        let settings = settings_with(vec![p]);
+        let settings = settings_with_acknowledgements(
+            vec![profile(ProviderKind::OpenAi, AuthMethod::ApiKey)],
+            vec![key],
+        );
         assert!(disclosure_ok(&settings, Some(key)));
 
         let anthropic_key =
@@ -429,14 +475,27 @@ mod tests {
             ProfileKey { provider: ProviderKind::Anthropic, auth_method: AuthMethod::ApiKey };
         let subscription_key =
             ProfileKey { provider: ProviderKind::Anthropic, auth_method: AuthMethod::Subscription };
-        let mut acknowledged_api_key = profile(ProviderKind::Anthropic, AuthMethod::ApiKey);
-        acknowledged_api_key.disclosure_acknowledged = true;
-        let settings = settings_with(vec![
-            acknowledged_api_key,
-            profile(ProviderKind::Anthropic, AuthMethod::Subscription),
-        ]);
+        let settings = settings_with_acknowledgements(
+            vec![
+                profile(ProviderKind::Anthropic, AuthMethod::ApiKey),
+                profile(ProviderKind::Anthropic, AuthMethod::Subscription),
+            ],
+            vec![api_key_key],
+        );
         assert!(disclosure_ok(&settings, Some(api_key_key)));
         assert!(!disclosure_ok(&settings, Some(subscription_key)));
+    }
+
+    #[test]
+    fn disclosure_survives_disable_and_re_enable() {
+        // Exercises the "Disclosure does not repeat once acknowledged"
+        // scenario's disable/re-enable case directly against this
+        // module's own gate, not just `AiSettings` in isolation.
+        let key = ProfileKey { provider: ProviderKind::OpenAi, auth_method: AuthMethod::ApiKey };
+        // Profile removed (as `disable_profile` would do), acknowledgment kept.
+        let settings = settings_with_acknowledgements(vec![], vec![key]);
+        assert!(settings.profile(key).is_none(), "sanity: profile really isn't enabled");
+        assert!(disclosure_ok(&settings, Some(key)), "re-enabling must not need disclosure again");
     }
 
     #[test]

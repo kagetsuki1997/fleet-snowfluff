@@ -67,13 +67,6 @@ pub struct ProviderProfile {
     pub model: Option<String>,
     #[serde(default)]
     pub base_url: Option<String>,
-    /// Per (provider, auth method) acknowledgment of the cloud-provider
-    /// data disclosure (`subscription-first-chat`'s modified "Cloud
-    /// provider data disclosure" requirement) -- acknowledging one auth
-    /// method for a provider does not cover the other, since a
-    /// materially different credential/account is involved.
-    #[serde(default)]
-    pub disclosure_acknowledged: bool,
 }
 
 impl ProviderProfile {
@@ -122,6 +115,25 @@ pub struct AiSettings {
     /// which one.
     #[serde(default)]
     pub default_profile: Option<ProfileKey>,
+    /// Which (provider, auth method) pairs have had their cloud-provider
+    /// data disclosure acknowledged (`ai-provider`'s "Cloud provider
+    /// data disclosure", modified per (provider, auth method) by
+    /// `subscription-first-chat`). Deliberately tracked here, separate
+    /// from `enabled_profiles`, rather than as a field on
+    /// `ProviderProfile` itself: a profile is removed from
+    /// `enabled_profiles` when disabled, but the *fact* that the user
+    /// was already told "this sends your messages to X's servers"
+    /// doesn't become untrue just because the profile was toggled off
+    /// -- re-enabling the same (provider, auth method) later must not
+    /// ask again (this capability's "Disclosure does not repeat once
+    /// acknowledged" scenario, which explicitly covers a disable/
+    /// re-enable cycle, not just switching away and back while still
+    /// enabled). A `ProviderProfile`-level field couldn't express that
+    /// without surviving its own removal, which would make "disabled"
+    /// and "never configured" indistinguishable in exactly the state
+    /// that matters here.
+    #[serde(default)]
+    pub acknowledged_disclosures: Vec<ProfileKey>,
 }
 
 impl AiSettings {
@@ -133,6 +145,13 @@ impl AiSettings {
 
     pub fn profile(&self, key: ProfileKey) -> Option<&ProviderProfile> {
         self.enabled_profiles.iter().find(|p| p.key() == key)
+    }
+
+    /// Whether `key`'s cloud-provider data disclosure has ever been
+    /// acknowledged -- independent of whether that profile is currently
+    /// enabled (see `acknowledged_disclosures`'s own doc comment).
+    pub fn disclosure_acknowledged(&self, key: ProfileKey) -> bool {
+        self.acknowledged_disclosures.contains(&key)
     }
 
     pub fn profile_mut(&mut self, key: ProfileKey) -> Option<&mut ProviderProfile> {
@@ -165,6 +184,7 @@ fn migrate_legacy_active_provider(obj: &serde_json::Map<String, Value>) -> AiSet
             ai_enabled: get("ai_enabled").and_then(Value::as_bool).unwrap_or(false),
             enabled_profiles: vec![],
             default_profile: None,
+            acknowledged_disclosures: vec![],
         };
     };
 
@@ -187,14 +207,14 @@ fn migrate_legacy_active_provider(obj: &serde_json::Map<String, Value>) -> AiSet
         ProviderKind::Ollama | ProviderKind::Mock => AuthMethod::Local,
     };
 
-    let profile =
-        ProviderProfile { provider, auth_method, model, base_url, disclosure_acknowledged };
+    let profile = ProviderProfile { provider, auth_method, model, base_url };
     let key = profile.key();
 
     AiSettings {
         ai_enabled: get("ai_enabled").and_then(Value::as_bool).unwrap_or(false),
         enabled_profiles: vec![profile],
         default_profile: Some(key),
+        acknowledged_disclosures: if disclosure_acknowledged { vec![key] } else { vec![] },
     }
 }
 
@@ -234,7 +254,13 @@ pub fn sanitize(raw: &Value) -> AiSettings {
         .and_then(parse_profile_key)
         .filter(|key| enabled_profiles.iter().any(|p| p.key() == *key));
 
-    AiSettings { ai_enabled, enabled_profiles, default_profile }
+    let acknowledged_disclosures: Vec<ProfileKey> = obj
+        .get("acknowledged_disclosures")
+        .and_then(Value::as_array)
+        .map(|arr| arr.iter().filter_map(parse_profile_key).collect())
+        .unwrap_or_default();
+
+    AiSettings { ai_enabled, enabled_profiles, default_profile, acknowledged_disclosures }
 }
 
 /// Loads settings from raw file contents. Missing/unreadable/corrupt
@@ -258,13 +284,7 @@ mod tests {
     use super::*;
 
     fn profile(provider: ProviderKind, auth_method: AuthMethod) -> ProviderProfile {
-        ProviderProfile {
-            provider,
-            auth_method,
-            model: None,
-            base_url: None,
-            disclosure_acknowledged: false,
-        }
+        ProviderProfile { provider, auth_method, model: None, base_url: None }
     }
 
     #[test]
@@ -292,10 +312,30 @@ mod tests {
     fn a_profile_round_trips_through_json() {
         let mut p = profile(ProviderKind::Anthropic, AuthMethod::Subscription);
         p.model = Some("claude-opus-5".to_string());
-        p.disclosure_acknowledged = true;
         let json = serde_json::to_string(&p).unwrap();
         let back: ProviderProfile = serde_json::from_str(&json).unwrap();
         assert_eq!(back, p);
+    }
+
+    #[test]
+    fn disclosure_acknowledged_is_independent_of_profile_presence() {
+        // Exercises the "Disclosure does not repeat once acknowledged"
+        // scenario's disable/re-enable case: acknowledging a
+        // (provider, auth method) pair, then removing that profile
+        // entirely, must still report it as acknowledged -- the fact
+        // doesn't get un-learned just because the profile was disabled.
+        let key = ProfileKey { provider: ProviderKind::OpenAi, auth_method: AuthMethod::ApiKey };
+        let mut settings = AiSettings::default();
+        assert!(!settings.disclosure_acknowledged(key));
+
+        settings.acknowledged_disclosures.push(key);
+        assert!(settings.disclosure_acknowledged(key));
+
+        // Profile never existed in enabled_profiles at all here -- the
+        // acknowledgment is tracked independently, not read off a
+        // profile field.
+        assert!(settings.profile(key).is_none());
+        assert!(settings.disclosure_acknowledged(key));
     }
 
     #[test]
@@ -324,21 +364,18 @@ mod tests {
             "ai_enabled": true,
             "enabled_profiles": [
                 { "provider": "ollama", "auth_method": "local", "model": "llama3.2:3b" },
-                { "provider": "anthropic", "auth_method": "subscription", "disclosure_acknowledged": true },
+                { "provider": "anthropic", "auth_method": "subscription" },
             ],
             "default_profile": { "provider": "anthropic", "auth_method": "subscription" },
+            "acknowledged_disclosures": [{ "provider": "anthropic", "auth_method": "subscription" }],
         });
         let settings = sanitize(&raw);
         assert_eq!(settings.enabled_profiles.len(), 2);
-        assert_eq!(
-            settings.default_profile,
-            Some(ProfileKey {
-                provider: ProviderKind::Anthropic,
-                auth_method: AuthMethod::Subscription
-            })
-        );
+        let default_key =
+            ProfileKey { provider: ProviderKind::Anthropic, auth_method: AuthMethod::Subscription };
+        assert_eq!(settings.default_profile, Some(default_key));
         assert_eq!(settings.default_profile().unwrap().model, None);
-        assert!(settings.default_profile().unwrap().disclosure_acknowledged);
+        assert!(settings.disclosure_acknowledged(default_key));
     }
 
     #[test]
@@ -377,18 +414,16 @@ mod tests {
 
     #[test]
     fn round_trips_through_json() {
+        let key = ProfileKey { provider: ProviderKind::OpenAi, auth_method: AuthMethod::ApiKey };
         let settings = AiSettings {
             ai_enabled: true,
             enabled_profiles: vec![{
                 let mut p = profile(ProviderKind::OpenAi, AuthMethod::ApiKey);
                 p.model = Some("gpt-4o".to_string());
-                p.disclosure_acknowledged = true;
                 p
             }],
-            default_profile: Some(ProfileKey {
-                provider: ProviderKind::OpenAi,
-                auth_method: AuthMethod::ApiKey,
-            }),
+            default_profile: Some(key),
+            acknowledged_disclosures: vec![key],
         };
 
         let json_str = to_json_string(&settings);
@@ -419,7 +454,7 @@ mod tests {
         assert_eq!(migrated.provider, ProviderKind::Anthropic);
         assert_eq!(migrated.auth_method, AuthMethod::ApiKey);
         assert_eq!(migrated.model.as_deref(), Some("claude-sonnet-5"));
-        assert!(migrated.disclosure_acknowledged);
+        assert!(settings.disclosure_acknowledged(migrated.key()));
         assert_eq!(settings.default_profile, Some(migrated.key()));
     }
 
