@@ -78,6 +78,23 @@ pub enum ProviderError {
     /// The request was cancelled (explicit stop, or an implicit cancel
     /// from starting a new chat session) before it produced a result.
     Cancelled,
+    /// A subscription-auth profile's CLI (`claude`, `codex`) could not
+    /// be found on `PATH` or could not be executed -- distinct from
+    /// `Auth` because no credential exists to even be wrong yet
+    /// (`subscription-first-chat`'s "Distinct provider/runtime failure
+    /// states").
+    RuntimeUnavailable(String),
+    /// The CLI is present, but reports its login/session is no longer
+    /// valid (was logged in before; isn't now) -- distinct from `Auth`,
+    /// which covers "never had a valid credential in the first place"
+    /// (a rejected API key).
+    SubscriptionExpired(String),
+    /// Authenticated fine, but the current subscription period's usage
+    /// allowance is used up. Kept distinct from `RateLimited`: a rate
+    /// limit implies "retry shortly will work," quota exhaustion
+    /// implies it won't until the period resets, and the two call for
+    /// different user-facing guidance.
+    QuotaExhausted(String),
 }
 
 impl std::fmt::Display for ProviderError {
@@ -88,6 +105,9 @@ impl std::fmt::Display for ProviderError {
             Self::RateLimited(msg) => write!(f, "rate limited: {msg}"),
             Self::InvalidResponse(msg) => write!(f, "invalid response: {msg}"),
             Self::Cancelled => write!(f, "cancelled"),
+            Self::RuntimeUnavailable(msg) => write!(f, "runtime unavailable: {msg}"),
+            Self::SubscriptionExpired(msg) => write!(f, "subscription expired: {msg}"),
+            Self::QuotaExhausted(msg) => write!(f, "quota exhausted: {msg}"),
         }
     }
 }
@@ -117,5 +137,34 @@ mod tests {
     fn provider_error_display_is_human_readable() {
         let err = ProviderError::Network("connection refused".into());
         assert_eq!(err.to_string(), "network error: connection refused");
+    }
+
+    #[test]
+    fn new_subscription_error_variants_display_distinctly() {
+        assert_eq!(
+            ProviderError::RuntimeUnavailable("claude not on PATH".into()).to_string(),
+            "runtime unavailable: claude not on PATH"
+        );
+        assert_eq!(
+            ProviderError::SubscriptionExpired("not logged in".into()).to_string(),
+            "subscription expired: not logged in"
+        );
+        assert_eq!(
+            ProviderError::QuotaExhausted("period limit reached".into()).to_string(),
+            "quota exhausted: period limit reached"
+        );
+    }
+
+    #[test]
+    fn rate_limited_and_quota_exhausted_produce_visibly_different_messages() {
+        let rate_limited = ProviderError::RateLimited("slow down".into()).to_string();
+        let quota_exhausted = ProviderError::QuotaExhausted("slow down".into()).to_string();
+        assert_ne!(
+            rate_limited, quota_exhausted,
+            "same underlying message must still read differently so the UI gives different \
+             guidance"
+        );
+        assert!(rate_limited.contains("rate limited"));
+        assert!(quota_exhausted.contains("quota exhausted"));
     }
 }

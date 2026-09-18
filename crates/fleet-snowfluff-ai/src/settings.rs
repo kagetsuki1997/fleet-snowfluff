@@ -1,57 +1,86 @@
 //! `AiSettings`: the shape of `ai-config.json` (non-secret provider
-//! settings, the master switch, and the active-provider pointer).
+//! settings, the master switch, and the enabled provider profiles).
 //! Sanitized field-by-field from loosely-typed JSON, same philosophy
 //! as `fleet-snowfluff-core::config::sanitize` -- unlike persona
 //! parsing, a broken field here degrades gracefully rather than
 //! discarding the whole file.
+//!
+//! Stage 2 (`subscription-first-chat`) replaced the single
+//! `active_provider: Option<ProviderKind>` pointer with a list of
+//! enabled `ProviderProfile`s plus a `default_profile` pointer, so more
+//! than one provider+auth-method combination can be configured at
+//! once. `sanitize` auto-migrates a Stage 1 config (which only ever
+//! had one provider, necessarily API-key auth) into exactly one
+//! profile -- see `migrate_legacy_active_provider`.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::message::ProviderKind;
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct OpenAiSettings {
-    /// `None` means "use the provider's own default base URL" --
-    /// distinguishing "not set" from "explicitly the default" so a
-    /// future default-URL change doesn't silently strand users who
-    /// never touched this field.
-    #[serde(default)]
-    pub base_url: Option<String>,
+/// How a profile authenticates. `Local` covers both Ollama (a local
+/// HTTP server, nothing to authenticate) and Mock (nothing at all) --
+/// neither shows the cloud-provider disclosure and neither has a
+/// meaningful second auth method, so one shared variant is enough
+/// rather than a `None`/`Local` split that would just be two names for
+/// the same "no auth ceremony" case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AuthMethod {
+    ApiKey,
+    /// Reuses the provider's own official CLI login/session
+    /// (`claude`/`codex`) rather than a Fleet-managed credential --
+    /// see `subscription-first-chat`'s "Subscription auth via the
+    /// provider's own CLI" requirement. Deliberately one generic
+    /// variant regardless of *how* the underlying implementation talks
+    /// to the provider (raw HTTP with a borrowed token for Anthropic,
+    /// a wrapped CLI subprocess for OpenAI) -- that distinction is an
+    /// implementation detail below `AiProvider`, not something a
+    /// profile's shape should expose.
+    Subscription,
+    Local,
+}
+
+/// Identifies a profile by what the user actually configured --
+/// provider brand plus auth method -- rather than an arbitrary
+/// generated ID. There is never a reason to have two profiles with the
+/// same `(provider, auth_method)` pair enabled at once (nothing would
+/// distinguish them), so this pair is a stable, meaningful key on its
+/// own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ProfileKey {
+    pub provider: ProviderKind,
+    pub auth_method: AuthMethod,
+}
+
+/// One configured, independently-enabled provider profile
+/// (`subscription-first-chat`'s "Independent per-provider
+/// configuration"). `base_url` is only meaningful for API-key/local
+/// auth (a custom OpenAI-compatible endpoint, or Ollama's server
+/// address) -- a `Subscription` profile always talks to whatever
+/// endpoint its CLI/runtime uses internally, so it stays `None` there.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProviderProfile {
+    pub provider: ProviderKind,
+    pub auth_method: AuthMethod,
     #[serde(default)]
     pub model: Option<String>,
-    /// Per-provider persisted acknowledgment of the cloud-provider
-    /// data disclosure (`ai-provider`'s "Cloud provider data
-    /// disclosure") -- switching away and back must not show it again.
+    #[serde(default)]
+    pub base_url: Option<String>,
+    /// Per (provider, auth method) acknowledgment of the cloud-provider
+    /// data disclosure (`subscription-first-chat`'s modified "Cloud
+    /// provider data disclosure" requirement) -- acknowledging one auth
+    /// method for a provider does not cover the other, since a
+    /// materially different credential/account is involved.
     #[serde(default)]
     pub disclosure_acknowledged: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct AnthropicSettings {
-    #[serde(default)]
-    pub base_url: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    #[serde(default)]
-    pub disclosure_acknowledged: bool,
+impl ProviderProfile {
+    pub fn key(&self) -> ProfileKey {
+        ProfileKey { provider: self.provider, auth_method: self.auth_method }
+    }
 }
-
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct OllamaSettings {
-    #[serde(default)]
-    pub base_url: Option<String>,
-    #[serde(default)]
-    pub model: Option<String>,
-    // No disclosure field: Ollama is local-only, no data ever leaves
-    // the device, so there's nothing to acknowledge.
-}
-
-/// Nothing to configure -- kept as a real (empty) struct rather than
-/// omitting Mock's settings entirely, so the four providers stay
-/// structurally uniform in `AiSettings`.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct MockSettings {}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiSettings {
@@ -62,49 +91,139 @@ pub struct AiSettings {
     /// -- no manual impl needed.
     #[serde(default)]
     pub ai_enabled: bool,
-    /// `None` means "no provider configured" (`ai-provider`'s "No
-    /// provider configured by default") -- the default on a fresh
-    /// install, deliberately never defaulting to a cloud provider.
+    /// Every profile the user has enabled, stored independently and
+    /// simultaneously (`subscription-first-chat`'s "Independent
+    /// per-provider configuration"). Empty on a fresh install --
+    /// `ai-provider`'s "No provider configured by default", extended
+    /// to profiles.
     #[serde(default)]
-    pub active_provider: Option<ProviderKind>,
+    pub enabled_profiles: Vec<ProviderProfile>,
+    /// Which enabled profile currently handles chat requests, manually
+    /// chosen. `None` when `enabled_profiles` is empty. Task Routing /
+    /// Fallback between profiles is out of scope for this change (see
+    /// `subscription-first-chat`'s design.md Non-Goals) -- exactly one
+    /// profile is ever live at a time, and only a user action changes
+    /// which one.
     #[serde(default)]
-    pub openai: OpenAiSettings,
-    #[serde(default)]
-    pub anthropic: AnthropicSettings,
-    #[serde(default)]
-    pub ollama: OllamaSettings,
-    #[serde(default)]
-    pub mock: MockSettings,
+    pub default_profile: Option<ProfileKey>,
 }
 
-fn sub_settings<T: Default + for<'de> Deserialize<'de>>(value: Option<&Value>) -> T {
-    value.and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default()
+impl AiSettings {
+    /// The profile currently handling chat requests, if any.
+    pub fn default_profile(&self) -> Option<&ProviderProfile> {
+        let key = self.default_profile?;
+        self.enabled_profiles.iter().find(|p| p.key() == key)
+    }
+
+    pub fn profile(&self, key: ProfileKey) -> Option<&ProviderProfile> {
+        self.enabled_profiles.iter().find(|p| p.key() == key)
+    }
+
+    pub fn profile_mut(&mut self, key: ProfileKey) -> Option<&mut ProviderProfile> {
+        self.enabled_profiles.iter_mut().find(|p| p.key() == key)
+    }
+}
+
+fn parse_profile_key(value: &Value) -> Option<ProfileKey> {
+    serde_json::from_value(value.clone()).ok()
+}
+
+/// Migrates a Stage 1 config (`active_provider` present, no
+/// `enabled_profiles` key at all) into exactly one `ProviderProfile`.
+/// Every Stage 1 config's provider was necessarily API-key auth --
+/// subscription auth didn't exist yet -- so `AuthMethod::ApiKey` (or
+/// `Local` for Ollama/Mock) is the only value that could have produced
+/// today's file, not a guess. Only the previously *active* provider's
+/// settings are carried over; the other three providers' Stage 1
+/// settings (stored but inactive) are not preserved as disabled
+/// profiles, matching `subscription-first-chat`'s scoped migration
+/// plan.
+fn migrate_legacy_active_provider(obj: &serde_json::Map<String, Value>) -> AiSettings {
+    let get = |key: &str| obj.get(key);
+
+    let active_provider =
+        get("active_provider").and_then(|v| serde_json::from_value::<ProviderKind>(v.clone()).ok());
+
+    let Some(provider) = active_provider else {
+        return AiSettings {
+            ai_enabled: get("ai_enabled").and_then(Value::as_bool).unwrap_or(false),
+            enabled_profiles: vec![],
+            default_profile: None,
+        };
+    };
+
+    let sub_key = match provider {
+        ProviderKind::OpenAi => "openai",
+        ProviderKind::Anthropic => "anthropic",
+        ProviderKind::Ollama => "ollama",
+        ProviderKind::Mock => "mock",
+    };
+    let sub = get(sub_key).and_then(Value::as_object);
+    let model = sub.and_then(|s| s.get("model")).and_then(Value::as_str).map(str::to_string);
+    let base_url = sub.and_then(|s| s.get("base_url")).and_then(Value::as_str).map(str::to_string);
+    let disclosure_acknowledged = sub
+        .and_then(|s| s.get("disclosure_acknowledged"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+
+    let auth_method = match provider {
+        ProviderKind::OpenAi | ProviderKind::Anthropic => AuthMethod::ApiKey,
+        ProviderKind::Ollama | ProviderKind::Mock => AuthMethod::Local,
+    };
+
+    let profile =
+        ProviderProfile { provider, auth_method, model, base_url, disclosure_acknowledged };
+    let key = profile.key();
+
+    AiSettings {
+        ai_enabled: get("ai_enabled").and_then(Value::as_bool).unwrap_or(false),
+        enabled_profiles: vec![profile],
+        default_profile: Some(key),
+    }
 }
 
 /// Sanitizes a raw config JSON value into a fully-valid `AiSettings`,
 /// same field-by-field-degrades-gracefully approach as
 /// `fleet-snowfluff-core::config::sanitize`: an unexpected type or a
 /// missing field falls back to that field's default rather than
-/// discarding the whole file (unlike persona parsing, which is
-/// deliberately all-or-nothing).
+/// discarding the whole file.
 pub fn sanitize(raw: &Value) -> AiSettings {
-    let obj = raw.as_object();
-    let get = |key: &str| obj.and_then(|o| o.get(key));
+    let Some(obj) = raw.as_object() else {
+        return AiSettings::default();
+    };
 
-    AiSettings {
-        ai_enabled: get("ai_enabled").and_then(Value::as_bool).unwrap_or(false),
-        active_provider: get("active_provider")
-            .and_then(|v| serde_json::from_value::<ProviderKind>(v.clone()).ok()),
-        openai: sub_settings(get("openai")),
-        anthropic: sub_settings(get("anthropic")),
-        ollama: sub_settings(get("ollama")),
-        mock: MockSettings::default(),
+    // Legacy-shape detection: a Stage 1 file has `active_provider` and
+    // no `enabled_profiles` key at all. A fresh Stage 2 file (even one
+    // with zero profiles) always has `enabled_profiles` written out,
+    // so its *absence* -- not emptiness -- is what distinguishes "never
+    // touched this format" from "has this format with nothing enabled."
+    if obj.contains_key("active_provider") && !obj.contains_key("enabled_profiles") {
+        return migrate_legacy_active_provider(obj);
     }
+
+    let ai_enabled = obj.get("ai_enabled").and_then(Value::as_bool).unwrap_or(false);
+
+    let enabled_profiles: Vec<ProviderProfile> = obj
+        .get("enabled_profiles")
+        .and_then(Value::as_array)
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| serde_json::from_value::<ProviderProfile>(v.clone()).ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let default_profile = obj
+        .get("default_profile")
+        .and_then(parse_profile_key)
+        .filter(|key| enabled_profiles.iter().any(|p| p.key() == *key));
+
+    AiSettings { ai_enabled, enabled_profiles, default_profile }
 }
 
 /// Loads settings from raw file contents. Missing/unreadable/corrupt
-/// content yields full defaults (`ai_enabled: false`, no active
-/// provider), matching `config::load_from_str`'s precedent.
+/// content yields full defaults (`ai_enabled: false`, no profiles),
+/// matching `config::load_from_str`'s precedent.
 pub fn load_from_str(contents: &str) -> AiSettings {
     match serde_json::from_str::<Value>(contents) {
         Ok(value) => sanitize(&value),
@@ -122,18 +241,29 @@ mod tests {
 
     use super::*;
 
+    fn profile(provider: ProviderKind, auth_method: AuthMethod) -> ProviderProfile {
+        ProviderProfile {
+            provider,
+            auth_method,
+            model: None,
+            base_url: None,
+            disclosure_acknowledged: false,
+        }
+    }
+
     #[test]
-    fn defaults_are_disabled_with_no_provider_configured() {
+    fn defaults_are_disabled_with_no_profiles_configured() {
         let settings = AiSettings::default();
         assert!(!settings.ai_enabled);
-        assert_eq!(settings.active_provider, None);
+        assert!(settings.enabled_profiles.is_empty());
+        assert_eq!(settings.default_profile, None);
     }
 
     #[test]
     fn missing_file_content_yields_defaults() {
         let settings = load_from_str("");
         assert!(!settings.ai_enabled);
-        assert_eq!(settings.active_provider, None);
+        assert!(settings.enabled_profiles.is_empty());
     }
 
     #[test]
@@ -143,61 +273,169 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_round_trips_through_json() {
+        let mut p = profile(ProviderKind::Anthropic, AuthMethod::Subscription);
+        p.model = Some("claude-opus-5".to_string());
+        p.disclosure_acknowledged = true;
+        let json = serde_json::to_string(&p).unwrap();
+        let back: ProviderProfile = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, p);
+    }
+
+    #[test]
     fn partial_json_fills_missing_fields_with_defaults() {
-        let raw = json!({ "ai_enabled": true });
+        let raw = json!({ "ai_enabled": true, "enabled_profiles": [] });
         let settings = sanitize(&raw);
         assert!(settings.ai_enabled);
-        assert_eq!(settings.active_provider, None);
-        assert_eq!(settings.openai, OpenAiSettings::default());
+        assert!(settings.enabled_profiles.is_empty());
+        assert_eq!(settings.default_profile, None);
     }
 
     #[test]
-    fn active_provider_round_trips() {
-        let raw = json!({ "ai_enabled": true, "active_provider": "anthropic" });
-        let settings = sanitize(&raw);
-        assert_eq!(settings.active_provider, Some(ProviderKind::Anthropic));
-    }
-
-    #[test]
-    fn invalid_active_provider_falls_back_to_none_not_a_crash() {
-        let raw = json!({ "active_provider": "not_a_real_provider" });
-        let settings = sanitize(&raw);
-        assert_eq!(settings.active_provider, None);
-    }
-
-    #[test]
-    fn per_provider_settings_are_preserved_when_switching_active_provider() {
-        // Exercises ai-provider's "Independent per-provider
-        // configuration": every provider's settings are stored
-        // simultaneously, not overwritten when a different one becomes
-        // active.
+    fn enabled_profiles_and_default_round_trip() {
         let raw = json!({
-            "active_provider": "ollama",
-            "openai": { "model": "gpt-4o-mini", "disclosure_acknowledged": true },
-            "ollama": { "model": "llama3.2:3b" },
+            "ai_enabled": true,
+            "enabled_profiles": [
+                { "provider": "ollama", "auth_method": "local", "model": "llama3.2:3b" },
+                { "provider": "anthropic", "auth_method": "subscription", "disclosure_acknowledged": true },
+            ],
+            "default_profile": { "provider": "anthropic", "auth_method": "subscription" },
         });
         let settings = sanitize(&raw);
-        assert_eq!(settings.active_provider, Some(ProviderKind::Ollama));
-        assert_eq!(settings.openai.model.as_deref(), Some("gpt-4o-mini"));
-        assert!(settings.openai.disclosure_acknowledged);
-        assert_eq!(settings.ollama.model.as_deref(), Some("llama3.2:3b"));
+        assert_eq!(settings.enabled_profiles.len(), 2);
+        assert_eq!(
+            settings.default_profile,
+            Some(ProfileKey {
+                provider: ProviderKind::Anthropic,
+                auth_method: AuthMethod::Subscription
+            })
+        );
+        assert_eq!(settings.default_profile().unwrap().model, None);
+        assert!(settings.default_profile().unwrap().disclosure_acknowledged);
+    }
+
+    #[test]
+    fn default_profile_pointing_at_a_profile_that_is_not_enabled_falls_back_to_none() {
+        let raw = json!({
+            "enabled_profiles": [{ "provider": "ollama", "auth_method": "local" }],
+            "default_profile": { "provider": "anthropic", "auth_method": "api_key" },
+        });
+        let settings = sanitize(&raw);
+        assert_eq!(
+            settings.default_profile, None,
+            "a dangling pointer must not crash or be trusted"
+        );
+    }
+
+    #[test]
+    fn independent_profiles_survive_switching_the_default() {
+        // Exercises `subscription-first-chat`'s "Switching back to a
+        // previously configured provider": every enabled profile's
+        // settings stay present and usable regardless of which one is
+        // currently the default.
+        let raw = json!({
+            "enabled_profiles": [
+                { "provider": "open_ai", "auth_method": "api_key", "model": "gpt-4o-mini" },
+                { "provider": "ollama", "auth_method": "local", "model": "llama3.2:3b" },
+            ],
+            "default_profile": { "provider": "ollama", "auth_method": "local" },
+        });
+        let mut settings = sanitize(&raw);
+        assert_eq!(settings.default_profile().unwrap().provider, ProviderKind::Ollama);
+
+        settings.default_profile =
+            Some(ProfileKey { provider: ProviderKind::OpenAi, auth_method: AuthMethod::ApiKey });
+        assert_eq!(settings.default_profile().unwrap().model.as_deref(), Some("gpt-4o-mini"));
     }
 
     #[test]
     fn round_trips_through_json() {
         let settings = AiSettings {
             ai_enabled: true,
-            active_provider: Some(ProviderKind::OpenAi),
-            openai: OpenAiSettings {
-                model: Some("gpt-4o".to_string()),
-                disclosure_acknowledged: true,
-                ..Default::default()
-            },
-            ..Default::default()
+            enabled_profiles: vec![{
+                let mut p = profile(ProviderKind::OpenAi, AuthMethod::ApiKey);
+                p.model = Some("gpt-4o".to_string());
+                p.disclosure_acknowledged = true;
+                p
+            }],
+            default_profile: Some(ProfileKey {
+                provider: ProviderKind::OpenAi,
+                auth_method: AuthMethod::ApiKey,
+            }),
         };
 
         let json_str = to_json_string(&settings);
         let reloaded = load_from_str(&json_str);
         assert_eq!(reloaded, settings);
+    }
+
+    // -- Legacy migration (subscription-first-chat task 1.3/1.4) --
+
+    #[test]
+    fn legacy_active_provider_config_migrates_to_one_api_key_profile() {
+        let raw = json!({
+            "ai_enabled": true,
+            "active_provider": "anthropic",
+            "openai": { "model": "gpt-4o-mini", "disclosure_acknowledged": true },
+            "anthropic": { "model": "claude-sonnet-5", "disclosure_acknowledged": true },
+            "ollama": { "model": "llama3.2:3b" },
+        });
+        let settings = sanitize(&raw);
+
+        assert!(settings.ai_enabled);
+        assert_eq!(
+            settings.enabled_profiles.len(),
+            1,
+            "only the previously active provider migrates"
+        );
+        let migrated = &settings.enabled_profiles[0];
+        assert_eq!(migrated.provider, ProviderKind::Anthropic);
+        assert_eq!(migrated.auth_method, AuthMethod::ApiKey);
+        assert_eq!(migrated.model.as_deref(), Some("claude-sonnet-5"));
+        assert!(migrated.disclosure_acknowledged);
+        assert_eq!(settings.default_profile, Some(migrated.key()));
+    }
+
+    #[test]
+    fn legacy_config_with_no_active_provider_migrates_to_zero_profiles() {
+        let raw = json!({ "ai_enabled": false });
+        let settings = sanitize(&raw);
+        assert!(settings.enabled_profiles.is_empty());
+        assert_eq!(settings.default_profile, None);
+    }
+
+    #[test]
+    fn legacy_ollama_active_provider_migrates_with_local_auth_method() {
+        let raw = json!({
+            "active_provider": "ollama",
+            "ollama": { "model": "llama3.2:3b" },
+        });
+        let settings = sanitize(&raw);
+        assert_eq!(settings.enabled_profiles.len(), 1);
+        assert_eq!(settings.enabled_profiles[0].auth_method, AuthMethod::Local);
+        assert_eq!(settings.enabled_profiles[0].model.as_deref(), Some("llama3.2:3b"));
+    }
+
+    #[test]
+    fn a_config_already_in_the_new_shape_is_never_treated_as_legacy() {
+        // Presence of `enabled_profiles` (even empty) must win over
+        // `active_provider` possibly still lingering from a hand-edited
+        // file, so migration never re-runs on an already-migrated file.
+        let raw = json!({
+            "active_provider": "anthropic",
+            "enabled_profiles": [],
+            "default_profile": null,
+        });
+        let settings = sanitize(&raw);
+        assert!(settings.enabled_profiles.is_empty());
+        assert_eq!(settings.default_profile, None);
+    }
+
+    #[test]
+    fn invalid_active_provider_falls_back_to_none_not_a_crash() {
+        let raw = json!({ "active_provider": "not_a_real_provider" });
+        let settings = sanitize(&raw);
+        assert!(settings.enabled_profiles.is_empty());
+        assert_eq!(settings.default_profile, None);
     }
 }

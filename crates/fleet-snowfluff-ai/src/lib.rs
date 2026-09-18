@@ -21,4 +21,4 @@ pub use message::{Message, ModelInfo, ProviderError, ProviderKind, Role, StreamC
 pub use persona::{FewShotExample, Language, Persona, PersonaParseError, ResponseLanguage};
 pub use provider::{AiProvider, ChatStream};
 pub use providers::{Anthropic, Mock, Ollama, OpenAiCompatible};
-pub use settings::{AiSettings, AnthropicSettings, MockSettings, OllamaSettings, OpenAiSettings};
+pub use settings::{AiSettings, AuthMethod, ProfileKey, ProviderProfile};
