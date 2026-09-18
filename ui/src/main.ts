@@ -82,14 +82,15 @@ type ProfileStatus =
 // only Local). Grouped for display as OpenAI / Anthropic / Local,
 // subscription before API key within each cloud provider (matching the
 // source doc's own "subscription-first" mockup).
-const PROFILE_SLOTS: { provider: ProviderKind; auth_method: AuthMethod; experimental: boolean }[] = [
-  { provider: "anthropic", auth_method: "subscription", experimental: false },
-  { provider: "anthropic", auth_method: "api_key", experimental: false },
-  { provider: "open_ai", auth_method: "subscription", experimental: true },
-  { provider: "open_ai", auth_method: "api_key", experimental: false },
-  { provider: "ollama", auth_method: "local", experimental: false },
-  { provider: "mock", auth_method: "local", experimental: false },
-];
+const PROFILE_SLOTS: { provider: ProviderKind; auth_method: AuthMethod; experimental: boolean }[] =
+  [
+    { provider: "anthropic", auth_method: "subscription", experimental: false },
+    { provider: "anthropic", auth_method: "api_key", experimental: false },
+    { provider: "open_ai", auth_method: "subscription", experimental: true },
+    { provider: "open_ai", auth_method: "api_key", experimental: false },
+    { provider: "ollama", auth_method: "local", experimental: false },
+    { provider: "mock", auth_method: "local", experimental: false },
+  ];
 
 function slotKey(slot: ProfileKey): string {
   return `${slot.provider}:${slot.auth_method}`;
@@ -489,7 +490,10 @@ function renderProfileRow(
       <button type="button" class="ai-fetch-models-button secondary" data-slot="${key}">${t("ai.fetch_models_button")}</button>
       <div class="ai-fetch-models-result" data-slot="${key}"></div>
     `
-    : field(t("ai.profile_enabled_label"), `<input type="checkbox" class="ai-profile-enable" data-slot="${key}" />`);
+    : field(
+        t("ai.profile_enabled_label"),
+        `<input type="checkbox" class="ai-profile-enable" data-slot="${key}" />`,
+      );
 
   return `
     <details class="ai-profile-row" data-slot="${key}" ${enabled ? "open" : ""}>
@@ -513,54 +517,54 @@ function wireProfileRow(
   const key = slotKey(slot);
   const row = panel.querySelector<HTMLElement>(`.ai-profile-row[data-slot="${key}"]`)!;
 
-  row.querySelector<HTMLInputElement>(".ai-profile-enable")!.addEventListener("change", async (e) => {
-    const checkbox = e.target as HTMLInputElement;
-    if (!checkbox.checked) {
-      await invoke("disable_profile", { provider: slot.provider, authMethod: slot.auth_method });
-      await renderAi();
-      return;
-    }
+  row
+    .querySelector<HTMLInputElement>(".ai-profile-enable")!
+    .addEventListener("change", async (e) => {
+      const checkbox = e.target as HTMLInputElement;
+      if (!checkbox.checked) {
+        await invoke("disable_profile", { provider: slot.provider, authMethod: slot.auth_method });
+        await renderAi();
+        return;
+      }
 
-    // `enable_profile` itself is the source of truth for whether this
-    // (provider, auth method) still needs its disclosure acknowledged --
-    // the frontend doesn't try to track that (see
-    // `AiSettings::acknowledged_disclosures`'s backend doc comment for
-    // why: it must survive a disable/re-enable cycle, which the
-    // frontend has no visibility into). A `false` return means refused.
-    const enabled = await invoke<boolean>("enable_profile", {
-      provider: slot.provider,
-      authMethod: slot.auth_method,
-    });
-    if (enabled) {
-      await renderAi();
-      return;
-    }
+      // `enable_profile` itself is the source of truth for whether this
+      // (provider, auth method) still needs its disclosure acknowledged --
+      // the frontend doesn't try to track that (see
+      // `AiSettings::acknowledged_disclosures`'s backend doc comment for
+      // why: it must survive a disable/re-enable cycle, which the
+      // frontend has no visibility into). A `false` return means refused.
+      const enabled = await invoke<boolean>("enable_profile", {
+        provider: slot.provider,
+        authMethod: slot.auth_method,
+      });
+      if (enabled) {
+        await renderAi();
+        return;
+      }
 
-    const disclosureEl = row.querySelector<HTMLElement>(`.ai-disclosure[data-slot="${key}"]`)!;
-    disclosureEl.innerHTML = `
+      const disclosureEl = row.querySelector<HTMLElement>(`.ai-disclosure[data-slot="${key}"]`)!;
+      disclosureEl.innerHTML = `
       <p class="hint">${t(`ai.disclosure.${slot.provider}.${slot.auth_method}`)}</p>
       <button type="button" class="ai-disclosure-accept">${t("ai.disclosure.accept")}</button>
       <button type="button" class="ai-disclosure-cancel secondary">${t("ai.disclosure.cancel")}</button>
     `;
-    disclosureEl.querySelector<HTMLButtonElement>(".ai-disclosure-accept")!.addEventListener(
-      "click",
-      async () => {
-        await invoke("acknowledge_profile_disclosure", {
-          provider: slot.provider,
-          authMethod: slot.auth_method,
+      disclosureEl
+        .querySelector<HTMLButtonElement>(".ai-disclosure-accept")!
+        .addEventListener("click", async () => {
+          await invoke("acknowledge_profile_disclosure", {
+            provider: slot.provider,
+            authMethod: slot.auth_method,
+          });
+          await invoke("enable_profile", { provider: slot.provider, authMethod: slot.auth_method });
+          await renderAi();
         });
-        await invoke("enable_profile", { provider: slot.provider, authMethod: slot.auth_method });
-        await renderAi();
-      },
-    );
-    disclosureEl.querySelector<HTMLButtonElement>(".ai-disclosure-cancel")!.addEventListener(
-      "click",
-      () => {
-        checkbox.checked = false;
-        disclosureEl.innerHTML = "";
-      },
-    );
-  });
+      disclosureEl
+        .querySelector<HTMLButtonElement>(".ai-disclosure-cancel")!
+        .addEventListener("click", () => {
+          checkbox.checked = false;
+          disclosureEl.innerHTML = "";
+        });
+    });
 
   const defaultRadio = row.querySelector<HTMLInputElement>(".ai-default-radio");
   defaultRadio?.addEventListener("change", async () => {
@@ -594,9 +598,9 @@ function wireProfileRow(
   });
 
   const resultEl = row.querySelector<HTMLElement>(`.ai-fetch-models-result[data-slot="${key}"]`);
-  row.querySelector<HTMLButtonElement>(".ai-fetch-models-button")?.addEventListener(
-    "click",
-    async (e) => {
+  row
+    .querySelector<HTMLButtonElement>(".ai-fetch-models-button")
+    ?.addEventListener("click", async (e) => {
       const button = e.target as HTMLButtonElement;
       button.disabled = true;
       resultEl!.innerHTML = `<p>${t("ai.fetch_models.loading")}</p>`;
@@ -619,8 +623,7 @@ function wireProfileRow(
       } finally {
         button.disabled = false;
       }
-    },
-  );
+    });
 }
 
 async function refreshProfileStatus(

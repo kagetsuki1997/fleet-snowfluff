@@ -10,6 +10,7 @@ pub mod commands;
 pub mod config_store;
 pub mod persona_store;
 pub mod secrets_store;
+pub mod session_domain;
 pub mod status_bubble;
 // Pet windows on Windows render via GDI instead (platform::windows's
 // LayeredSurface) -- see that module's doc comment for why. Nothing on

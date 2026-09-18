@@ -1,4 +1,4 @@
-# Fleet Snowfluff 功能規劃摘要
+# Fleet Snowfluff 功能規劃摘要（v5）
 
 > 本文件整理自一次關於「桌面寵物新功能與 AI 整合」的討論，並在第一階段完成後重新評估後續架構。涵蓋功能發想、AI provider 整合、Persona、情境感知、記憶、Agent / Tool Calling、任務升級（escalation）、OpenClaw / Codex / Claude Code 整合等主題。目的是作為後續深入規劃（例如搭配 openspec）的輸入來源，非最終規格書。
 
@@ -421,6 +421,117 @@ Ollama
 ```
 
 這個 fallback 順序可以由使用者設定，而不是由模型自行決定。
+
+---
+
+### Conversation / Execution / External Runtime Session 分層
+
+在 subscription-first 與 multi-model 之後，Fleet 還需要明確區分三種「session / state」。它們不能被當成同一個概念：
+
+> **Fleet Conversation ≠ Fleet Execution ≠ External Runtime Session**
+
+#### 1. Fleet Conversation
+
+`Conversation` 是使用者看到的長生命週期對話，屬於 Fleet product layer。它負責：
+
+- 使用者可見的聊天歷史
+- Persona / system context
+- Fleet Memory 的關聯
+- 使用者權限與設定
+- 對話 metadata
+
+Conversation 不應綁死某一個模型或 runtime。
+
+同一個 Conversation 可以在不同時間使用不同 backend：
+
+```text
+Conversation conv_001
+  ├── Execution ex_001 → Qwen / Ollama
+  ├── Execution ex_002 → Claude Code
+  └── Execution ex_003 → OpenClaw
+```
+
+#### 2. Fleet Execution
+
+`Execution` 代表「一次 task / turn 的執行」。它是 Fleet Agent Core 的生命週期單位，負責記錄：
+
+- `conversation_id`
+- 本次選定的 model / provider / runtime
+- TaskRequirements / routing decision
+- execution status
+- tool trace
+- cancellation / timeout
+- external runtime reference
+
+例如：
+
+```rust
+struct Conversation {
+    id: ConversationId,
+}
+
+struct Execution {
+    id: ExecutionId,
+    conversation_id: ConversationId,
+    runtime: RuntimeId,
+    external_ref: Option<ExternalSessionRef>,
+}
+```
+
+**Stage 2 不需要先實作完整 Execution engine，但應先把這個 domain boundary 定義出來。** Stage 3 Agent Loop 開始後，Agent run、tool trace、timeout、cancellation 都應掛在 `Execution` 上，而不是直接掛在 Conversation。
+
+#### 3. External Runtime Session
+
+`External Runtime Session` 是 Codex、Claude Code、OpenClaw、ACP 等外部 runtime 自己管理的 session state。Fleet 不應接管其內部生命週期，只保存必要的 reference 與狀態。
+
+例如未來可能出現：
+
+```text
+Fleet Conversation fs_123
+  └── Fleet Execution ex_456
+       runtime = OpenClaw
+       external_session_id = os_789
+            └── ACP session acp_abc
+                 └── Claude Code session cc_xyz
+```
+
+這種 nested session 不需要全部同步到 Fleet。Fleet 只需要知道：
+
+```text
+Execution
+  → external runtime
+  → external session reference
+  → lifecycle/status
+```
+
+至於 OpenClaw 如何建立 ACP session、ACP 如何管理 Claude Code session，應由對應 runtime adapter / runtime 自己負責。
+
+#### Context 不應在各層重複複製
+
+不要讓 Fleet、OpenClaw、Claude Code 各自保存一份完整 Conversation history。Fleet 在建立 Execution 時，應組裝一份當次需要的 Fleet Context：
+
+```text
+Fleet Conversation
+ + Persona
+ + Relevant Memory
+ + Relevant Conversation History
+ + Current Task
+        ↓
+   Fleet Context
+        ↓
+ External Runtime
+```
+
+External runtime 可以建立自己的 session context，但那是 runtime-owned state，不是 Fleet Memory 的替代品。
+
+因此：
+
+- **Conversation**：使用者的長期對話容器
+- **Execution**：Fleet 一次任務執行的容器
+- **External Runtime Session**：Codex / Claude Code / OpenClaw 等 runtime 的內部執行狀態
+- **Memory**：Fleet product-level 的長期資訊，不屬於任何單一 runtime session
+
+這個分層也讓未來的 Codex Thread / Turn、Claude Code session、OpenClaw session 都能透過 adapter 映射，而不需要污染 Fleet Core。
 
 ---
 
@@ -1121,92 +1232,112 @@ Executor
 
 > 第一階段已完成。依照新的產品優先級，**下一步先做 subscription-first Chat，再做 Agent Core**。
 
-### 第二階段 — Subscription-first Chat
+### 第二階段 — Subscription-first Chat + Session Domain Foundation
 
 - Multi-model Task Routing / Fallback
+- Conversation / Execution domain model（先定義，不做完整 Agent lifecycle）
 
 **目標：讓使用者不用 API key，也能直接用自己已有的 AI subscription 與 Fleet 聊天。**
 
-1. **Auth / Profile abstraction**
+2. **Auth / Profile abstraction**
    - API Key
    - OAuth
    - CLI Session
    - Local
 
-2. **OpenAI ChatGPT/Codex subscription**
+3. **OpenAI ChatGPT/Codex subscription**
    - OAuth login
    - OpenClaw-style auth profile
    - Codex app-server backend
    - canonical `openai/*` model route
 
-3. **Anthropic Claude subscription**
+4. **Anthropic Claude subscription**
    - Claude Code detection
    - `claude auth status`
    - Claude CLI backend
    - `claude -p`
    - 不自己保存 / refresh Claude 原生 login token
 
-4. **Provider connection UI**
+5. **Provider connection UI**
    - Connect ChatGPT
    - Connect Claude
    - API Key
    - Ollama
 
-5. **Auth / runtime status**
+6. **Auth / runtime status**
    - connected
    - expired
    - quota exhausted
    - runtime unavailable
    - fallback backend
 
+7. **Conversation / Execution foundation**
+   - `ConversationId`：使用者可見的長期對話
+   - `ExecutionId`：一次 request / task 的執行單位
+   - Conversation 與 Model / Runtime 解耦
+   - 預留 `ExternalSessionRef`，但 Stage 2 不負責管理 Codex / Claude Code / OpenClaw session lifecycle
+   - Conversation history 仍由 Fleet 保存；不要為了 subscription integration 複製外部 runtime 的完整 session state
+
 > 此階段完成後，使用者可以只登入 ChatGPT / Claude，就用 Fleet 的一般 Chat，不必先取得 API key。
+> 同時，Fleet 已經有正確的 Conversation / Execution 邊界，讓 Stage 3 的 Agent Loop 可以直接建立在其上。
 
 ### 第三階段 — Agent Core
 
 **目標：讓 subscription-backed Chat 也可以逐步變成 Agent。**
 
-6. **Tool abstraction**
-7. **Tool registry**
-8. **Agent loop**
-9. **第一批 Native Tools**
-   - system context
-   - web search
-   - read file
-   - list directory
-10. **Permission layer**
-11. **iteration / timeout / cancellation**
+8. **Tool abstraction**
+9. **Tool registry**
+10. **Agent loop**
+11. **Execution lifecycle**
+
+- execution status
+- tool trace
+- timeout
+- cancellation
+- iteration limit
+
+12. **第一批 Native Tools**
+
+- system context
+- web search
+- read file
+- list directory
+
+13. **Permission layer**
 
 ### 第四階段 — MCP + Context
 
-12. **MCP client**
-13. **Context Awareness**
-14. **Rule Engine**
-15. **Emotion → Animation**
-16. **Proactive interaction**
+13. **MCP client**
+14. **Context Awareness**
+15. **Rule Engine**
+16. **Emotion → Animation**
+17. **Proactive interaction**
 
 ### 第五階段 — Memory / Knowledge
 
-17. **好感度 / 心情值**
-18. **近期互動記憶摘要**
-19. **RAG**
-20. **長期向量記憶（需求確認後）**
+18. **好感度 / 心情值**
+19. **近期互動記憶摘要**
+20. **RAG**
+21. **長期向量記憶（需求確認後）**
 
-### 第六階段 — Capability Escalation
+### 第六階段 — Capability Escalation + External Runtime Sessions
 
-21. **Task capability detection**
-22. **Local / MCP / Advanced backend routing**
-23. **Codex session lifecycle**
-24. **Claude Code session lifecycle**
-25. **OpenClaw optional backend**
+22. **Task capability detection**
+23. **Local / MCP / Advanced backend routing**
+24. **External Runtime Adapter abstraction**
+25. **Codex session lifecycle / Thread mapping**
+26. **Claude Code session lifecycle mapping**
+27. **OpenClaw optional backend + nested session isolation**
+28. **Execution → ExternalSessionRef lifecycle / recovery**
 
 ### 第七階段 — Voice / Automation
 
-26. **TTS**
-27. **STT**
-28. **Browser automation**
-29. **剪貼簿助手**
-30. **多寵物互動**
-31. **Plugin / Script system**
+29. **TTS**
+30. **STT**
+31. **Browser automation**
+32. **剪貼簿助手**
+33. **多寵物互動**
+34. **Plugin / Script system**
 
 ---
 
@@ -1332,6 +1463,7 @@ Fleet Snowfluff
 
 核心原則：
 
+0. **Fleet Conversation ≠ Fleet Execution ≠ External Runtime Session。** Conversation 是產品層對話；Execution 是 Fleet task lifecycle；External Session 由對應 runtime 自己管理。
 1. **Chat 是使用者介面，不是能力邊界。**
 2. **Agent Core 是 Fleet 自己掌握的核心。**
 3. **Tool / MCP 是能力擴充層。**
@@ -1375,21 +1507,25 @@ The Agent Core should remain independent of whether the selected runtime is Olla
 已完成
 Provider + Chat + Persona
         ↓
-現在
-Agent Loop + Tools + Permission
+現在（Stage 2）
+Subscription-first Chat
++ Conversation / Execution domain foundation
         ↓
-接著
+接著（Stage 3）
+Agent Loop + Tools + Permission
++ Execution lifecycle
+        ↓
+接著（Stage 4）
 MCP + Context Awareness + Emotion
         ↓
-再來
+再來（Stage 5）
 Memory + RAG
         ↓
-之後
+之後（Stage 6）
 Capability Escalation
++ External Runtime Session adapters
         ↓
 最後
-Codex / Claude Code / OpenClaw
-        ↓
 Voice / Browser / Automation
 ```
 
