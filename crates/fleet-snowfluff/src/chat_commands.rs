@@ -299,6 +299,7 @@ fn store_cli_session_id(
 /// persisted or exposed over IPC (see `session_domain`'s own module
 /// doc for why this is a typing-only addition, not a status-tracking
 /// one).
+#[allow(clippy::too_many_arguments)]
 async fn run_generation(
     app: AppHandle,
     provider: Box<dyn AiProvider>,

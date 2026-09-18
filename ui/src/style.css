@@ -419,3 +419,11 @@ body.bubble-window #app {
 .ai-profile-status--error {
   color: var(--pico-del-color);
 }
+
+.ai-profile-login-button {
+  width: auto;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.8em;
+}

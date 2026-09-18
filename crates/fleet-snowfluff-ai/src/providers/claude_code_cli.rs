@@ -296,6 +296,27 @@ impl AiProvider for ClaudeCodeCli {
 
     fn session_id(&self) -> Option<String> { ClaudeCodeCli::session_id(self) }
 
+    /// Spawns `claude auth login` detached -- the CLI owns the whole
+    /// OAuth ceremony (opening a browser, running its own local
+    /// callback listener) from here on; Fleet neither waits for it nor
+    /// reads its output. The child is handed off to a background task
+    /// purely so it gets reaped instead of left a zombie, not so its
+    /// result can be inspected.
+    async fn trigger_login(&self) -> Result<(), ProviderError> {
+        let child = Command::new("claude")
+            .args(["auth", "login"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| cli_process::map_spawn_error("claude", e))?;
+        tokio::spawn(async move {
+            let mut child = child;
+            let _ = child.wait().await;
+        });
+        Ok(())
+    }
+
     /// Genuinely incremental: `claude -p`'s stdout is read line-by-line
     /// inside the returned stream's own generator (same shape as
     /// `providers/http_stream.rs::stream_lines`), not drained before
@@ -612,12 +633,12 @@ mod tests {
 
     #[test]
     fn parses_the_live_verified_logged_in_shape() {
-        assert_eq!(parse_auth_status(LIVE_LOGGED_IN_FIXTURE).unwrap(), true);
+        assert!(parse_auth_status(LIVE_LOGGED_IN_FIXTURE).unwrap());
     }
 
     #[test]
     fn parses_a_logged_out_status() {
-        assert_eq!(parse_auth_status(r#"{"loggedIn": false}"#).unwrap(), false);
+        assert!(!parse_auth_status(r#"{"loggedIn": false}"#).unwrap());
     }
 
     #[tokio::test]

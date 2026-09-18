@@ -64,6 +64,7 @@
   "ai.status.not_logged_in": "로그인되지 않음",
   "ai.status.quota_exhausted": "할당량 소진",
   "ai.status.error": "오류",
+  "ai.login_button": "로그인",
   "ai.api_key_label": "API 키",
   "ai.api_key.set_placeholder": "•••••••• (설정됨)",
   "ai.api_key.unset_placeholder": "API 키 입력",

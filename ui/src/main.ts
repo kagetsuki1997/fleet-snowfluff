@@ -265,6 +265,20 @@ async function render(): Promise<void> {
     button.addEventListener("click", () => {
       activeTab = button.dataset.tab as Tab;
       applyActiveTab();
+      // `subscription-first-chat`'s "Provider status display" requires
+      // status to be checked fresh "when the AI tab is opened," not
+      // only once when the whole settings window first opened -- a
+      // profile's CLI could have logged out or hit its quota while the
+      // user was looking at a different tab. A full `renderAi()` would
+      // also discard any in-progress, unsaved edits in the row's own
+      // inputs, so only the status (and its login-button visibility)
+      // is re-checked, not the whole panel.
+      if (activeTab === "ai") {
+        const panel = document.querySelector<HTMLElement>('[data-panel="ai"]');
+        if (panel) {
+          for (const slot of PROFILE_SLOTS) void refreshProfileStatus(panel, slot);
+        }
+      }
     });
   }
 
@@ -478,7 +492,8 @@ function renderAiPanel(panel: HTMLElement, snapshot: AiSettingsSnapshot): void {
       provider: slot.provider,
       authMethod: slot.auth_method,
     });
-    if (!ok) defaultSelect.value = settings.default_profile ? slotKey(settings.default_profile) : "";
+    if (!ok)
+      defaultSelect.value = settings.default_profile ? slotKey(settings.default_profile) : "";
     await renderAi();
   });
 
@@ -541,6 +556,7 @@ function renderProfileRow(
         <span class="ai-profile-name">${t(`ai.profile.${slot.provider}.${slot.auth_method}`)}</span>
         ${slot.experimental ? `<span class="badge-experimental">${t("ai.experimental_badge")}</span>` : ""}
         <span class="ai-profile-status" data-slot="${key}">${t("ai.status.checking")}</span>
+        <button type="button" class="ai-profile-login-button secondary" data-slot="${key}" hidden>${t("ai.login_button")}</button>
       </summary>
       <div class="ai-profile-body" data-slot="${key}">
         <div class="ai-disclosure" data-slot="${key}"></div>
@@ -606,6 +622,34 @@ function wireProfileRow(
         });
     });
 
+  row
+    .querySelector<HTMLButtonElement>(".ai-profile-login-button")
+    ?.addEventListener("click", async (e) => {
+      // The button lives inside <summary>, whose native click behavior
+      // toggles the enclosing <details> -- without this, clicking "Log
+      // in" would also collapse/expand the row.
+      e.preventDefault();
+      e.stopPropagation();
+      const button = e.currentTarget as HTMLButtonElement;
+      button.disabled = true;
+      try {
+        await invoke<boolean>("trigger_profile_login", {
+          provider: slot.provider,
+          authMethod: slot.auth_method,
+        });
+      } catch (err) {
+        button.title = String(err);
+      } finally {
+        button.disabled = false;
+        // Re-check status right away -- if the CLI's login flow
+        // completed instantly (unlikely, but possible for an
+        // already-valid-but-stale session) this reflects it without
+        // waiting for the next full tab render; otherwise it just
+        // leaves the button visible for another attempt.
+        void refreshProfileStatus(panel, slot);
+      }
+    });
+
   row.querySelector<HTMLInputElement>(".ai-api-key-input")?.addEventListener("change", (e) => {
     const value = (e.target as HTMLInputElement).value;
     if (value) void invoke("set_provider_api_key", { provider: slot.provider, apiKey: value });
@@ -668,11 +712,22 @@ async function refreshProfileStatus(
     // The panel may already have been re-rendered (e.g. the user toggled
     // something else while this was in flight) -- a missing element just
     // means this result is stale and there's nothing to update.
-    const el = panel.querySelector<HTMLElement>(`.ai-profile-status[data-slot="${slotKey(slot)}"]`);
+    const key = slotKey(slot);
+    const el = panel.querySelector<HTMLElement>(`.ai-profile-status[data-slot="${key}"]`);
     if (!el) return;
     el.textContent = t(`ai.status.${status.state}`);
     el.className = `ai-profile-status ai-profile-status--${status.state}`;
     if ("detail" in status) el.title = status.detail;
+
+    // Only offer the login-trigger button for the one state it actually
+    // applies to (`subscription-first-chat`'s "CLI installed but not
+    // logged in" scenario) -- every other state either doesn't need a
+    // login at all or isn't fixable by triggering one (e.g. a missing
+    // CLI binary).
+    const loginButton = panel.querySelector<HTMLButtonElement>(
+      `.ai-profile-login-button[data-slot="${key}"]`,
+    );
+    if (loginButton) loginButton.hidden = status.state !== "not_logged_in";
   } catch {
     // Best-effort only -- leave the "checking..." placeholder in place.
   }

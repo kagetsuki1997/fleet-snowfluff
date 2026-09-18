@@ -290,6 +290,30 @@ impl AiProvider for Codex {
 
     fn session_id(&self) -> Option<String> { Codex::session_id(self) }
 
+    /// Spawns `codex login` detached -- mirrors
+    /// `ClaudeCodeCli::trigger_login`: Codex's CLI owns the whole
+    /// browser-based login ceremony from here, Fleet only starts it.
+    /// Untested against a real login flow (same caveat as the rest of
+    /// this experimental provider, see module doc) -- if headless
+    /// `codex login` turns out not to complete this way, the spawn
+    /// itself still succeeds (it's a fire-and-forget launch, not a
+    /// wait-for-success check), and the settings UI's existing
+    /// not-logged-in status text remains the fallback instruction.
+    async fn trigger_login(&self) -> Result<(), ProviderError> {
+        let child = Command::new("codex")
+            .arg("login")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|e| cli_process::map_spawn_error("codex", e))?;
+        tokio::spawn(async move {
+            let mut child = child;
+            let _ = child.wait().await;
+        });
+        Ok(())
+    }
+
     /// See module doc for the two confirmed limitations this works
     /// around: synthesized chunking (no real incremental text from
     /// Codex) and `model_instructions_file` (no system-prompt flag).
@@ -391,13 +415,20 @@ impl AiProvider for Codex {
 
     /// No live model-listing surface (same reasoning as
     /// `ClaudeCodeCli::list_models`) -- an empty list is not an error
-    /// here. Unlike Claude, no known-good set of Codex model aliases
-    /// was confirmed during design (no subscription available to check
-    /// against), so this stays empty rather than guessing at values
-    /// that might not exist -- a known, accepted gap in the
-    /// experimental path, not an oversight (contrast with
-    /// `ClaudeCodeCli::list_models`, where the equivalent gap *was*
-    /// fixed once real values were confirmed).
+    /// here. Unlike Claude Code's `--model` flag, which documents a
+    /// small, stable set of named aliases (`sonnet`/`opus`/`fable`/
+    /// `haiku`), Codex CLI's own `model` config key takes an
+    /// open-ended, frequently-revised version string (confirmed via
+    /// its official docs at developers.openai.com/codex during
+    /// `/opsx:verify`: the only example given is a bare `model =
+    /// "gpt-5.6"`, with no enumerated list, and third-party sources
+    /// disagree with each other on current values) -- there is no
+    /// confirmed, stable alias set to offer here the way there is for
+    /// Claude. `ai-provider`'s "Live model listing" requirement was
+    /// updated to make this an explicit second case (its own "no
+    /// confirmed alias set" scenario) rather than leaving the empty
+    /// list looking like an unreconciled gap against text that assumed
+    /// every CLI has a small alias list the way Claude Code does.
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> { Ok(vec![]) }
 }
 
@@ -491,6 +522,17 @@ mod tests {
     fn resume_failure_is_detected_for_the_retry_decision() {
         assert!(looks_resume_related(&classify_error("Could not resume thread: not found.")));
         assert!(!looks_resume_related(&classify_error("Internal server error.")));
+    }
+
+    #[tokio::test]
+    async fn list_models_is_empty_by_design_since_no_confirmed_alias_set_exists() {
+        // Deliberately the opposite assertion from
+        // `claude_code_cli.rs`'s
+        // `list_models_offers_the_known_aliases_not_an_empty_list` -- see this
+        // function's own doc comment for why the two providers can't share the
+        // same answer here.
+        let models = Codex::new(None, None).list_models().await.unwrap();
+        assert!(models.is_empty());
     }
 
     #[test]

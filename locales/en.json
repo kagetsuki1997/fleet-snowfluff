@@ -64,6 +64,7 @@
   "ai.status.not_logged_in": "Not logged in",
   "ai.status.quota_exhausted": "Quota exhausted",
   "ai.status.error": "Error",
+  "ai.login_button": "Log in",
   "ai.api_key_label": "API Key",
   "ai.api_key.set_placeholder": "•••••••• (already set)",
   "ai.api_key.unset_placeholder": "Enter API key",

@@ -61,6 +61,10 @@ impl ExecutionId {
     pub fn new() -> Self { Self(rand::random()) }
 }
 
+impl Default for ExecutionId {
+    fn default() -> Self { Self::new() }
+}
+
 /// A CLI-backed subscription provider's own session/thread id (Claude's
 /// `session_id`, Codex's `thread_id`) -- a bare wrapper, deliberately
 /// with no internal tag for which runtime it belongs to. Wherever this

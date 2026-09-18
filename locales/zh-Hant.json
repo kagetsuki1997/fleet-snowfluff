@@ -64,6 +64,7 @@
   "ai.status.not_logged_in": "尚未登入",
   "ai.status.quota_exhausted": "額度已用盡",
   "ai.status.error": "發生錯誤",
+  "ai.login_button": "登入",
   "ai.api_key_label": "API 金鑰",
   "ai.api_key.set_placeholder": "••••••••（已設定）",
   "ai.api_key.unset_placeholder": "輸入 API 金鑰",

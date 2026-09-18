@@ -395,6 +395,39 @@ pub async fn check_profile_status(
     })
 }
 
+/// Best-effort attempt to open the (`provider`, `auth_method`)
+/// profile's own CLI login flow in the user's browser
+/// (`subscription-first-chat`'s "CLI installed but not logged in"
+/// scenario, via `AiProvider::trigger_login()`) -- fire-and-forget:
+/// Fleet does not wait for the flow to complete, it only starts it.
+/// `Ok(true)` means the login command was spawned; the caller should
+/// tell the user to complete it in their browser and then re-check
+/// status (`check_profile_status`). `Ok(false)` means the profile isn't
+/// enabled, so there is nothing to trigger. Any spawn failure (e.g. the
+/// CLI binary is missing) is surfaced as an error so the settings UI
+/// can fall back to its existing "run the login command yourself"
+/// instruction.
+#[tauri::command]
+pub async fn trigger_profile_login(
+    ai_settings: State<'_, Mutex<AiSettings>>,
+    credentials: State<'_, Mutex<ProviderCredentials>>,
+    provider: ProviderKind,
+    auth_method: AuthMethod,
+) -> Result<bool, String> {
+    let key = ProfileKey { provider, auth_method };
+
+    let provider_impl = {
+        let settings = ai_settings.lock().unwrap();
+        let creds = credentials.lock().unwrap();
+        let Some(profile) = settings.profile(key).cloned() else {
+            return Ok(false);
+        };
+        build_provider(&creds, &profile, None)
+    };
+
+    provider_impl.trigger_login().await.map(|()| true).map_err(|err| err.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

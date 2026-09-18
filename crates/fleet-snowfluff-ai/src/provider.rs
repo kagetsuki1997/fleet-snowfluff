@@ -53,6 +53,24 @@ pub trait AiProvider: Send + Sync {
     /// the app crate after a generation completes to persist across
     /// the next `chat()` call for the same profile.
     fn session_id(&self) -> Option<String> { None }
+
+    /// Best-effort attempt to start this provider's own login flow (a
+    /// browser-based OAuth ceremony owned entirely by the CLI, not
+    /// Fleet) for a subscription auth method that isn't logged in yet
+    /// (`subscription-first-chat`'s "CLI installed but not logged in"
+    /// scenario). Default is a no-op `Ok(())` for every provider
+    /// without a CLI-owned login flow of its own -- API-key and local
+    /// providers have nothing to trigger. CLI-backed subscription
+    /// providers override this to spawn their CLI's own login
+    /// subcommand, detached, without waiting for it to finish: Fleet
+    /// starts the ceremony, it does not drive or babysit it. Returning
+    /// `Ok(())` means only "the command was spawned," not "login
+    /// succeeded" -- the caller must re-check `check_availability()`
+    /// afterward. A spawn failure (e.g. the binary went missing between
+    /// checks) is the "cannot be completed this way" half of that
+    /// scenario; the settings UI's existing not-logged-in status text
+    /// is the fallback instruction either way.
+    async fn trigger_login(&self) -> Result<(), ProviderError> { Ok(()) }
 }
 
 #[cfg(test)]

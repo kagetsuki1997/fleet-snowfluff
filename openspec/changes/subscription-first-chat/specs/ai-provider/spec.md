@@ -16,17 +16,22 @@ The application SHALL support chat completions through a common provider interfa
 
 ### Requirement: Live model listing
 
-For each provider brand using API-key or local auth (OpenAI, Anthropic, Ollama), the set of selectable models SHALL be fetched live from that provider rather than hardcoded, and a failure to fetch SHALL be shown as a configuration error at the point of selection. For a subscription auth method backed by a CLI with no live model-listing capability of its own, the set of selectable models SHALL instead be a fixed set of that CLI's own documented model identifiers/aliases (not an arbitrary guess at values the CLI's own documentation doesn't confirm), and leaving the model unset SHALL be valid and SHALL mean "use that CLI's own default."
+For each provider brand using API-key or local auth (OpenAI, Anthropic, Ollama), the set of selectable models SHALL be fetched live from that provider rather than hardcoded, and a failure to fetch SHALL be shown as a configuration error at the point of selection. For a subscription auth method backed by a CLI with no live model-listing capability of its own, the set of selectable models SHALL instead be a fixed set of that CLI's own documented model identifiers/aliases when its documentation confirms one (not an arbitrary guess at values that documentation doesn't confirm) — and if no such confirmed, stable set exists, the selector SHALL show an empty list rather than guessed or invented values. Leaving the model unset SHALL always be valid and SHALL mean "use that CLI's own default," whichever case applies.
 
 #### Scenario: Invalid credentials surface at model-selection time
 
 - **WHEN** the user enters an invalid API key and opens the model selector for that provider
 - **THEN** the model list fails to load and the failure reason is shown inline, without requiring a chat message to be sent first
 
-#### Scenario: A CLI-backed subscription profile still offers a model choice
+#### Scenario: A CLI-backed subscription profile with a confirmed alias set still offers a model choice
 
-- **WHEN** the user opens the model selector for a subscription auth method backed by a CLI with no live listing capability
-- **THEN** the selector shows that CLI's own documented model identifiers/aliases rather than an empty list, and leaving no model selected is a valid choice
+- **WHEN** the user opens the model selector for a subscription auth method backed by a CLI whose documentation confirms a small set of named model aliases (e.g. Claude Code's `--model` aliases), even though the CLI has no live listing capability of its own
+- **THEN** the selector shows that CLI's own documented aliases rather than an empty list, and leaving no model selected is a valid choice
+
+#### Scenario: A CLI-backed subscription profile with no confirmed alias set shows an empty list, not a guess
+
+- **WHEN** the user opens the model selector for a subscription auth method backed by a CLI whose own documentation gives no small, stable, confirmed set of model identifiers (e.g. Codex CLI's `model` config accepts open-ended, frequently-changing version strings with no enumerated list in its own docs)
+- **THEN** the selector shows an empty list rather than inventing plausible-looking values that documentation doesn't back up, and leaving no model selected is still a valid choice meaning "use that CLI's own default"
 
 ### Requirement: Streaming responses
 

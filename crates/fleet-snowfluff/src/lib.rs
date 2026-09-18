@@ -84,6 +84,7 @@ pub fn run() {
             ai_commands::set_provider_api_key,
             ai_commands::fetch_provider_models,
             ai_commands::check_profile_status,
+            ai_commands::trigger_profile_login,
             chat_commands::get_chat_state,
             chat_commands::send_chat_message,
             chat_commands::stop_generation,

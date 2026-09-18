@@ -64,6 +64,7 @@
   "ai.status.not_logged_in": "未ログイン",
   "ai.status.quota_exhausted": "利用上限に到達",
   "ai.status.error": "エラー",
+  "ai.login_button": "ログイン",
   "ai.api_key_label": "API キー",
   "ai.api_key.set_placeholder": "••••••••（設定済み）",
   "ai.api_key.unset_placeholder": "API キーを入力",
