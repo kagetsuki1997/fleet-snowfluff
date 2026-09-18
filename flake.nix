@@ -105,7 +105,9 @@
         };
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-        ui = pkgs.callPackage ./devshell/ui.nix { };
+        ui = pkgs.callPackage ./devshell/ui.nix {
+          version = cargoToml.workspace.package.version;
+        };
       in
       {
         formatter = pkgs.treefmt;

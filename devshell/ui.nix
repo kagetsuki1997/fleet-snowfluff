@@ -1,10 +1,11 @@
 {
   pkgs,
+  version,
 }:
 
 pkgs.buildNpmPackage {
   pname = "fleet-snowfluff-ui";
-  version = "0.1.0";
+  inherit version;
 
   src = ../ui;
 
