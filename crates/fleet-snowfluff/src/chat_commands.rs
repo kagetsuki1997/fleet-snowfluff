@@ -10,19 +10,23 @@
 //! for -- a deliberate Stage 1 simplification.
 
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
 
 use fleet_snowfluff_ai::{
-    log::LogRole, prompt, AiProvider, AiSettings, Language, LogEntry, Persona, ProviderCredentials,
-    ResponseLanguage,
+    log::LogRole, prompt, AiProvider, AiSettings, Language, LogEntry, Persona, ProfileKey,
+    ProviderCredentials, ResponseLanguage,
 };
 use futures_util::StreamExt;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
 
 use crate::{
-    ai_commands, chat_log_store, chat_pause, chat_window, manager::PetManager, persona_store,
+    ai_commands, chat_log_store, chat_pause, chat_window,
+    manager::PetManager,
+    persona_store,
+    session_domain::{ConversationId, ExecutionId, ExternalSessionRef},
     status_bubble,
 };
 
@@ -45,6 +49,22 @@ pub struct ChatRuntimeState {
     session_path: Mutex<Option<PathBuf>>,
     pending: Mutex<Option<PendingGeneration>>,
     unread: Mutex<Option<UnreadKind>>,
+    /// The underlying CLI's own session/thread id, per (conversation,
+    /// profile), for CLI-backed subscription providers' warm-session
+    /// model (both `ClaudeCodeCli` and `Codex` --
+    /// `subscription-first-chat`'s "Session continuity for CLI-backed
+    /// subscription providers"). Runtime-only, never written to disk
+    /// (design.md's "session id is runtime-only" decision) -- an app
+    /// restart just starts fresh sessions, same as `new_chat_session`
+    /// already clears this map for a new Fleet chat session. Keyed by
+    /// `ConversationId` as well as `ProfileKey`, not `ProfileKey` alone
+    /// -- Fleet has exactly one conversation at a time today, so this
+    /// makes no observable difference yet, but a `ProfileKey`-only key
+    /// would silently hand one conversation's session to another's
+    /// request for the same profile the moment that's no longer true
+    /// (see design.md's Decisions for why this is treated differently
+    /// from `PendingGeneration`, which is deliberately left alone).
+    cli_sessions: Mutex<HashMap<(ConversationId, ProfileKey), ExternalSessionRef>>,
 }
 
 impl ChatRuntimeState {
@@ -129,7 +149,7 @@ pub fn get_chat_state(
     let settings = ai_settings.lock().unwrap();
     let (ai_ready, not_ready_reason) = if !settings.ai_enabled {
         (false, Some("disabled"))
-    } else if settings.active_provider.is_none() {
+    } else if settings.default_profile.is_none() {
         (false, Some("no_provider"))
     } else {
         (true, None)
@@ -194,12 +214,15 @@ pub async fn send_chat_message(
         channel.send(ChatEvent::Error { message: "disabled".to_string() }).ok();
         return Ok(());
     }
-    let Some(provider_kind) = settings_snapshot.active_provider else {
+    let Some(profile) = settings_snapshot.default_profile().cloned() else {
         channel.send(ChatEvent::Error { message: "no_provider".to_string() }).ok();
         return Ok(());
     };
+    let profile_key = profile.key();
 
     let session_path = resolve_session_path(&app, &chat_state);
+    let conversation_id = ConversationId::from_session_path(&session_path);
+    let execution_id = ExecutionId::new();
     let history_entries = chat_log_store::read_session(&session_path);
     let context = fleet_snowfluff_ai::log::entries_to_context(&history_entries);
 
@@ -214,8 +237,13 @@ pub async fn send_chat_message(
     let detected_language = map_ui_language(manager.lock().unwrap().ui_language());
     let language = resolve_language(&persona, detected_language);
     let messages = prompt::assemble_messages(&persona, language, &context, &message);
-    let provider_impl =
-        ai_commands::build_provider(&settings_snapshot, &creds_snapshot, provider_kind);
+    let resume_session_id = chat_state
+        .cli_sessions
+        .lock()
+        .unwrap()
+        .get(&(conversation_id.clone(), profile_key))
+        .map(|r| r.0.clone());
+    let provider_impl = ai_commands::build_provider(&creds_snapshot, &profile, resume_session_id);
 
     let partial_text = Arc::new(Mutex::new(String::new()));
     let task_app = app.clone();
@@ -227,6 +255,9 @@ pub async fn send_chat_message(
         run_generation(
             task_app,
             provider_impl,
+            execution_id,
+            conversation_id,
+            profile_key,
             messages,
             task_channel,
             task_partial_text,
@@ -240,17 +271,52 @@ pub async fn send_chat_message(
     Ok(())
 }
 
+/// Persists `provider`'s captured session/thread id (if any) for
+/// `(conversation_id, profile_key)`, so the *next* `send_chat_message`
+/// for the same conversation and profile can resume it. A no-op for
+/// every provider without a resumable session concept
+/// (`AiProvider::session_id`'s default `None`), and a no-op if this
+/// call captured nothing (e.g. it failed before a CLI session was ever
+/// established) -- a prior mapping, if any, is left untouched rather
+/// than cleared.
+fn store_cli_session_id(
+    app: &AppHandle,
+    conversation_id: ConversationId,
+    profile_key: ProfileKey,
+    provider: &dyn AiProvider,
+) {
+    if let Some(id) = provider.session_id() {
+        app.state::<ChatRuntimeState>()
+            .cli_sessions
+            .lock()
+            .unwrap()
+            .insert((conversation_id, profile_key), ExternalSessionRef(id));
+    }
+}
+
+/// `execution_id` identifies this one turn's execution
+/// (`session_domain::ExecutionId`) -- logged for traceability, not
+/// persisted or exposed over IPC (see `session_domain`'s own module
+/// doc for why this is a typing-only addition, not a status-tracking
+/// one).
+#[allow(clippy::too_many_arguments)]
 async fn run_generation(
     app: AppHandle,
     provider: Box<dyn AiProvider>,
+    execution_id: ExecutionId,
+    conversation_id: ConversationId,
+    profile_key: ProfileKey,
     messages: Vec<fleet_snowfluff_ai::Message>,
     channel: Channel<ChatEvent>,
     partial_text: Arc<Mutex<String>>,
     session_path: PathBuf,
 ) {
+    log::debug!("{execution_id:?} starting for {profile_key:?}");
+
     let mut stream = match provider.chat(messages).await {
         Ok(stream) => stream,
         Err(err) => {
+            store_cli_session_id(&app, conversation_id, profile_key, provider.as_ref());
             finish_with_error(&app, &session_path, &channel, &err.to_string());
             return;
         }
@@ -263,12 +329,14 @@ async fn run_generation(
                 channel.send(ChatEvent::Chunk { delta: chunk.delta }).ok();
             }
             Err(err) => {
+                store_cli_session_id(&app, conversation_id, profile_key, provider.as_ref());
                 finish_with_error(&app, &session_path, &channel, &err.to_string());
                 return;
             }
         }
     }
 
+    store_cli_session_id(&app, conversation_id, profile_key, provider.as_ref());
     let final_text = partial_text.lock().unwrap().clone();
     chat_log_store::append_entry(
         &session_path,
@@ -324,6 +392,7 @@ pub fn new_chat_session(app: AppHandle, chat_state: State<ChatRuntimeState>) {
         pending.handle.abort();
     }
     chat_state.clear_unread();
+    chat_state.cli_sessions.lock().unwrap().clear();
     on_chat_activity_changed(&app);
     if let Some(new_path) = chat_log_store::create_new_session(&app) {
         *chat_state.session_path.lock().unwrap() = Some(new_path);

@@ -13,7 +13,7 @@ use crate::{
     limits::MAX_RESPONSE_TOKENS,
     message::{Message, ModelInfo, ProviderError, ProviderKind, Role, StreamChunk},
     provider::{AiProvider, ChatStream},
-    providers::http_stream,
+    providers::{anthropic_stream_event, http_stream},
 };
 
 pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
@@ -21,6 +21,15 @@ pub const DEFAULT_BASE_URL: &str = "https://api.anthropic.com/v1";
 /// `List Models` reference example uses this exact value).
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// API-key-only, exactly as in Stage 1. Subscription auth for Anthropic
+/// is a separate implementation, `providers::claude_code_cli::ClaudeCodeCli`
+/// (subprocess-wrapped `claude -p`) -- an earlier version of this
+/// struct grew an `AnthropicAuth`/subscription variant that sent a
+/// `claude setup-token` bearer token straight to this same HTTP client,
+/// which turned out to be both rejected by the Messages API and a
+/// Consumer Terms of Service violation for subscription-sourced OAuth
+/// tokens. See `subscription-first-chat`'s design.md for the corrected
+/// architecture.
 pub struct Anthropic {
     pub api_key: String,
     pub base_url: String,
@@ -109,11 +118,10 @@ pub fn parse_error_response(status: u16, body: &str) -> ProviderError {
     }
 }
 
-/// Parses one complete SSE line. Only `content_block_delta` events with
-/// a `text_delta` carry visible text; every other event type
-/// (`message_start`, `content_block_start`/`stop`, `message_delta`,
-/// `message_stop`, `ping`) yields `Ok(None)`. An `error` event is
-/// surfaced as a real error rather than silently dropped.
+/// Parses one complete SSE line, delegating the actual event-shape
+/// matching to `anthropic_stream_event::extract_chunk` (shared with
+/// `ClaudeCodeCli`, which sees the identical event shape wrapped
+/// differently).
 pub fn parse_sse_line(line: &str) -> Result<Option<StreamChunk>, ProviderError> {
     let Some(data) = line.strip_prefix("data: ").or_else(|| line.strip_prefix("data:")) else {
         return Ok(None);
@@ -125,25 +133,7 @@ pub fn parse_sse_line(line: &str) -> Result<Option<StreamChunk>, ProviderError> 
 
     let value: Value = serde_json::from_str(data)
         .map_err(|e| ProviderError::InvalidResponse(format!("malformed event: {e}")))?;
-
-    match value.get("type").and_then(Value::as_str) {
-        Some("content_block_delta") => Ok(value
-            .get("delta")
-            .and_then(|d| d.get("text"))
-            .and_then(Value::as_str)
-            .filter(|s| !s.is_empty())
-            .map(|text| StreamChunk { delta: text.to_string() })),
-        Some("error") => {
-            let message = value
-                .get("error")
-                .and_then(|e| e.get("message"))
-                .and_then(Value::as_str)
-                .unwrap_or("unknown error")
-                .to_string();
-            Err(ProviderError::InvalidResponse(message))
-        }
-        _ => Ok(None),
-    }
+    anthropic_stream_event::extract_chunk(&value)
 }
 
 pub fn parse_model_list(body: &str) -> Result<Vec<ModelInfo>, ProviderError> {

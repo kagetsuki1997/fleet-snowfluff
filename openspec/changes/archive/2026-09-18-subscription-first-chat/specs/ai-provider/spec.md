@@ -1,10 +1,4 @@
-# Spec: ai-provider
-
-## Purpose
-
-Defines the pluggable AI chat-provider layer: which providers exist, how they are configured and switched between, and the guardrails (master switch, disclosure, cost/latency caps) that apply regardless of which provider is active.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Provider abstraction
 
@@ -20,14 +14,38 @@ The application SHALL support chat completions through a common provider interfa
 - **WHEN** a profile's auth method is switched from API key to subscription for the same provider brand
 - **THEN** chat continues to work through the same `AiProvider` interface, with no change visible to callers other than which credential source is used
 
-### Requirement: AI features disabled by default
+### Requirement: Live model listing
 
-AI-dependent features (chat window, status bubble) SHALL be gated by a single master switch that defaults to off. Even when a provider is fully configured, no AI-dependent feature SHALL run while the switch is off.
+For each provider brand using API-key or local auth (OpenAI, Anthropic, Ollama), the set of selectable models SHALL be fetched live from that provider rather than hardcoded, and a failure to fetch SHALL be shown as a configuration error at the point of selection. For a subscription auth method backed by a CLI with no live model-listing capability of its own, the set of selectable models SHALL instead be a fixed set of that CLI's own documented model identifiers/aliases when its documentation confirms one (not an arbitrary guess at values that documentation doesn't confirm) — and if no such confirmed, stable set exists, the selector SHALL show an empty list rather than guessed or invented values. Leaving the model unset SHALL always be valid and SHALL mean "use that CLI's own default," whichever case applies.
 
-#### Scenario: Configured but disabled
+#### Scenario: Invalid credentials surface at model-selection time
 
-- **WHEN** a provider and its credentials are fully configured but the master switch is off
-- **THEN** opening the chat window shows that AI features are disabled rather than sending any request
+- **WHEN** the user enters an invalid API key and opens the model selector for that provider
+- **THEN** the model list fails to load and the failure reason is shown inline, without requiring a chat message to be sent first
+
+#### Scenario: A CLI-backed subscription profile with a confirmed alias set still offers a model choice
+
+- **WHEN** the user opens the model selector for a subscription auth method backed by a CLI whose documentation confirms a small set of named model aliases (e.g. Claude Code's `--model` aliases), even though the CLI has no live listing capability of its own
+- **THEN** the selector shows that CLI's own documented aliases rather than an empty list, and leaving no model selected is a valid choice
+
+#### Scenario: A CLI-backed subscription profile with no confirmed alias set shows an empty list, not a guess
+
+- **WHEN** the user opens the model selector for a subscription auth method backed by a CLI whose own documentation gives no small, stable, confirmed set of model identifiers (e.g. Codex CLI's `model` config accepts open-ended, frequently-changing version strings with no enumerated list in its own docs)
+- **THEN** the selector shows an empty list rather than inventing plausible-looking values that documentation doesn't back up, and leaving no model selected is still a valid choice meaning "use that CLI's own default"
+
+### Requirement: Streaming responses
+
+Chat responses SHALL be delivered to the requesting surface incrementally, for every provider including Mock. For a provider whose underlying transport genuinely generates and delivers text incrementally, chunks SHALL reflect real generation progress. For a provider whose underlying transport only ever delivers one complete response with no incremental delivery of its own, the application SHALL still deliver it to the requesting surface as a paced sequence of chunks rather than a single block, so the user-visible behavior stays consistent across providers even though the underlying generation was not observed incrementally.
+
+#### Scenario: Partial text visible before completion
+
+- **WHEN** a provider is generating a multi-sentence reply
+- **THEN** earlier portions of the reply are visible before the full reply has finished generating
+
+#### Scenario: A provider with no incremental transport still paces its output
+
+- **WHEN** a provider's underlying transport delivers only one complete response with no incremental events of its own
+- **THEN** the requesting surface still receives that response as multiple chunks over time, not as a single instantaneous block
 
 ### Requirement: No provider configured by default
 
@@ -76,74 +94,7 @@ Settings (credentials or auth method, endpoint, selected model) for every enable
 - **WHEN** a Stage 1 install with `active_provider: Some(Anthropic)` and previously configured Anthropic settings starts for the first time after this change
 - **THEN** it has exactly one enabled profile (Anthropic, API key auth, its previous model and disclosure state carried over) set as the default profile, with no re-entry or re-disclosure required
 
-### Requirement: Live model listing
-
-For each provider brand using API-key or local auth (OpenAI, Anthropic, Ollama), the set of selectable models SHALL be fetched live from that provider rather than hardcoded, and a failure to fetch SHALL be shown as a configuration error at the point of selection. For a subscription auth method backed by a CLI with no live model-listing capability of its own, the set of selectable models SHALL instead be a fixed set of that CLI's own documented model identifiers/aliases when its documentation confirms one (not an arbitrary guess at values that documentation doesn't confirm) — and if no such confirmed, stable set exists, the selector SHALL show an empty list rather than guessed or invented values. Leaving the model unset SHALL always be valid and SHALL mean "use that CLI's own default," whichever case applies.
-
-#### Scenario: Invalid credentials surface at model-selection time
-
-- **WHEN** the user enters an invalid API key and opens the model selector for that provider
-- **THEN** the model list fails to load and the failure reason is shown inline, without requiring a chat message to be sent first
-
-#### Scenario: A CLI-backed subscription profile with a confirmed alias set still offers a model choice
-
-- **WHEN** the user opens the model selector for a subscription auth method backed by a CLI whose documentation confirms a small set of named model aliases (e.g. Claude Code's `--model` aliases), even though the CLI has no live listing capability of its own
-- **THEN** the selector shows that CLI's own documented aliases rather than an empty list, and leaving no model selected is a valid choice
-
-#### Scenario: A CLI-backed subscription profile with no confirmed alias set shows an empty list, not a guess
-
-- **WHEN** the user opens the model selector for a subscription auth method backed by a CLI whose own documentation gives no small, stable, confirmed set of model identifiers (e.g. Codex CLI's `model` config accepts open-ended, frequently-changing version strings with no enumerated list in its own docs)
-- **THEN** the selector shows an empty list rather than inventing plausible-looking values that documentation doesn't back up, and leaving no model selected is still a valid choice meaning "use that CLI's own default"
-
-### Requirement: Streaming responses
-
-Chat responses SHALL be delivered to the requesting surface incrementally, for every provider including Mock. For a provider whose underlying transport genuinely generates and delivers text incrementally, chunks SHALL reflect real generation progress. For a provider whose underlying transport only ever delivers one complete response with no incremental delivery of its own, the application SHALL still deliver it to the requesting surface as a paced sequence of chunks rather than a single block, so the user-visible behavior stays consistent across providers even though the underlying generation was not observed incrementally.
-
-#### Scenario: Partial text visible before completion
-
-- **WHEN** a provider is generating a multi-sentence reply
-- **THEN** earlier portions of the reply are visible before the full reply has finished generating
-
-#### Scenario: A provider with no incremental transport still paces its output
-
-- **WHEN** a provider's underlying transport delivers only one complete response with no incremental events of its own
-- **THEN** the requesting surface still receives that response as multiple chunks over time, not as a single instantaneous block
-
-### Requirement: Bounded response length
-
-Every request SHALL apply a fixed maximum output length regardless of provider, not configurable through the settings UI.
-
-#### Scenario: Model ignores persona brevity guidance
-
-- **WHEN** a provider would otherwise generate a very long reply
-- **THEN** generation stops once the fixed maximum output length is reached
-
-### Requirement: Bounded conversation context
-
-Each request SHALL include only a fixed-size window of the most recent conversation turns as context, not the full session history.
-
-#### Scenario: Long-running session
-
-- **WHEN** a session has accumulated far more turns than the fixed context window
-- **THEN** only the most recent turns within that window are sent as context on the next request
-
-### Requirement: Plain-text responses
-
-Provider responses SHALL be treated as plain text in Stage 1; no structured emotion or metadata field is requested or parsed from any provider.
-
-#### Scenario: Response contains no machine-readable emotion tag
-
-- **WHEN** a reply is received from any provider
-- **THEN** it is displayed and logged as plain text only
-
-### Requirement: Separate credential storage
-
-Provider credentials (API keys) SHALL be stored separately from non-secret provider settings (endpoint, selected model, active-provider pointer), with restrictive file permissions applied where the operating system supports it.
-
-#### Scenario: Non-secret settings readable without exposing keys
-
-- **WHEN** the non-secret provider configuration file is inspected
-- **THEN** it contains no API key material
+## ADDED Requirements
 
 ### Requirement: Subscription auth via the provider's own CLI
 

@@ -34,6 +34,43 @@ pub trait AiProvider: Send + Sync {
     /// to list; its implementation returns an empty list rather than
     /// treating this as an error.
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError>;
+
+    /// Checks whether this provider is currently usable without sending
+    /// a chat request (`subscription-first-chat`'s "Provider status
+    /// display" -- "checked fresh, not cached"). Default `Ok(())` for
+    /// every provider that has no separate notion of availability
+    /// beyond "can I be constructed at all" (API-key and local
+    /// providers); CLI-backed subscription providers override this to
+    /// check login status. Additive on purpose -- existing providers
+    /// need no changes to pick up the default.
+    async fn check_availability(&self) -> Result<(), ProviderError> { Ok(()) }
+
+    /// The underlying runtime's own session/thread id, if this
+    /// provider's last `chat()` call captured one -- `None` for every
+    /// provider without a resumable session concept. Not part of the
+    /// request/response flow itself (see `ClaudeCodeCli`/`Codex`'s own
+    /// docs for why this lives outside `chat()`'s signature); read by
+    /// the app crate after a generation completes to persist across
+    /// the next `chat()` call for the same profile.
+    fn session_id(&self) -> Option<String> { None }
+
+    /// Best-effort attempt to start this provider's own login flow (a
+    /// browser-based OAuth ceremony owned entirely by the CLI, not
+    /// Fleet) for a subscription auth method that isn't logged in yet
+    /// (`subscription-first-chat`'s "CLI installed but not logged in"
+    /// scenario). Default is a no-op `Ok(())` for every provider
+    /// without a CLI-owned login flow of its own -- API-key and local
+    /// providers have nothing to trigger. CLI-backed subscription
+    /// providers override this to spawn their CLI's own login
+    /// subcommand, detached, without waiting for it to finish: Fleet
+    /// starts the ceremony, it does not drive or babysit it. Returning
+    /// `Ok(())` means only "the command was spawned," not "login
+    /// succeeded" -- the caller must re-check `check_availability()`
+    /// afterward. A spawn failure (e.g. the binary went missing between
+    /// checks) is the "cannot be completed this way" half of that
+    /// scenario; the settings UI's existing not-logged-in status text
+    /// is the fallback instruction either way.
+    async fn trigger_login(&self) -> Result<(), ProviderError> { Ok(()) }
 }
 
 #[cfg(test)]

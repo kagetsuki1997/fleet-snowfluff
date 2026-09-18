@@ -10,6 +10,7 @@ pub mod commands;
 pub mod config_store;
 pub mod persona_store;
 pub mod secrets_store;
+pub mod session_domain;
 pub mod status_bubble;
 // Pet windows on Windows render via GDI instead (platform::windows's
 // LayeredSurface) -- see that module's doc comment for why. Nothing on
@@ -74,12 +75,16 @@ pub fn run() {
             commands::install_update,
             ai_commands::get_ai_settings,
             ai_commands::set_ai_enabled,
-            ai_commands::set_active_provider,
-            ai_commands::acknowledge_provider_disclosure,
-            ai_commands::set_provider_model,
-            ai_commands::set_provider_base_url,
+            ai_commands::enable_profile,
+            ai_commands::disable_profile,
+            ai_commands::set_default_profile,
+            ai_commands::acknowledge_profile_disclosure,
+            ai_commands::set_profile_model,
+            ai_commands::set_profile_base_url,
             ai_commands::set_provider_api_key,
             ai_commands::fetch_provider_models,
+            ai_commands::check_profile_status,
+            ai_commands::trigger_profile_login,
             chat_commands::get_chat_state,
             chat_commands::send_chat_message,
             chat_commands::stop_generation,
