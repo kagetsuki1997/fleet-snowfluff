@@ -1,3 +1,5 @@
+pub mod agent_runtime;
+pub mod agent_tool;
 pub mod ai_commands;
 pub mod ai_config_store;
 pub mod animation;
@@ -8,6 +10,7 @@ pub mod chat_pause;
 pub mod chat_window;
 pub mod commands;
 pub mod config_store;
+pub mod context_manager;
 pub mod persona_store;
 pub mod secrets_store;
 pub mod session_domain;

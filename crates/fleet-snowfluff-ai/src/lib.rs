@@ -19,7 +19,9 @@ pub mod tool_provider;
 
 pub use credentials::ProviderCredentials;
 pub use log::{LogEntry, LogRole};
-pub use message::{Message, ModelInfo, ProviderError, ProviderKind, Role, StreamChunk};
+pub use message::{
+    Message, ModelInfo, ProviderError, ProviderKind, Role, StreamChunk, ToolCallRecord,
+};
 pub use persona::{FewShotExample, Language, Persona, PersonaParseError, ResponseLanguage};
 pub use provider::{AiProvider, ChatStream};
 pub use providers::{Anthropic, ClaudeCodeCli, Codex, Mock, Ollama, OpenAiCompatible};

@@ -17,6 +17,7 @@ shadow-rs   = { workspace = true, features = ["build"] }
 tauri-build = { workspace = true }
 
 [dependencies]
+async-trait            = { workspace = true }
 chrono                 = { workspace = true }
 device_query           = { workspace = true }
 fleet-snowfluff-ai     = { path = "../fleet-snowfluff-ai" }

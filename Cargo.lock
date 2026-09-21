@@ -1347,6 +1347,7 @@ dependencies = [
 name = "fleet-snowfluff"
 version = "0.2.0"
 dependencies = [
+ "async-trait",
  "chrono",
  "core-foundation 0.10.1",
  "core-graphics",

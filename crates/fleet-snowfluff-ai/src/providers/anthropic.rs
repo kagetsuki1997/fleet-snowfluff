@@ -72,6 +72,11 @@ pub fn build_chat_body(model: &str, messages: &[Message]) -> Value {
                 Role::User => "user",
                 Role::Assistant => "assistant",
                 Role::System => unreachable!("filtered out above"),
+                Role::Tool => unreachable!(
+                    "Role::Tool only appears inside AemeathAgentRuntime's own loop for Ollama's \
+                     ToolCallingProvider path -- Anthropic's plain chat() (this function) never \
+                     receives it, and it is never persisted to a conversation's session log"
+                ),
             };
             json!({ "role": role, "content": m.content })
         })
