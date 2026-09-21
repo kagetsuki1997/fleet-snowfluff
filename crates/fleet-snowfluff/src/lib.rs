@@ -12,6 +12,7 @@ pub mod persona_store;
 pub mod secrets_store;
 pub mod session_domain;
 pub mod status_bubble;
+pub mod task_router_rules_store;
 // Pet windows on Windows render via GDI instead (platform::windows's
 // LayeredSurface) -- see that module's doc comment for why. Nothing on
 // Windows references this module at all.
@@ -192,6 +193,12 @@ pub fn run() {
             // first run so there's a file to inspect/edit later; a
             // no-op if one already exists.
             persona_store::seed_if_missing(&app_handle);
+            // Same idea for `mix` mode's task-router-rules.md
+            // (`agent-core-and-task-router`'s "Task routing mode") --
+            // seeded even though `mix` mode isn't enabled by default,
+            // so the file already exists to look at/edit the moment a
+            // user turns it on.
+            task_router_rules_store::seed_if_missing(&app_handle);
 
             app.manage(Mutex::new(pet_manager));
             app.manage(Mutex::new(config));

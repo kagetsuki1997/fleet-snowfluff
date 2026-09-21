@@ -443,6 +443,7 @@ mod tests {
             default_profile: None,
             acknowledged_disclosures: vec![],
             task_router_mode: Default::default(),
+            project_root: None,
         }
     }
 
@@ -456,6 +457,7 @@ mod tests {
             default_profile: None,
             acknowledged_disclosures: acknowledged,
             task_router_mode: Default::default(),
+            project_root: None,
         }
     }
 

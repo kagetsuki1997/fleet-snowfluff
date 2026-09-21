@@ -24,6 +24,7 @@ pub use provider::{AiProvider, ChatStream};
 pub use providers::{Anthropic, ClaudeCodeCli, Codex, Mock, Ollama, OpenAiCompatible};
 pub use settings::{AiSettings, AuthMethod, ProfileKey, ProviderProfile, TaskRouterMode};
 pub use task_router::{
-    DefaultTaskRouter, ExecutionRoute, RoutingContext, SessionStrategy, Task, TaskRequirements,
-    TaskRouter,
+    detect_escalation, with_task_router_rules, DefaultTaskRouter, EscalationDecision,
+    ExecutionRoute, RoutingContext, SessionStrategy, Task, TaskRequirements, TaskRouter,
+    BUNDLED_DEFAULT_TASK_ROUTER_RULES, ESCALATE_MARKER,
 };

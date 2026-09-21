@@ -16,8 +16,9 @@ use std::{
 };
 
 use fleet_snowfluff_ai::{
-    log::LogRole, prompt, AiProvider, AiSettings, AuthMethod, DefaultTaskRouter, Language,
-    LogEntry, Persona, ProfileKey, ProviderCredentials, ProviderKind, ResponseLanguage,
+    detect_escalation, log::LogRole, prompt, with_task_router_rules, AiProvider, AiSettings,
+    AuthMethod, ChatStream, DefaultTaskRouter, EscalationDecision, Language, LogEntry, Message,
+    Persona, ProfileKey, ProviderCredentials, ProviderKind, ProviderProfile, ResponseLanguage,
     RoutingContext, Task, TaskRouter,
 };
 use futures_util::StreamExt;
@@ -28,7 +29,7 @@ use crate::{
     manager::PetManager,
     persona_store,
     session_domain::{ConversationId, ExecutionId, ExternalSessionRef},
-    status_bubble,
+    status_bubble, task_router_rules_store,
 };
 
 pub struct PendingGeneration {
@@ -220,22 +221,24 @@ pub async fn send_chat_message(
         return Ok(());
     };
 
+    let local_profile_key =
+        ProfileKey { provider: ProviderKind::Ollama, auth_method: AuthMethod::Local };
+    let local_profile = settings_snapshot.profile(local_profile_key).cloned();
+
     // Task Router's initial route (`agent-core-and-task-router`'s
     // "Task routing mode") -- called exactly once per message. `single`
-    // (the default, and the only reachable outcome until Group 2's
-    // settings UI ships) always resolves back to `default_profile`, so
-    // this is a no-op in observed behavior today; `mix` mode's own
-    // escalation/fallback handling is Group 2's job, not this call's --
-    // see `task_router.rs`'s own module doc for why `route()` is never
-    // invoked a second time for that.
-    let local_profile = settings_snapshot
-        .profile(ProfileKey { provider: ProviderKind::Ollama, auth_method: AuthMethod::Local })
-        .cloned();
+    // always resolves back to `default_profile`; `mix` resolves to
+    // `local_profile` when Ollama is enabled, or to `default_profile`
+    // directly otherwise (knowable upfront, not a runtime failure).
+    // Anything that happens *after* this -- the local model's own
+    // escalation-marker response, or an infra-level failure of the
+    // local attempt -- is handled below without calling `route()`
+    // again; see `task_router.rs`'s own module doc for why.
     let routing_context = RoutingContext {
         task: Task::new(message.clone()),
         mode: settings_snapshot.task_router_mode,
         default_profile: default_profile.clone(),
-        local_profile,
+        local_profile: local_profile.clone(),
     };
     let route = match DefaultTaskRouter.route(routing_context).await {
         Ok(route) => route,
@@ -244,8 +247,7 @@ pub async fn send_chat_message(
             return Ok(());
         }
     };
-    let profile = settings_snapshot.profile(route.profile_key).cloned().unwrap_or(default_profile);
-    let profile_key = profile.key();
+    let routed_to_local = route.profile_key == local_profile_key;
 
     let session_path = resolve_session_path(&app, &chat_state);
     let conversation_id = ConversationId::from_session_path(&session_path);
@@ -263,14 +265,13 @@ pub async fn send_chat_message(
     let persona = persona_store::load(&app).persona;
     let detected_language = map_ui_language(manager.lock().unwrap().ui_language());
     let language = resolve_language(&persona, detected_language);
-    let messages = prompt::assemble_messages(&persona, language, &context, &message);
-    let resume_session_id = chat_state
-        .cli_sessions
-        .lock()
-        .unwrap()
-        .get(&(conversation_id.clone(), profile_key))
-        .map(|r| r.0.clone());
-    let provider_impl = ai_commands::build_provider(&creds_snapshot, &profile, resume_session_id);
+    // Persona-only message list -- what `default_profile` always uses,
+    // whether that's because `mode` is `single`, because `mix` resolved
+    // directly to it (Ollama not enabled), or because it's serving as
+    // the fallback for a mix-mode local attempt that escalates or fails
+    // below. Never has `task-router-rules.md` appended -- only the
+    // local attempt's own message list does.
+    let default_messages = prompt::assemble_messages(&persona, language, &context, &message);
 
     let partial_text = Arc::new(Mutex::new(String::new()));
     let task_app = app.clone();
@@ -278,24 +279,117 @@ pub async fn send_chat_message(
     let task_partial_text = partial_text.clone();
     let task_session_path = session_path.clone();
 
-    let handle = tokio::spawn(async move {
-        run_generation(
-            task_app,
-            provider_impl,
-            execution_id,
-            conversation_id,
-            profile_key,
-            messages,
-            task_channel,
-            task_partial_text,
-            task_session_path,
-        )
-        .await;
-    });
+    let handle = if routed_to_local {
+        // `local_profile` is guaranteed `Some` here: `route()` only
+        // ever resolves to `local_profile_key` when `local_profile` was
+        // itself `Some` (see `DefaultTaskRouter::route`).
+        let local_profile = local_profile.expect("routed to local profile, but none is enabled");
+        let local_messages = with_task_router_rules(
+            default_messages.clone(),
+            &task_router_rules_store::load(&app),
+        );
+        let fallback = FallbackAttempt {
+            profile: default_profile,
+            messages: default_messages,
+            credentials: creds_snapshot.clone(),
+        };
+        tokio::spawn(async move {
+            run_generation_mix_local(
+                task_app,
+                local_profile,
+                local_messages,
+                creds_snapshot,
+                fallback,
+                execution_id,
+                conversation_id,
+                task_channel,
+                task_partial_text,
+                task_session_path,
+            )
+            .await;
+        })
+    } else {
+        let profile_key = default_profile.key();
+        let resume_session_id = chat_state
+            .cli_sessions
+            .lock()
+            .unwrap()
+            .get(&(conversation_id.clone(), profile_key))
+            .map(|r| r.0.clone());
+        let provider_impl =
+            ai_commands::build_provider(&creds_snapshot, &default_profile, resume_session_id);
+        tokio::spawn(async move {
+            run_generation(
+                task_app,
+                provider_impl,
+                execution_id,
+                conversation_id,
+                profile_key,
+                default_messages,
+                task_channel,
+                task_partial_text,
+                task_session_path,
+            )
+            .await;
+        })
+    };
 
     *chat_state.pending.lock().unwrap() = Some(PendingGeneration { handle, partial_text });
     on_chat_activity_changed(&app);
     Ok(())
+}
+
+/// Everything needed to retry against `default_profile` if a mix-mode
+/// local attempt escalates or fails -- bundled together so
+/// `run_generation_mix_local` has one thing to hold onto rather than
+/// several loose clones.
+#[derive(Clone)]
+struct FallbackAttempt {
+    profile: ProviderProfile,
+    messages: Vec<Message>,
+    credentials: ProviderCredentials,
+}
+
+/// Retries the message against `fallback.profile` -- the destination
+/// for both an escalated and an infra-failed mix-mode local attempt
+/// (`run_generation_mix_local`'s three call sites). Takes `fallback` by
+/// value since each call site only ever runs once per message (they're
+/// mutually exclusive branches); cloned at the call site rather than
+/// here so a caller with `fallback` still available afterward (there
+/// isn't one today, but this keeps the function itself agnostic to
+/// that).
+#[allow(clippy::too_many_arguments)]
+async fn run_generation_fallback(
+    app: AppHandle,
+    fallback: FallbackAttempt,
+    execution_id: ExecutionId,
+    conversation_id: ConversationId,
+    channel: Channel<ChatEvent>,
+    partial_text: Arc<Mutex<String>>,
+    session_path: PathBuf,
+) {
+    let profile_key = fallback.profile.key();
+    let resume_session_id = app
+        .state::<ChatRuntimeState>()
+        .cli_sessions
+        .lock()
+        .unwrap()
+        .get(&(conversation_id.clone(), profile_key))
+        .map(|r| r.0.clone());
+    let provider_impl =
+        ai_commands::build_provider(&fallback.credentials, &fallback.profile, resume_session_id);
+    run_generation(
+        app,
+        provider_impl,
+        execution_id,
+        conversation_id,
+        profile_key,
+        fallback.messages,
+        channel,
+        partial_text,
+        session_path,
+    )
+    .await;
 }
 
 /// Persists `provider`'s captured session/thread id (if any) for
@@ -325,7 +419,11 @@ fn store_cli_session_id(
 /// (`session_domain::ExecutionId`) -- logged for traceability, not
 /// persisted or exposed over IPC (see `session_domain`'s own module
 /// doc for why this is a typing-only addition, not a status-tracking
-/// one).
+/// one). Used for `single` mode, for `mix` mode when it resolves
+/// directly to `default_profile` (Ollama not enabled), and as the
+/// fallback retry when a mix-mode local attempt escalates or fails --
+/// in every case, this is simply "run one attempt against one provider
+/// to completion," with no further fallback behind it.
 #[allow(clippy::too_many_arguments)]
 async fn run_generation(
     app: AppHandle,
@@ -333,7 +431,7 @@ async fn run_generation(
     execution_id: ExecutionId,
     conversation_id: ConversationId,
     profile_key: ProfileKey,
-    messages: Vec<fleet_snowfluff_ai::Message>,
+    messages: Vec<Message>,
     channel: Channel<ChatEvent>,
     partial_text: Arc<Mutex<String>>,
     session_path: PathBuf,
@@ -349,6 +447,38 @@ async fn run_generation(
         }
     };
 
+    stream_to_completion(
+        app,
+        provider,
+        &mut stream,
+        conversation_id,
+        profile_key,
+        channel,
+        partial_text,
+        session_path,
+    )
+    .await;
+}
+
+/// Reads whatever remains of an already-started `stream` to
+/// completion, forwarding each chunk live and appending the full reply
+/// to the chat log at the end -- shared by `run_generation`'s own
+/// stream (from the very first chunk) and `run_generation_mix_local`'s
+/// continuation once it has decided a local attempt is simple (from
+/// wherever it stopped buffering). `partial_text` may already contain
+/// content flushed by the caller before this is invoked -- appended to,
+/// never reset.
+#[allow(clippy::too_many_arguments)]
+async fn stream_to_completion(
+    app: AppHandle,
+    provider: Box<dyn AiProvider>,
+    stream: &mut ChatStream,
+    conversation_id: ConversationId,
+    profile_key: ProfileKey,
+    channel: Channel<ChatEvent>,
+    partial_text: Arc<Mutex<String>>,
+    session_path: PathBuf,
+) {
     while let Some(chunk) = stream.next().await {
         match chunk {
             Ok(chunk) => {
@@ -376,6 +506,160 @@ async fn run_generation(
     channel.send(ChatEvent::Done { content: final_text }).ok();
     clear_pending(&app);
     mark_unread_unless_focused(&app, UnreadKind::Reply);
+}
+
+/// `mode: mix`'s local-first attempt (`agent-core-and-task-router`'s
+/// "Local-first classification in mixed mode"). Buffers the local
+/// provider's own reply through [`detect_escalation`] *before*
+/// forwarding anything to the UI or the chat log:
+///
+/// - a conclusive [`EscalationDecision::Simple`] (a mismatch, or the
+///   stream ending while still a strict prefix of the marker) flushes
+///   the buffered prefix and hands the rest of the same stream to
+///   [`stream_to_completion`], exactly as if this had been a normal
+///   attempt from the start;
+/// - [`EscalationDecision::Escalate`], or any failure to even start or
+///   continue the local stream, discards everything buffered so far --
+///   nothing shown, nothing logged -- and retries the message against
+///   `fallback.profile` via a fresh [`run_generation`] call instead.
+///
+/// Either way, `TaskRouter::route()` is never called a second time --
+/// see `task_router.rs`'s own module doc.
+#[allow(clippy::too_many_arguments)]
+async fn run_generation_mix_local(
+    app: AppHandle,
+    local_profile: ProviderProfile,
+    local_messages: Vec<Message>,
+    credentials: ProviderCredentials,
+    fallback: FallbackAttempt,
+    execution_id: ExecutionId,
+    conversation_id: ConversationId,
+    channel: Channel<ChatEvent>,
+    partial_text: Arc<Mutex<String>>,
+    session_path: PathBuf,
+) {
+    let local_profile_key = local_profile.key();
+    log::debug!("{execution_id:?} starting mix-mode local attempt for {local_profile_key:?}");
+
+    // No `cli_sessions` lookup here: Ollama has no resumable-session
+    // concept (`AiProvider::session_id`'s default `None`, never
+    // overridden), so a mix-mode local attempt is always a fresh call.
+    let local_provider = ai_commands::build_provider(&credentials, &local_profile, None);
+    let mut stream = match local_provider.chat(local_messages).await {
+        Ok(stream) => stream,
+        Err(_) => {
+            // Infra-level failure before the local attempt even
+            // started (e.g. `RuntimeUnavailable` -- Ollama enabled in
+            // settings but not actually reachable). Nothing was shown
+            // or logged for this attempt; fall back directly.
+            run_generation_fallback(
+                app,
+                fallback,
+                execution_id,
+                conversation_id,
+                channel,
+                partial_text,
+                session_path,
+            )
+            .await;
+            return;
+        }
+    };
+
+    let mut buffer = String::new();
+    loop {
+        let chunk = match stream.next().await {
+            Some(Ok(chunk)) => chunk,
+            Some(Err(_)) => {
+                // Mid-stream infra failure. Whatever's in `buffer` was
+                // never shown or logged -- fall back directly.
+                run_generation_fallback(
+                    app,
+                    fallback,
+                    execution_id,
+                    conversation_id,
+                    channel,
+                    partial_text,
+                    session_path,
+                )
+                .await;
+                return;
+            }
+            None => {
+                // Stream ended while still deciding (or with nothing
+                // ever having diverged) -- can't be escalating if it
+                // never finished saying the marker, so this resolves as
+                // simple no matter what `detect_escalation` last
+                // reported.
+                if !buffer.is_empty() {
+                    partial_text.lock().unwrap().push_str(&buffer);
+                    channel.send(ChatEvent::Chunk { delta: buffer }).ok();
+                }
+                store_cli_session_id(
+                    &app,
+                    conversation_id,
+                    local_profile_key,
+                    local_provider.as_ref(),
+                );
+                let final_text = partial_text.lock().unwrap().clone();
+                chat_log_store::append_entry(
+                    &session_path,
+                    &LogEntry {
+                        role: LogRole::Assistant,
+                        content: final_text.clone(),
+                        timestamp: now_rfc3339(),
+                    },
+                );
+                channel.send(ChatEvent::Done { content: final_text }).ok();
+                clear_pending(&app);
+                mark_unread_unless_focused(&app, UnreadKind::Reply);
+                return;
+            }
+        };
+        buffer.push_str(&chunk.delta);
+
+        match detect_escalation(&buffer) {
+            EscalationDecision::Undecided => continue,
+            EscalationDecision::Simple => {
+                if !buffer.is_empty() {
+                    partial_text.lock().unwrap().push_str(&buffer);
+                    channel.send(ChatEvent::Chunk { delta: buffer }).ok();
+                }
+                stream_to_completion(
+                    app,
+                    local_provider,
+                    &mut stream,
+                    conversation_id,
+                    local_profile_key,
+                    channel,
+                    partial_text,
+                    session_path,
+                )
+                .await;
+                return;
+            }
+            EscalationDecision::Escalate => {
+                // Nothing in `buffer` was ever shown or logged. Drop
+                // the local stream/provider (dropping a `ChatStream`
+                // built over an HTTP response ends that request on its
+                // own -- no explicit cancellation needed) and retry
+                // fresh against `default_profile`.
+                drop(stream);
+                drop(local_provider);
+                run_generation_fallback(
+                    app,
+                    fallback,
+                    execution_id,
+                    conversation_id,
+                    channel,
+                    partial_text,
+                    session_path,
+                )
+                .await;
+                return;
+            }
+        }
+    }
 }
 
 fn finish_with_error(

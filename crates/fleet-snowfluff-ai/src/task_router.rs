@@ -22,9 +22,91 @@
 //! the Runtime's job).
 
 use crate::{
-    message::ProviderError,
+    message::{Message, ProviderError, Role},
     settings::{ProfileKey, ProviderProfile, TaskRouterMode},
 };
+
+/// The exact token `mix` mode's local-model classification call must
+/// reply with, and nothing else, to signal "this message is complex,
+/// hand it to `default_profile` instead" -- see
+/// `docs/fleet-snowfluff-feature-planning.md` §4.13. Shared as one
+/// constant between the bundled rules text (which tells the model what
+/// to say) and `detect_escalation` (which watches for it) so the two
+/// can never drift apart.
+pub const ESCALATE_MARKER: &str = "<<ESCALATE>>";
+
+/// Seeded into `personas/task-router-rules.md` the first time it's
+/// needed (mirroring `persona::BUNDLED_DEFAULT_PERSONA_YAML`'s own
+/// seed-on-first-run pattern) and used as the in-memory fallback if
+/// that file is ever missing or unreadable at load time -- `mix` mode
+/// stays functional even before the user has looked at the file once.
+pub const BUNDLED_DEFAULT_TASK_ROUTER_RULES: &str = "# Task Router Rules\n\n\
+Decide whether this user message is a \"complex task\". If it is, your\n\
+entire reply must contain ONLY the following token, with no other text\n\
+at all:\n\n\
+<<ESCALATE>>\n\n\
+A task counts as complex if it needs any of the following:\n\n\
+- Reading or writing files, running shell commands, or editing code\n\
+- Browser automation\n\
+- Multiple steps, or retrying until it succeeds\n\
+- Long-running work or ongoing monitoring\n\n\
+If none of the above apply, it's a simple task -- reply normally, in\n\
+character as the persona, and don't mention this rule or the escalation\n\
+mechanism itself.\n";
+
+/// Appends `rules` to `messages`' leading system message -- `messages`
+/// is assumed to be `prompt::assemble_messages`'s own output, whose
+/// first entry is always `Role::System` (a persona-only call, e.g.
+/// `default_profile`'s, never goes through this at all). A no-op if
+/// `messages` is empty or doesn't start with a system message, so a
+/// caller can apply this unconditionally without checking the shape
+/// itself.
+pub fn with_task_router_rules(mut messages: Vec<Message>, rules: &str) -> Vec<Message> {
+    if let Some(first) = messages.first_mut() {
+        if first.role == Role::System {
+            first.content = format!("{}\n\n{}", first.content, rules);
+        }
+    }
+    messages
+}
+
+/// Where a streamed reply's accumulating prefix stands relative to
+/// [`ESCALATE_MARKER`]. Leading whitespace is trimmed before comparing
+/// -- a local model that prepends a stray space or newline before the
+/// marker shouldn't be read as "definitely not escalating" just because
+/// the raw bytes don't start with `<` yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscalationDecision {
+    /// Still a strict prefix of the marker -- need more of the stream
+    /// before this can be decided either way. If the stream ends while
+    /// still `Undecided`, the caller must treat that as `Simple` (a
+    /// reply that never fully says the marker cannot be escalating).
+    Undecided,
+    /// Diverged from the marker at some position -- conclusively not
+    /// escalating, regardless of what the rest of the stream contains.
+    Simple,
+    /// The buffer is (at least) the full marker, matched exactly from
+    /// the start.
+    Escalate,
+}
+
+/// `str::starts_with` already short-circuits at the first mismatching
+/// byte, so this is O(min(buffer.len(), marker.len())) either way --
+/// no need to hand-roll a character-by-character comparison.
+pub fn detect_escalation(buffer: &str) -> EscalationDecision {
+    let trimmed = buffer.trim_start();
+    if trimmed.len() >= ESCALATE_MARKER.len() {
+        if trimmed.starts_with(ESCALATE_MARKER) {
+            EscalationDecision::Escalate
+        } else {
+            EscalationDecision::Simple
+        }
+    } else if ESCALATE_MARKER.starts_with(trimmed) {
+        EscalationDecision::Undecided
+    } else {
+        EscalationDecision::Simple
+    }
+}
 
 /// What capabilities a task needs, judged independently of which
 /// runtime ends up handling it. Defined now so a future capability-
@@ -140,6 +222,71 @@ mod tests {
 
     fn profile(provider: ProviderKind, auth_method: AuthMethod) -> ProviderProfile {
         ProviderProfile { provider, auth_method, model: None, base_url: None }
+    }
+
+    // -- 2.3: rules get appended to the leading system message only --
+
+    #[test]
+    fn rules_are_appended_to_the_leading_system_message() {
+        let messages = vec![Message::system("be brief"), Message::user("hi")];
+        let with_rules = with_task_router_rules(messages, "some rules");
+        assert!(with_rules[0].content.contains("be brief"));
+        assert!(with_rules[0].content.contains("some rules"));
+        assert_eq!(with_rules[1].content, "hi", "non-system messages are untouched");
+    }
+
+    #[test]
+    fn appending_rules_to_an_empty_message_list_is_a_no_op() {
+        assert_eq!(with_task_router_rules(vec![], "some rules"), Vec::<Message>::new());
+    }
+
+    #[test]
+    fn bundled_default_rules_contain_the_escalate_marker() {
+        // If this ever drifted (e.g. a copy-paste edit of the bundled
+        // text), the local model would have no way to know what token
+        // to reply with -- catch that here, not at runtime.
+        assert!(BUNDLED_DEFAULT_TASK_ROUTER_RULES.contains(ESCALATE_MARKER));
+    }
+
+    // -- 2.4: escalation-marker detection --
+
+    #[test]
+    fn immediate_mismatch_is_conclusively_simple() {
+        assert_eq!(detect_escalation("雪絨在這裡陪你"), EscalationDecision::Simple);
+    }
+
+    #[test]
+    fn a_full_match_escalates() {
+        assert_eq!(detect_escalation(ESCALATE_MARKER), EscalationDecision::Escalate);
+    }
+
+    #[test]
+    fn a_full_match_with_leading_whitespace_still_escalates() {
+        assert_eq!(detect_escalation(&format!("  {ESCALATE_MARKER}")), EscalationDecision::Escalate);
+    }
+
+    #[test]
+    fn a_strict_prefix_of_the_marker_is_undecided() {
+        assert_eq!(detect_escalation("<<ESC"), EscalationDecision::Undecided);
+        assert_eq!(detect_escalation(""), EscalationDecision::Undecided);
+    }
+
+    #[test]
+    fn a_short_reply_that_never_diverges_must_be_resolved_by_the_caller_as_simple_at_stream_end() {
+        // "<<" is a genuine strict prefix of the marker (matches so
+        // far, just hasn't finished) -- if the model's whole reply
+        // happened to be exactly this (e.g. it got cut off, or that's
+        // really all it said), `detect_escalation` alone can only
+        // report `Undecided`, since it has no way to know the stream
+        // won't produce more input. The "resolve Undecided to Simple at
+        // end-of-stream" rule lives in the caller (`chat_commands.rs`),
+        // exercised there, not here.
+        assert_eq!(detect_escalation("<<"), EscalationDecision::Undecided);
+    }
+
+    #[test]
+    fn a_mismatch_after_a_partial_prefix_is_simple() {
+        assert_eq!(detect_escalation("<<ESCALATE-nope"), EscalationDecision::Simple);
     }
 
     // -- 1.1: types round-trip through construction/equality --

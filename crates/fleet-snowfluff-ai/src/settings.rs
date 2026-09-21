@@ -13,6 +13,8 @@
 //! had one provider, necessarily API-key auth) into exactly one
 //! profile -- see `migrate_legacy_active_provider`.
 
+use std::path::PathBuf;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -158,6 +160,15 @@ pub struct AiSettings {
     /// and an existing config missing this key.
     #[serde(default)]
     pub task_router_mode: TaskRouterMode,
+    /// The single directory `read_file`/`list_directory`/`run_command`
+    /// treat as their auto-allowed zone (`agent-core-and-task-router`'s
+    /// native tools) -- `None` until the user picks one via a folder
+    /// dialog in Settings, in which case every file/command tool call
+    /// routes through the confirmation popup instead of being refused
+    /// outright (see that change's design.md). Global, not
+    /// per-conversation, matching `default_profile`'s own scope.
+    #[serde(default)]
+    pub project_root: Option<PathBuf>,
 }
 
 impl AiSettings {
@@ -210,6 +221,7 @@ fn migrate_legacy_active_provider(obj: &serde_json::Map<String, Value>) -> AiSet
             default_profile: None,
             acknowledged_disclosures: vec![],
             task_router_mode: TaskRouterMode::default(),
+            project_root: None,
         };
     };
 
@@ -241,6 +253,7 @@ fn migrate_legacy_active_provider(obj: &serde_json::Map<String, Value>) -> AiSet
         default_profile: Some(key),
         acknowledged_disclosures: if disclosure_acknowledged { vec![key] } else { vec![] },
         task_router_mode: TaskRouterMode::default(),
+        project_root: None,
     }
 }
 
@@ -291,12 +304,18 @@ pub fn sanitize(raw: &Value) -> AiSettings {
         .and_then(|v| serde_json::from_value::<TaskRouterMode>(v.clone()).ok())
         .unwrap_or_default();
 
+    let project_root = obj.get("project_root").and_then(|v| match v {
+        Value::String(s) => Some(PathBuf::from(s)),
+        _ => None,
+    });
+
     AiSettings {
         ai_enabled,
         enabled_profiles,
         default_profile,
         acknowledged_disclosures,
         task_router_mode,
+        project_root,
     }
 }
 
@@ -350,6 +369,27 @@ mod tests {
         let raw =
             json!({ "active_provider": "anthropic", "anthropic": { "model": "claude-sonnet-5" } });
         assert_eq!(sanitize(&raw).task_router_mode, TaskRouterMode::Single);
+    }
+
+    // -- `project_root` (agent-core-and-task-router task 2.2) --
+
+    #[test]
+    fn project_root_defaults_to_none() {
+        assert_eq!(AiSettings::default().project_root, None);
+        let raw = json!({ "enabled_profiles": [] });
+        assert_eq!(sanitize(&raw).project_root, None);
+    }
+
+    #[test]
+    fn project_root_round_trips_when_present() {
+        let raw = json!({ "enabled_profiles": [], "project_root": "/home/user/my-project" });
+        assert_eq!(sanitize(&raw).project_root, Some(PathBuf::from("/home/user/my-project")));
+    }
+
+    #[test]
+    fn project_root_of_the_wrong_json_type_falls_back_to_none_not_a_crash() {
+        let raw = json!({ "enabled_profiles": [], "project_root": 12345 });
+        assert_eq!(sanitize(&raw).project_root, None);
     }
 
     #[test]
@@ -490,6 +530,7 @@ mod tests {
             default_profile: Some(key),
             acknowledged_disclosures: vec![key],
             task_router_mode: TaskRouterMode::Mix,
+            project_root: Some(PathBuf::from("/home/user/my-project")),
         };
 
         let json_str = to_json_string(&settings);
