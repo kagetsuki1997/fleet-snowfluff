@@ -14,6 +14,7 @@ pub mod prompt;
 pub mod provider;
 pub mod providers;
 pub mod settings;
+pub mod task_router;
 
 pub use credentials::ProviderCredentials;
 pub use log::{LogEntry, LogRole};
@@ -21,4 +22,8 @@ pub use message::{Message, ModelInfo, ProviderError, ProviderKind, Role, StreamC
 pub use persona::{FewShotExample, Language, Persona, PersonaParseError, ResponseLanguage};
 pub use provider::{AiProvider, ChatStream};
 pub use providers::{Anthropic, ClaudeCodeCli, Codex, Mock, Ollama, OpenAiCompatible};
-pub use settings::{AiSettings, AuthMethod, ProfileKey, ProviderProfile};
+pub use settings::{AiSettings, AuthMethod, ProfileKey, ProviderProfile, TaskRouterMode};
+pub use task_router::{
+    DefaultTaskRouter, ExecutionRoute, RoutingContext, SessionStrategy, Task, TaskRequirements,
+    TaskRouter,
+};

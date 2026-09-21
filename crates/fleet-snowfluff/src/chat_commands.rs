@@ -16,8 +16,9 @@ use std::{
 };
 
 use fleet_snowfluff_ai::{
-    log::LogRole, prompt, AiProvider, AiSettings, Language, LogEntry, Persona, ProfileKey,
-    ProviderCredentials, ResponseLanguage,
+    log::LogRole, prompt, AiProvider, AiSettings, AuthMethod, DefaultTaskRouter, Language,
+    LogEntry, Persona, ProfileKey, ProviderCredentials, ProviderKind, ResponseLanguage,
+    RoutingContext, Task, TaskRouter,
 };
 use futures_util::StreamExt;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
@@ -214,10 +215,36 @@ pub async fn send_chat_message(
         channel.send(ChatEvent::Error { message: "disabled".to_string() }).ok();
         return Ok(());
     }
-    let Some(profile) = settings_snapshot.default_profile().cloned() else {
+    let Some(default_profile) = settings_snapshot.default_profile().cloned() else {
         channel.send(ChatEvent::Error { message: "no_provider".to_string() }).ok();
         return Ok(());
     };
+
+    // Task Router's initial route (`agent-core-and-task-router`'s
+    // "Task routing mode") -- called exactly once per message. `single`
+    // (the default, and the only reachable outcome until Group 2's
+    // settings UI ships) always resolves back to `default_profile`, so
+    // this is a no-op in observed behavior today; `mix` mode's own
+    // escalation/fallback handling is Group 2's job, not this call's --
+    // see `task_router.rs`'s own module doc for why `route()` is never
+    // invoked a second time for that.
+    let local_profile = settings_snapshot
+        .profile(ProfileKey { provider: ProviderKind::Ollama, auth_method: AuthMethod::Local })
+        .cloned();
+    let routing_context = RoutingContext {
+        task: Task::new(message.clone()),
+        mode: settings_snapshot.task_router_mode,
+        default_profile: default_profile.clone(),
+        local_profile,
+    };
+    let route = match DefaultTaskRouter.route(routing_context).await {
+        Ok(route) => route,
+        Err(err) => {
+            channel.send(ChatEvent::Error { message: err.to_string() }).ok();
+            return Ok(());
+        }
+    };
+    let profile = settings_snapshot.profile(route.profile_key).cloned().unwrap_or(default_profile);
     let profile_key = profile.key();
 
     let session_path = resolve_session_path(&app, &chat_state);

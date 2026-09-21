@@ -41,6 +41,22 @@ pub enum AuthMethod {
     Local,
 }
 
+/// How the Task Router picks which enabled profile handles a message
+/// (`agent-core-and-task-router`'s "Task routing mode"). `Single`
+/// (the default) always uses `default_profile`, identical to today's
+/// behavior. `Mix` tries the enabled Ollama profile first -- see
+/// `task_router::DefaultTaskRouter` for the resolution and
+/// `docs/fleet-snowfluff-feature-planning.md` §4.13 for the full
+/// mechanism (local-model-judged escalation, not implemented by this
+/// field alone).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskRouterMode {
+    #[default]
+    Single,
+    Mix,
+}
+
 /// Identifies a profile by what the user actually configured --
 /// provider brand plus auth method -- rather than an arbitrary
 /// generated ID. There is never a reason to have two profiles with the
@@ -108,11 +124,11 @@ pub struct AiSettings {
     #[serde(default)]
     pub enabled_profiles: Vec<ProviderProfile>,
     /// Which enabled profile currently handles chat requests, manually
-    /// chosen. `None` when `enabled_profiles` is empty. Task Routing /
-    /// Fallback between profiles is out of scope for this change (see
-    /// `subscription-first-chat`'s design.md Non-Goals) -- exactly one
-    /// profile is ever live at a time, and only a user action changes
-    /// which one.
+    /// chosen. `None` when `enabled_profiles` is empty. Still the only
+    /// manually-set pointer -- `task_router_mode` below picks *which*
+    /// profile handles a given message when set to `Mix`, but never
+    /// changes this pointer itself; `single` mode (the default) uses it
+    /// exactly as `subscription-first-chat` originally shipped it.
     #[serde(default)]
     pub default_profile: Option<ProfileKey>,
     /// Which (provider, auth method) pairs have had their cloud-provider
@@ -134,6 +150,14 @@ pub struct AiSettings {
     /// that matters here.
     #[serde(default)]
     pub acknowledged_disclosures: Vec<ProfileKey>,
+    /// Pulled forward from `agent-core-and-task-router`'s own task 2.1
+    /// -- `task_router.rs`'s `DefaultTaskRouter` (task 1.3) needs this
+    /// field to exist to compile/be tested at all, so it's added here
+    /// rather than left blocking Group 1 on Group 2. Defaults to
+    /// `Single`, identical to today's behavior, on both a fresh install
+    /// and an existing config missing this key.
+    #[serde(default)]
+    pub task_router_mode: TaskRouterMode,
 }
 
 impl AiSettings {
@@ -185,6 +209,7 @@ fn migrate_legacy_active_provider(obj: &serde_json::Map<String, Value>) -> AiSet
             enabled_profiles: vec![],
             default_profile: None,
             acknowledged_disclosures: vec![],
+            task_router_mode: TaskRouterMode::default(),
         };
     };
 
@@ -215,6 +240,7 @@ fn migrate_legacy_active_provider(obj: &serde_json::Map<String, Value>) -> AiSet
         enabled_profiles: vec![profile],
         default_profile: Some(key),
         acknowledged_disclosures: if disclosure_acknowledged { vec![key] } else { vec![] },
+        task_router_mode: TaskRouterMode::default(),
     }
 }
 
@@ -260,7 +286,18 @@ pub fn sanitize(raw: &Value) -> AiSettings {
         .map(|arr| arr.iter().filter_map(parse_profile_key).collect())
         .unwrap_or_default();
 
-    AiSettings { ai_enabled, enabled_profiles, default_profile, acknowledged_disclosures }
+    let task_router_mode = obj
+        .get("task_router_mode")
+        .and_then(|v| serde_json::from_value::<TaskRouterMode>(v.clone()).ok())
+        .unwrap_or_default();
+
+    AiSettings {
+        ai_enabled,
+        enabled_profiles,
+        default_profile,
+        acknowledged_disclosures,
+        task_router_mode,
+    }
 }
 
 /// Loads settings from raw file contents. Missing/unreadable/corrupt
@@ -285,6 +322,34 @@ mod tests {
 
     fn profile(provider: ProviderKind, auth_method: AuthMethod) -> ProviderProfile {
         ProviderProfile { provider, auth_method, model: None, base_url: None }
+    }
+
+    // -- `task_router_mode` (agent-core-and-task-router task 2.1,
+    // pulled forward into Group 1 because `DefaultTaskRouter` needs the
+    // field to exist -- see `task_router.rs`'s own module doc) --
+
+    #[test]
+    fn task_router_mode_defaults_to_single_on_a_fresh_config() {
+        assert_eq!(AiSettings::default().task_router_mode, TaskRouterMode::Single);
+    }
+
+    #[test]
+    fn task_router_mode_defaults_to_single_when_missing_from_an_existing_config() {
+        let raw = json!({ "ai_enabled": true, "enabled_profiles": [] });
+        assert_eq!(sanitize(&raw).task_router_mode, TaskRouterMode::Single);
+    }
+
+    #[test]
+    fn task_router_mode_round_trips_when_present() {
+        let raw = json!({ "enabled_profiles": [], "task_router_mode": "mix" });
+        assert_eq!(sanitize(&raw).task_router_mode, TaskRouterMode::Mix);
+    }
+
+    #[test]
+    fn legacy_config_migration_defaults_task_router_mode_to_single() {
+        let raw =
+            json!({ "active_provider": "anthropic", "anthropic": { "model": "claude-sonnet-5" } });
+        assert_eq!(sanitize(&raw).task_router_mode, TaskRouterMode::Single);
     }
 
     #[test]
@@ -424,6 +489,7 @@ mod tests {
             }],
             default_profile: Some(key),
             acknowledged_disclosures: vec![key],
+            task_router_mode: TaskRouterMode::Mix,
         };
 
         let json_str = to_json_string(&settings);

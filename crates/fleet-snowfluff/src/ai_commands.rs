@@ -442,6 +442,7 @@ mod tests {
             enabled_profiles: profiles,
             default_profile: None,
             acknowledged_disclosures: vec![],
+            task_router_mode: Default::default(),
         }
     }
 
@@ -454,6 +455,7 @@ mod tests {
             enabled_profiles: profiles,
             default_profile: None,
             acknowledged_disclosures: acknowledged,
+            task_router_mode: Default::default(),
         }
     }
 
