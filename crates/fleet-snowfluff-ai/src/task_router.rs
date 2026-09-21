@@ -40,19 +40,13 @@ pub const ESCALATE_MARKER: &str = "<<ESCALATE>>";
 /// seed-on-first-run pattern) and used as the in-memory fallback if
 /// that file is ever missing or unreadable at load time -- `mix` mode
 /// stays functional even before the user has looked at the file once.
-pub const BUNDLED_DEFAULT_TASK_ROUTER_RULES: &str = "# Task Router Rules\n\n\
-Decide whether this user message is a \"complex task\". If it is, your\n\
-entire reply must contain ONLY the following token, with no other text\n\
-at all:\n\n\
-<<ESCALATE>>\n\n\
-A task counts as complex if it needs any of the following:\n\n\
-- Reading or writing files, running shell commands, or editing code\n\
-- Browser automation\n\
-- Multiple steps, or retrying until it succeeds\n\
-- Long-running work or ongoing monitoring\n\n\
-If none of the above apply, it's a simple task -- reply normally, in\n\
-character as the persona, and don't mention this rule or the escalation\n\
-mechanism itself.\n";
+/// Loaded straight from the real file (same `include_str!` pattern as
+/// `persona::BUNDLED_DEFAULT_PERSONA_YAML`) so the file the user edits
+/// and the bundled fallback can never drift apart. The file itself owns
+/// the full reply-format contract (persona reply vs. [`ESCALATE_MARKER`])
+/// -- there is no separate code-side preamble layered on top of it.
+pub const BUNDLED_DEFAULT_TASK_ROUTER_RULES: &str =
+    include_str!("../../../personas/task-router-rules.md");
 
 /// Appends `rules` to `messages`' leading system message -- `messages`
 /// is assumed to be `prompt::assemble_messages`'s own output, whose
@@ -242,9 +236,11 @@ mod tests {
 
     #[test]
     fn bundled_default_rules_contain_the_escalate_marker() {
-        // If this ever drifted (e.g. a copy-paste edit of the bundled
-        // text), the local model would have no way to know what token
-        // to reply with -- catch that here, not at runtime.
+        // Loaded via `include_str!`, same pattern as
+        // `persona::BUNDLED_DEFAULT_PERSONA_YAML` -- if the real file
+        // ever drifted (e.g. a copy-paste edit) to no longer mention the
+        // marker, the local model would have no way to know what token
+        // to reply with. Catch that here, not at runtime.
         assert!(BUNDLED_DEFAULT_TASK_ROUTER_RULES.contains(ESCALATE_MARKER));
     }
 
@@ -262,7 +258,10 @@ mod tests {
 
     #[test]
     fn a_full_match_with_leading_whitespace_still_escalates() {
-        assert_eq!(detect_escalation(&format!("  {ESCALATE_MARKER}")), EscalationDecision::Escalate);
+        assert_eq!(
+            detect_escalation(&format!("  {ESCALATE_MARKER}")),
+            EscalationDecision::Escalate
+        );
     }
 
     #[test]
@@ -403,5 +402,60 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(route.profile_key, default_profile.key());
+    }
+
+    // -- manual sanity check against a real local model --
+
+    /// Manual integration test requiring a locally running Ollama with
+    /// `MANUAL_TEST_MODEL` pulled (defaults to `llama3.2` if unset).
+    /// Sends one prompt that `personas/task-router-rules.md` calls out
+    /// as `LOCAL` and one it calls out as `ESCALATE`, and checks the
+    /// real model's own reply against `detect_escalation` -- this is
+    /// how to sanity-check an edit to the rules file against real model
+    /// behavior, not something CI runs. Never run in CI: `cargo test -p
+    /// fleet-snowfluff-ai --test-threads=1 -- --ignored
+    /// task_router_rules_live`.
+    #[tokio::test]
+    #[ignore = "requires a locally running Ollama with a model pulled"]
+    async fn task_router_rules_live_classification_round_trip() {
+        use futures_util::StreamExt;
+
+        use crate::{provider::AiProvider, providers::Ollama};
+
+        let model = std::env::var("MANUAL_TEST_MODEL").unwrap_or_else(|_| "llama3.2".into());
+        let provider = Ollama::new(crate::providers::ollama::DEFAULT_BASE_URL, model);
+
+        async fn classify(provider: &Ollama, user_message: &str) -> String {
+            let messages = with_task_router_rules(
+                vec![Message::system("You are a helpful assistant."), Message::user(user_message)],
+                BUNDLED_DEFAULT_TASK_ROUTER_RULES,
+            );
+            let mut stream = provider.chat(messages).await.unwrap();
+            let mut reply = String::new();
+            while let Some(chunk) = stream.next().await {
+                reply.push_str(&chunk.unwrap().delta);
+                if detect_escalation(&reply) != EscalationDecision::Undecided {
+                    break;
+                }
+            }
+            reply
+        }
+
+        let local_reply = classify(&provider, "What is Rust ownership?").await;
+        println!("LOCAL-case reply: {local_reply:?}");
+        assert_ne!(
+            detect_escalation(&local_reply),
+            EscalationDecision::Escalate,
+            "expected a simple knowledge question to stay local, got: {local_reply:?}"
+        );
+
+        let escalate_reply =
+            classify(&provider, "Run cargo test in my project and fix any failures.").await;
+        println!("ESCALATE-case reply: {escalate_reply:?}");
+        assert_eq!(
+            detect_escalation(&escalate_reply),
+            EscalationDecision::Escalate,
+            "expected a shell-execution request to escalate, got: {escalate_reply:?}"
+        );
     }
 }

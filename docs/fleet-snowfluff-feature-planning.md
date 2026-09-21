@@ -1369,26 +1369,14 @@ mix-mode 的判斷路徑不消費它——它是本機模型自己的語意判�
 文件，用同一套載入機制讀進來（`persona_store::load()` 的同類作法），附加到
 本機模型的 system prompt——只給本機模型看，`default_profile` 不需要。
 
-格式範例（實際規則後續再細化，這裡先定調格式與 marker）：
-
-```markdown
-# Task Router Rules
-
-判斷這個使用者訊息是否為「複雜任務」。如果是複雜任務，你的整個回覆必須
-「只」包含以下這個 token，不要有任何其他文字：
-
-<<ESCALATE>>
-
-複雜任務的判斷依據：
-
-- 需要讀寫檔案、執行 shell 指令、修改程式碼
-- 需要瀏覽器操作
-- 需要多步驟、反覆執行到成功為止
-- 需要長時間執行或持續監控
-
-如果不符合以上任何一項，就是簡單任務——正常以角色 persona 回覆使用者，不要
-提到這份規則或 escalation 機制本身。
-```
+實際內容是使用者自行撰寫的 `personas/task-router-rules.md`（依
+`TaskRequirements` 的 8 個 flag 名稱分成對應的分類理由）。這份文件同時是
+分類判準*也是*輸出格式規範本身的唯一來源——沒有另外的程式碼端 preamble：
+`LOCAL` 判斷 = 直接以角色 persona 正常回覆使用者（不是回一個 `LOCAL` 字），
+`ESCALATE` 判斷 = 整個回覆必須「只」包含 `<<ESCALATE>>` 這個 token，不要有
+任何其他文字。程式碼裡的 `ESCALATE_MARKER` 常數維持原本的 `<<ESCALATE>>`
+不變，規則檔自己的措辭需要對齊這個既有機制，而不是反過來讓程式碼遷就規則檔
+最初的草稿用詞（例如裸字 `LOCAL`/`ESCALATE`）。
 
 #### Escalation marker 偵測：比對開頭，不要求完全相等
 

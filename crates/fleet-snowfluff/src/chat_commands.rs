@@ -284,10 +284,8 @@ pub async fn send_chat_message(
         // ever resolves to `local_profile_key` when `local_profile` was
         // itself `Some` (see `DefaultTaskRouter::route`).
         let local_profile = local_profile.expect("routed to local profile, but none is enabled");
-        let local_messages = with_task_router_rules(
-            default_messages.clone(),
-            &task_router_rules_store::load(&app),
-        );
+        let local_messages =
+            with_task_router_rules(default_messages.clone(), &task_router_rules_store::load(&app));
         let fallback = FallbackAttempt {
             profile: default_profile,
             messages: default_messages,
@@ -513,15 +511,14 @@ async fn stream_to_completion(
 /// provider's own reply through [`detect_escalation`] *before*
 /// forwarding anything to the UI or the chat log:
 ///
-/// - a conclusive [`EscalationDecision::Simple`] (a mismatch, or the
-///   stream ending while still a strict prefix of the marker) flushes
-///   the buffered prefix and hands the rest of the same stream to
-///   [`stream_to_completion`], exactly as if this had been a normal
-///   attempt from the start;
-/// - [`EscalationDecision::Escalate`], or any failure to even start or
-///   continue the local stream, discards everything buffered so far --
-///   nothing shown, nothing logged -- and retries the message against
-///   `fallback.profile` via a fresh [`run_generation`] call instead.
+/// - a conclusive [`EscalationDecision::Simple`] (a mismatch, or the stream
+///   ending while still a strict prefix of the marker) flushes the buffered
+///   prefix and hands the rest of the same stream to [`stream_to_completion`],
+///   exactly as if this had been a normal attempt from the start;
+/// - [`EscalationDecision::Escalate`], or any failure to even start or continue
+///   the local stream, discards everything buffered so far -- nothing shown,
+///   nothing logged -- and retries the message against `fallback.profile` via a
+///   fresh [`run_generation`] call instead.
 ///
 /// Either way, `TaskRouter::route()` is never called a second time --
 /// see `task_router.rs`'s own module doc.
