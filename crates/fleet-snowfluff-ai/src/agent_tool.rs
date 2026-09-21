@@ -1,17 +1,20 @@
 //! The `Tool` trait `AemeathAgentRuntime` (`agent_runtime.rs`) calls
 //! into for native tools (`agent-core-and-task-router`'s Group 4/5).
-//! Lives in this app crate, not `fleet-snowfluff-ai`, because
-//! `ToolContext` carries `ConversationId` (`session_domain.rs`,
-//! app-crate-only) -- unlike `ToolCallingProvider` itself (Group 3),
-//! which has no such dependency and stays provider-agnostic in the AI
-//! crate.
+//! Lives alongside `ToolCallingProvider`/`ConversationId` in this crate
+//! (moved from the app crate after Group 5, once it was clear every
+//! native tool's own implementation -- process spawning, file I/O, an
+//! HTTP client -- fit this crate's existing "things the Agent/AI layer
+//! does to execute a request" boundary at least as well as
+//! `ClaudeCodeCli`/`Codex`'s own subprocess spawning already does) --
+//! `ToolContext` needs `ConversationId`, which lives here too
+//! (`conversation.rs`) for exactly that reason. No `AppHandle`/Tauri
+//! type anywhere in this module or its callers.
 
 use std::path::PathBuf;
 
-use fleet_snowfluff_ai::ToolDefinition;
 use serde_json::Value;
 
-use crate::session_domain::ConversationId;
+use crate::{conversation::ConversationId, tool_provider::ToolDefinition};
 
 /// How a tool call may proceed, decided per-call (not per-tool) by
 /// [`Tool::required_permission`] -- see design.md's "`Tool` trait has

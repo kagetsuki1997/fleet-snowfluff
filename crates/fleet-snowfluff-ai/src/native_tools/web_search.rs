@@ -13,11 +13,13 @@
 //! availability (design.md's Risks).
 
 use async_trait::async_trait;
-use fleet_snowfluff_ai::ToolDefinition;
 use serde::Deserialize;
 use serde_json::{json, Value};
 
-use crate::agent_tool::{PermissionTier, Tool, ToolContext, ToolError, ToolResult};
+use crate::{
+    agent_tool::{PermissionTier, Tool, ToolContext, ToolError, ToolResult},
+    tool_provider::ToolDefinition,
+};
 
 /// A well-known public instance -- there is no settings surface to
 /// configure this in this change, so a SearXNG outage falls straight
@@ -253,7 +255,7 @@ mod tests {
     use std::sync::Mutex;
 
     use super::*;
-    use crate::session_domain::ConversationId;
+    use crate::conversation::ConversationId;
 
     fn ctx() -> ToolContext {
         ToolContext {

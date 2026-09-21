@@ -99,9 +99,22 @@ pub fn append_entry(path: &Path, entry: &LogEntry) {
     }
 }
 
+/// Implements `fleet_snowfluff_ai::context_manager::SessionLog` by
+/// delegating straight to `read_session`/`append_entry` above --
+/// `ContextManager` lives in the ai crate and must not depend on this
+/// one (path resolution here needs `AppHandle`), so this is the
+/// adapter that lets it use this module's real file storage anyway.
+pub struct ChatLogStore;
+
+impl fleet_snowfluff_ai::SessionLog for ChatLogStore {
+    fn read(&self, session_path: &Path) -> Vec<LogEntry> { read_session(session_path) }
+
+    fn append(&self, session_path: &Path, entry: &LogEntry) { append_entry(session_path, entry) }
+}
+
 #[cfg(test)]
 mod tests {
-    use fleet_snowfluff_ai::LogRole;
+    use fleet_snowfluff_ai::{LogRole, SessionLog};
 
     use super::*;
 
@@ -178,6 +191,20 @@ mod tests {
         }
         assert_eq!(latest.unwrap(), newer);
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn chat_log_store_adapter_delegates_to_the_real_functions() {
+        let dir = temp_dir("adapter");
+        let path = dir.join("2026-09-17").join("session.jsonl");
+
+        let adapter = ChatLogStore;
+        adapter.append(&path, &entry(LogRole::User, "hi"));
+        let entries = adapter.read(&path);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].content, "hi");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

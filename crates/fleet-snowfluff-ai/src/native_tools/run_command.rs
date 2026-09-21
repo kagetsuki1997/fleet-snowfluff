@@ -8,11 +8,13 @@
 use std::{path::Path, process::Stdio, time::Duration};
 
 use async_trait::async_trait;
-use fleet_snowfluff_ai::ToolDefinition;
 use serde_json::{json, Value};
 use tokio::process::Command;
 
-use crate::agent_tool::{PermissionTier, Tool, ToolContext, ToolError, ToolResult};
+use crate::{
+    agent_tool::{PermissionTier, Tool, ToolContext, ToolError, ToolResult},
+    tool_provider::ToolDefinition,
+};
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_OUTPUT_BYTES: usize = 20 * 1024;
@@ -127,7 +129,7 @@ impl Tool for RunCommandTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_domain::ConversationId;
+    use crate::conversation::ConversationId;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir()

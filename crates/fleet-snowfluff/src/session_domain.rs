@@ -7,7 +7,11 @@
 //! - **`ConversationId`**: the user-visible, long-lived chat container --
 //!   already exists in substance as `chat_log_store`'s session file, identified
 //!   by its `PathBuf`; this just gives that identity a name and a type instead
-//!   of leaving it an implicit path.
+//!   of leaving it an implicit path. **Now defined in `fleet-snowfluff-ai`**
+//!   (`conversation.rs`, re-exported below) -- `agent-core-and-task-router`'s
+//!   `ToolContext` needs it and must not depend on this app crate, so the type
+//!   moved to where both sides can share it, and this module keeps a `pub use`
+//!   so every existing call site here is unaffected.
 //! - **`ExecutionId`**: one turn's execution -- genuinely new. Today a turn is
 //!   only the `send_chat_message` -> `run_generation` call chain, with no id
 //!   and no per-turn recorded state. This module adds the id; it does not add
@@ -19,6 +23,10 @@
 //!   exists in substance as the bare `String` values in
 //!   `ChatRuntimeState.cli_sessions`; this gives that a name too.
 //!
+//! `ExecutionId`/`ExternalSessionRef` stay in this app crate -- both are
+//! tied to `ChatRuntimeState`, a purely app-crate/Tauri-runtime concept
+//! with no reason for `fleet-snowfluff-ai` to know about it.
+//!
 //! This is a typing-only pass: nothing here changes observable
 //! behavior, and nothing here is persisted to disk. `PendingGeneration`
 //! in `chat_commands.rs` is deliberately left untouched (still one
@@ -26,22 +34,7 @@
 //! design.md entry for why that's not the same call as re-keying
 //! `cli_sessions` (which *is* changed, to include `ConversationId`).
 
-use std::path::Path;
-
-/// Identifies a Fleet Conversation -- derived from the session's log
-/// file path, not independently generated and stored. Nothing today
-/// needs to reference a conversation before its log file exists or
-/// after it's been moved/renamed (Fleet has no such feature), so an
-/// independently-persisted id would solve a problem that doesn't exist
-/// yet. Kept behind this one function rather than inlined at call
-/// sites specifically so that if that changes later, it's a one-place
-/// edit, not a search-and-replace across the app crate.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct ConversationId(String);
-
-impl ConversationId {
-    pub fn from_session_path(path: &Path) -> Self { Self(path.to_string_lossy().into_owned()) }
-}
+pub use fleet_snowfluff_ai::ConversationId;
 
 /// Identifies one turn's execution -- the `send_chat_message` ->
 /// `run_generation` call chain. Generated fresh per call, never
@@ -80,21 +73,8 @@ pub struct ExternalSessionRef(pub String);
 mod tests {
     use super::*;
 
-    #[test]
-    fn conversation_id_from_session_path_is_deterministic() {
-        let path = Path::new("chat-logs/2026-09-18/20260918T120000Z_abc123.jsonl");
-        assert_eq!(
-            ConversationId::from_session_path(path),
-            ConversationId::from_session_path(path)
-        );
-    }
-
-    #[test]
-    fn conversation_id_differs_for_different_paths() {
-        let a = ConversationId::from_session_path(Path::new("chat-logs/a.jsonl"));
-        let b = ConversationId::from_session_path(Path::new("chat-logs/b.jsonl"));
-        assert_ne!(a, b);
-    }
+    // `ConversationId`'s own tests now live with its definition in
+    // `fleet-snowfluff-ai/src/conversation.rs`.
 
     #[test]
     fn execution_ids_generated_in_succession_are_distinct() {

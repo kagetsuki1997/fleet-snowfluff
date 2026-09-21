@@ -14,13 +14,14 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use fleet_snowfluff_ai::{
-    Message, ProviderError, ToolCallRecord, ToolCallStreamItem, ToolCallingProvider,
-};
 use futures_util::StreamExt;
 use serde_json::Value;
 
-use crate::agent_tool::{PermissionTier, Tool, ToolContext, ToolResult};
+use crate::{
+    agent_tool::{PermissionTier, Tool, ToolContext, ToolResult},
+    message::{Message, ProviderError, ToolCallRecord},
+    tool_provider::{ToolCallStreamItem, ToolCallingProvider, ToolDefinition},
+};
 
 /// One tool call the model requested in a single turn, before it's
 /// known whether it's permitted to run -- the unit
@@ -57,7 +58,7 @@ pub struct ToolRegistry {
 impl ToolRegistry {
     pub fn new(tools: Vec<Arc<dyn Tool>>) -> Self { Self { tools } }
 
-    pub fn definitions(&self) -> Vec<fleet_snowfluff_ai::ToolDefinition> {
+    pub fn definitions(&self) -> Vec<ToolDefinition> {
         self.tools.iter().map(|tool| tool.definition()).collect()
     }
 
@@ -250,12 +251,16 @@ async fn execute(tool: &Arc<dyn Tool>, args: Value, ctx: &ToolContext) -> ToolRe
 mod tests {
     use std::sync::Mutex;
 
-    use fleet_snowfluff_ai::{ModelInfo, ProviderKind, ToolCallStream, ToolDefinition};
     use futures_util::stream::{iter, BoxStream};
     use serde_json::json;
 
     use super::*;
-    use crate::session_domain::ConversationId;
+    use crate::{
+        conversation::ConversationId,
+        message::{ModelInfo, ProviderKind},
+        provider::{AiProvider, ChatStream},
+        tool_provider::ToolCallStream,
+    };
 
     fn ctx() -> ToolContext {
         ToolContext {
@@ -347,13 +352,10 @@ mod tests {
     }
 
     #[async_trait::async_trait]
-    impl fleet_snowfluff_ai::AiProvider for ScriptedProvider {
+    impl AiProvider for ScriptedProvider {
         fn kind(&self) -> ProviderKind { ProviderKind::Ollama }
 
-        async fn chat(
-            &self,
-            _messages: Vec<Message>,
-        ) -> Result<fleet_snowfluff_ai::ChatStream, ProviderError> {
+        async fn chat(&self, _messages: Vec<Message>) -> Result<ChatStream, ProviderError> {
             unimplemented!("ScriptedProvider only exercises chat_with_tools")
         }
 

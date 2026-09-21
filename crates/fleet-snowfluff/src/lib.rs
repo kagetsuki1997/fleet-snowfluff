@@ -1,5 +1,3 @@
-pub mod agent_runtime;
-pub mod agent_tool;
 pub mod ai_commands;
 pub mod ai_config_store;
 pub mod animation;
@@ -10,7 +8,6 @@ pub mod chat_pause;
 pub mod chat_window;
 pub mod commands;
 pub mod config_store;
-pub mod context_manager;
 pub mod persona_store;
 pub mod secrets_store;
 pub mod session_domain;
@@ -22,7 +19,6 @@ pub mod task_router_rules_store;
 #[cfg(not(target_os = "windows"))]
 pub mod gfx;
 pub mod manager;
-pub mod native_tools;
 pub mod pet;
 pub mod platform;
 pub mod quick_menu;

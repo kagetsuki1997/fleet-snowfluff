@@ -7,11 +7,13 @@
 //! this one's.
 
 use async_trait::async_trait;
-use fleet_snowfluff_ai::ToolDefinition;
 use serde_json::{json, Value};
 use sysinfo::System;
 
-use crate::agent_tool::{PermissionTier, Tool, ToolContext, ToolError, ToolResult};
+use crate::{
+    agent_tool::{PermissionTier, Tool, ToolContext, ToolError, ToolResult},
+    tool_provider::ToolDefinition,
+};
 
 /// Builds the reported text. A fresh `System` is created per call
 /// (this tool is not expected to be invoked at any real frequency) --
@@ -61,7 +63,7 @@ impl Tool for GetSystemContextTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_domain::ConversationId;
+    use crate::conversation::ConversationId;
 
     fn ctx() -> ToolContext {
         ToolContext {

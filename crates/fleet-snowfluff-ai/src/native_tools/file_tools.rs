@@ -11,10 +11,12 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
-use fleet_snowfluff_ai::ToolDefinition;
 use serde_json::{json, Value};
 
-use crate::agent_tool::{PermissionTier, Tool, ToolContext, ToolError, ToolResult};
+use crate::{
+    agent_tool::{PermissionTier, Tool, ToolContext, ToolError, ToolResult},
+    tool_provider::ToolDefinition,
+};
 
 /// Resolves the path argument the model provided against
 /// `project_root`: an absolute path is used as-is (the model may
@@ -160,7 +162,7 @@ impl Tool for ListDirectoryTool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session_domain::ConversationId;
+    use crate::conversation::ConversationId;
 
     fn temp_dir(name: &str) -> PathBuf {
         let dir = std::env::temp_dir()
