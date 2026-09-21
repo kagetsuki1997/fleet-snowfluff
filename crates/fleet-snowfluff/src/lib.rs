@@ -22,6 +22,7 @@ pub mod task_router_rules_store;
 #[cfg(not(target_os = "windows"))]
 pub mod gfx;
 pub mod manager;
+pub mod native_tools;
 pub mod pet;
 pub mod platform;
 pub mod quick_menu;
