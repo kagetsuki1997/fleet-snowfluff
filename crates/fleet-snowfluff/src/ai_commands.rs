@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use fleet_snowfluff_ai::{
     AiProvider, AiSettings, Anthropic, AuthMethod, ClaudeCodeCli, Codex, Mock, ModelInfo, Ollama,
     OpenAiCompatible, ProfileKey, ProviderCredentials, ProviderError, ProviderKind,
-    ProviderProfile,
+    ProviderProfile, ToolCallingProvider,
 };
 use tauri::{AppHandle, State};
 
@@ -257,43 +257,86 @@ pub struct ModelListResult {
     error: Option<String>,
 }
 
-/// Builds a live `Box<dyn AiProvider>` for `profile`. `resume_session_id`
-/// is only meaningful for CLI-backed subscription profiles
+/// Whether a routed profile can only carry on a plain conversation, or
+/// can additionally call tools mid-turn -- decided once, at construction
+/// time, alongside the rest of `route_provider()`'s provider selection,
+/// rather than via `Box<dyn AiProvider>` downcasting later (the concrete
+/// type is already known here; Rust has no clean way to ask a type-
+/// erased trait object whether it also implements a second trait).
+/// `ToolCapable` also satisfies `AiProvider` (`ToolCallingProvider:
+/// AiProvider`), so [`RoutedExecution::into_ai_provider`] can hand back
+/// a plain `Box<dyn AiProvider>` for either variant.
+pub(crate) enum RoutedExecution {
+    PlainChat(Box<dyn AiProvider>),
+    ToolCapable(Box<dyn ToolCallingProvider>),
+}
+
+impl RoutedExecution {
+    /// Discards the tool-calling capability, if any, and returns a
+    /// plain `Box<dyn AiProvider>` -- what every call site needs today
+    /// (the Agent Loop that would actually use `ToolCapable`'s extra
+    /// capability doesn't exist yet). Relies on `dyn` trait upcasting
+    /// (stable since Rust 1.86) to coerce `Box<dyn ToolCallingProvider>`
+    /// into `Box<dyn AiProvider>`.
+    pub(crate) fn into_ai_provider(self) -> Box<dyn AiProvider> {
+        match self {
+            RoutedExecution::PlainChat(provider) => provider,
+            RoutedExecution::ToolCapable(provider) => provider,
+        }
+    }
+}
+
+/// Builds a live, routed provider for `profile`. `resume_session_id` is
+/// only meaningful for CLI-backed subscription profiles
 /// (`ClaudeCodeCli`/`Codex`'s own warm-session model) -- every other
-/// branch ignores it.
-pub(crate) fn build_provider(
+/// branch ignores it. Tool-calling capability is granted only to
+/// `(Ollama, Local)` -- `ToolCallingProvider`'s v1 implementation, per
+/// design.md's "`ToolCallingProvider` is a separate trait from
+/// `AiProvider`".
+fn route_provider(
     credentials: &ProviderCredentials,
     profile: &ProviderProfile,
     resume_session_id: Option<String>,
-) -> Box<dyn AiProvider> {
+) -> RoutedExecution {
     match (profile.provider, profile.auth_method) {
-        (ProviderKind::OpenAi, AuthMethod::ApiKey) => Box::new(OpenAiCompatible::new(
-            credentials.openai_api_key.clone().unwrap_or_default(),
-            profile.base_url.clone().unwrap_or_else(|| {
-                fleet_snowfluff_ai::providers::openai::DEFAULT_BASE_URL.to_string()
-            }),
-            profile.model.clone().unwrap_or_default(),
-        )),
-        (ProviderKind::Anthropic, AuthMethod::ApiKey) => Box::new(Anthropic::new(
-            credentials.anthropic_api_key.clone().unwrap_or_default(),
-            profile.base_url.clone().unwrap_or_else(|| {
-                fleet_snowfluff_ai::providers::anthropic::DEFAULT_BASE_URL.to_string()
-            }),
-            profile.model.clone().unwrap_or_default(),
-        )),
-        (ProviderKind::Anthropic, AuthMethod::Subscription) => {
-            Box::new(ClaudeCodeCli::new(profile.model.clone(), resume_session_id))
+        (ProviderKind::OpenAi, AuthMethod::ApiKey) => {
+            RoutedExecution::PlainChat(Box::new(OpenAiCompatible::new(
+                credentials.openai_api_key.clone().unwrap_or_default(),
+                profile.base_url.clone().unwrap_or_else(|| {
+                    fleet_snowfluff_ai::providers::openai::DEFAULT_BASE_URL.to_string()
+                }),
+                profile.model.clone().unwrap_or_default(),
+            )))
         }
-        (ProviderKind::OpenAi, AuthMethod::Subscription) => {
-            Box::new(Codex::new(profile.model.clone(), resume_session_id))
+        (ProviderKind::Anthropic, AuthMethod::ApiKey) => {
+            RoutedExecution::PlainChat(Box::new(Anthropic::new(
+                credentials.anthropic_api_key.clone().unwrap_or_default(),
+                profile.base_url.clone().unwrap_or_else(|| {
+                    fleet_snowfluff_ai::providers::anthropic::DEFAULT_BASE_URL.to_string()
+                }),
+                profile.model.clone().unwrap_or_default(),
+            )))
         }
-        (ProviderKind::Ollama, _) => Box::new(Ollama::new(
-            profile.base_url.clone().unwrap_or_else(|| {
-                fleet_snowfluff_ai::providers::ollama::DEFAULT_BASE_URL.to_string()
-            }),
-            profile.model.clone().unwrap_or_default(),
+        (ProviderKind::Anthropic, AuthMethod::Subscription) => RoutedExecution::PlainChat(
+            Box::new(ClaudeCodeCli::new(profile.model.clone(), resume_session_id)),
+        ),
+        (ProviderKind::OpenAi, AuthMethod::Subscription) => RoutedExecution::PlainChat(Box::new(
+            Codex::new(profile.model.clone(), resume_session_id),
         )),
-        (ProviderKind::Mock, _) => Box::new(Mock),
+        (ProviderKind::Ollama, auth_method) => {
+            let provider = Ollama::new(
+                profile.base_url.clone().unwrap_or_else(|| {
+                    fleet_snowfluff_ai::providers::ollama::DEFAULT_BASE_URL.to_string()
+                }),
+                profile.model.clone().unwrap_or_default(),
+            );
+            if auth_method == AuthMethod::Local {
+                RoutedExecution::ToolCapable(Box::new(provider))
+            } else {
+                RoutedExecution::PlainChat(Box::new(provider))
+            }
+        }
+        (ProviderKind::Mock, _) => RoutedExecution::PlainChat(Box::new(Mock)),
         (ProviderKind::OpenAi | ProviderKind::Anthropic, AuthMethod::Local) => {
             unreachable!(
                 "{:?} never has AuthMethod::Local -- only Ollama/Mock do (see AuthMethod's own \
@@ -302,6 +345,19 @@ pub(crate) fn build_provider(
             )
         }
     }
+}
+
+/// Builds a live `Box<dyn AiProvider>` for `profile` -- every existing
+/// call site only ever needs plain chat behavior today, so this stays
+/// the thin, non-tool-aware entry point; `route_provider` is the one
+/// that actually decides tool-calling capability, for whichever future
+/// caller (the Agent Loop) needs to keep it.
+pub(crate) fn build_provider(
+    credentials: &ProviderCredentials,
+    profile: &ProviderProfile,
+    resume_session_id: Option<String>,
+) -> Box<dyn AiProvider> {
+    route_provider(credentials, profile, resume_session_id).into_ai_provider()
 }
 
 /// Fetches the live model list for the (`provider`, `auth_method`)
@@ -573,5 +629,49 @@ mod tests {
         let subscription_provider =
             build_provider(&creds, &profile(ProviderKind::OpenAi, AuthMethod::Subscription), None);
         assert_eq!(subscription_provider.kind(), ProviderKind::OpenAi);
+    }
+
+    #[test]
+    fn only_ollama_local_is_tool_capable() {
+        let creds = ProviderCredentials::default();
+        let combinations = [
+            profile(ProviderKind::OpenAi, AuthMethod::ApiKey),
+            profile(ProviderKind::OpenAi, AuthMethod::Subscription),
+            profile(ProviderKind::Anthropic, AuthMethod::ApiKey),
+            profile(ProviderKind::Anthropic, AuthMethod::Subscription),
+            profile(ProviderKind::Ollama, AuthMethod::ApiKey),
+            profile(ProviderKind::Ollama, AuthMethod::Subscription),
+            profile(ProviderKind::Mock, AuthMethod::ApiKey),
+            profile(ProviderKind::Mock, AuthMethod::Local),
+        ];
+        for profile in combinations {
+            let routed = route_provider(&creds, &profile, None);
+            assert!(
+                matches!(routed, RoutedExecution::PlainChat(_)),
+                "{:?} should not be tool-capable",
+                (profile.provider, profile.auth_method)
+            );
+        }
+
+        let ollama_local = profile(ProviderKind::Ollama, AuthMethod::Local);
+        let routed = route_provider(&creds, &ollama_local, None);
+        assert!(
+            matches!(routed, RoutedExecution::ToolCapable(_)),
+            "(Ollama, Local) should be the only tool-capable combination"
+        );
+    }
+
+    #[test]
+    fn into_ai_provider_works_for_both_routed_execution_variants() {
+        let creds = ProviderCredentials::default();
+        let plain =
+            route_provider(&creds, &profile(ProviderKind::OpenAi, AuthMethod::ApiKey), None)
+                .into_ai_provider();
+        assert_eq!(plain.kind(), ProviderKind::OpenAi);
+
+        let tool_capable =
+            route_provider(&creds, &profile(ProviderKind::Ollama, AuthMethod::Local), None)
+                .into_ai_provider();
+        assert_eq!(tool_capable.kind(), ProviderKind::Ollama);
     }
 }

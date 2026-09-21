@@ -15,6 +15,7 @@ pub mod provider;
 pub mod providers;
 pub mod settings;
 pub mod task_router;
+pub mod tool_provider;
 
 pub use credentials::ProviderCredentials;
 pub use log::{LogEntry, LogRole};
@@ -28,3 +29,4 @@ pub use task_router::{
     ExecutionRoute, RoutingContext, SessionStrategy, Task, TaskRequirements, TaskRouter,
     BUNDLED_DEFAULT_TASK_ROUTER_RULES, ESCALATE_MARKER,
 };
+pub use tool_provider::{ToolCallStream, ToolCallStreamItem, ToolCallingProvider, ToolDefinition};
