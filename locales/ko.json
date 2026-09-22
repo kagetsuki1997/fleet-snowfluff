@@ -84,6 +84,12 @@
   "chat.not_ready.disabled": "AI 기능이 비활성화되어 있습니다. '설정 → AI'에서 활성화하세요.",
   "chat.not_ready.no_provider": "설정된 AI 제공자가 없습니다. '설정 → AI'에서 설정하세요.",
 
+  "tool_confirmation.heading": "도구에 권한이 필요합니다",
+  "tool_confirmation.approve_all": "모두 허용",
+  "tool_confirmation.deny_all": "모두 거부",
+  "tool_confirmation.submit": "제출",
+  "tool_confirmation.remember": "이번 세션 동안 기억하기",
+
   "language.zh_hant": "번체 중국어",
   "language.zh_hans": "간체 중국어",
   "language.zh": "중국어",

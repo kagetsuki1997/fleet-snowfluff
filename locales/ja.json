@@ -84,6 +84,12 @@
   "chat.not_ready.disabled": "AI 機能は現在無効です。「設定 → AI」で有効にしてください。",
   "chat.not_ready.no_provider": "AI プロバイダーが未設定です。「設定 → AI」で設定してください。",
 
+  "tool_confirmation.heading": "ツールに許可が必要です",
+  "tool_confirmation.approve_all": "すべて許可",
+  "tool_confirmation.deny_all": "すべて拒否",
+  "tool_confirmation.submit": "送信",
+  "tool_confirmation.remember": "このセッション中は記憶する",
+
   "language.zh_hant": "繁体字中国語",
   "language.zh_hans": "簡体字中国語",
   "language.zh": "中国語",

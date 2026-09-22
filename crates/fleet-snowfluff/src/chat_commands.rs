@@ -19,9 +19,9 @@ use fleet_snowfluff_ai::{
     detect_escalation, log::LogRole, prompt, with_task_router_rules, AemeathAgentRuntime,
     AgentRuntime, AiProvider, AiSettings, AuthMethod, ChatStream, DefaultTaskRouter,
     EscalationDecision, GetSystemContextTool, Language, ListDirectoryTool, LogEntry, Message,
-    PendingToolCall, PermissionDecider, Persona, ProfileKey, ProviderCredentials, ProviderKind,
-    ProviderProfile, ReadFileTool, ResponseLanguage, RoutingContext, RunCommandTool, Task,
-    TaskRouter, TaskRouterMode, ToolCallingProvider, ToolContext, ToolRegistry, WebSearchTool,
+    Persona, ProfileKey, ProviderCredentials, ProviderKind, ProviderProfile, ReadFileTool,
+    ResponseLanguage, RoutingContext, RunCommandTool, Task, TaskRouter, TaskRouterMode,
+    ToolCallingProvider, ToolContext, ToolRegistry, WebSearchTool,
 };
 use futures_util::StreamExt;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
@@ -49,6 +49,29 @@ pub enum UnreadKind {
     Failure,
 }
 
+/// What a session-scoped "remember this for the session" tool-call
+/// approval actually matches against on a later call
+/// (`agent-core-and-task-router`'s "Session-scoped trust for repeated
+/// tool use"). Path-less for most tools (remembering by tool name alone
+/// is enough), but a call whose own arguments carry a `"path"` field
+/// (`read_file`/`list_directory` today) folds the path in too --
+/// path-less remembering would otherwise silently trust every future
+/// path the moment any single one was approved once.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum RememberKey {
+    Tool(String),
+    ToolPath(String, String),
+}
+
+impl RememberKey {
+    pub fn for_call(tool_name: &str, arguments: &serde_json::Value) -> Self {
+        match arguments.get("path").and_then(serde_json::Value::as_str) {
+            Some(path) => RememberKey::ToolPath(tool_name.to_string(), path.to_string()),
+            None => RememberKey::Tool(tool_name.to_string()),
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct ChatRuntimeState {
     session_path: Mutex<Option<PathBuf>>,
@@ -70,6 +93,10 @@ pub struct ChatRuntimeState {
     /// (see design.md's Decisions for why this is treated differently
     /// from `PendingGeneration`, which is deliberately left alone).
     cli_sessions: Mutex<HashMap<(ConversationId, ProfileKey), ExternalSessionRef>>,
+    /// Tool calls the user has approved for the rest of the current
+    /// conversation (task 6.4) -- never persisted, cleared on the same
+    /// `new_chat_session` lifecycle as `cli_sessions`.
+    remembered_tools: Mutex<std::collections::HashSet<(ConversationId, RememberKey)>>,
 }
 
 impl ChatRuntimeState {
@@ -78,6 +105,14 @@ impl ChatRuntimeState {
     pub fn unread(&self) -> Option<UnreadKind> { *self.unread.lock().unwrap() }
 
     pub fn clear_unread(&self) { *self.unread.lock().unwrap() = None; }
+
+    pub fn is_tool_remembered(&self, conversation_id: &ConversationId, key: &RememberKey) -> bool {
+        self.remembered_tools.lock().unwrap().contains(&(conversation_id.clone(), key.clone()))
+    }
+
+    pub fn remember_tool(&self, conversation_id: ConversationId, key: RememberKey) {
+        self.remembered_tools.lock().unwrap().insert((conversation_id, key));
+    }
 }
 
 /// Called from every point where "is a generation pending" or "is
@@ -583,23 +618,6 @@ async fn stream_to_completion(
     mark_unread_unless_focused(&app, UnreadKind::Reply);
 }
 
-/// A `PermissionDecider` that denies every `Confirm`-tier call outright
-/// -- a deliberate fail-closed placeholder until Group 6's real
-/// popup-backed decider (tasks 6.2-6.4) exists, not a design decision.
-/// `Auto`-tier tools (`web_search`, `get_system_context`, an in-
-/// `project_root` `read_file`/`list_directory`) already work end to
-/// end; anything needing confirmation (an out-of-root path,
-/// `run_command`) is reported back to the model as "not permitted to
-/// run" until the real UI lands.
-struct DenyAllConfirm;
-
-#[async_trait::async_trait]
-impl PermissionDecider for DenyAllConfirm {
-    async fn decide(&self, _calls: &[PendingToolCall]) -> std::collections::HashSet<String> {
-        std::collections::HashSet::new()
-    }
-}
-
 /// Same contract as `run_generation`, but for a `ToolCapable` provider:
 /// runs `AemeathAgentRuntime` instead of a plain `chat()` stream. Text
 /// deltas stream live via the `on_text_delta` callback (see
@@ -641,6 +659,11 @@ async fn run_generation_with_tools(
         Arc::new(GetSystemContextTool),
     ]);
     let runtime = AemeathAgentRuntime::default();
+    let permission = crate::tool_confirmation::PopupPermissionDecider {
+        app: app.clone(),
+        conversation_id: conversation_id.clone(),
+        registry: &registry,
+    };
 
     let result = {
         let mut on_text_delta = |delta: &str| {
@@ -648,7 +671,7 @@ async fn run_generation_with_tools(
             channel.send(ChatEvent::Chunk { delta: delta.to_string() }).ok();
         };
         runtime
-            .run(provider.as_ref(), messages, &registry, &ctx, &DenyAllConfirm, &mut on_text_delta)
+            .run(provider.as_ref(), messages, &registry, &ctx, &permission, &mut on_text_delta)
             .await
     };
 
@@ -871,6 +894,7 @@ pub fn new_chat_session(app: AppHandle, chat_state: State<ChatRuntimeState>) {
     }
     chat_state.clear_unread();
     chat_state.cli_sessions.lock().unwrap().clear();
+    chat_state.remembered_tools.lock().unwrap().clear();
     on_chat_activity_changed(&app);
     if let Some(new_path) = chat_log_store::create_new_session(&app) {
         *chat_state.session_path.lock().unwrap() = Some(new_path);

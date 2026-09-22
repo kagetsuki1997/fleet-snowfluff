@@ -155,6 +155,19 @@ type ChatEvent =
   | { type: "done"; content: string }
   | { type: "error"; message: string };
 
+interface PendingConfirmationItem {
+  id: string;
+  tool_name: string;
+  summary: string;
+  allows_remember: boolean;
+}
+
+interface ToolConfirmationResponse {
+  id: string;
+  approved: boolean;
+  remember: boolean;
+}
+
 const UI_LANGUAGES = ["zh-hant", "zh-hans", "en", "ja", "ko"];
 
 let dict: Dictionary = {};
@@ -215,6 +228,13 @@ async function main(): Promise<void> {
   // "...", success, or failure glyph it's actually meant to show.
   if (getCurrentWindow().label === "status-bubble") {
     await mainStatusBubble();
+    return;
+  }
+  // The tool-confirmation popup shares the same entry point too
+  // (`agent-core-and-task-router`'s Group 6) -- same reason as the
+  // chat window and status bubble above.
+  if (getCurrentWindow().label === "tool-confirmation") {
+    await mainToolConfirmation();
     return;
   }
 
@@ -1027,6 +1047,78 @@ async function renderChatWindow(): Promise<void> {
   });
 
   await refresh();
+}
+
+// Built with the DOM API rather than an `innerHTML` template for the
+// per-item rows specifically -- `tool_name`/`summary` come from a tool
+// call's own arguments (model-influenced, not authored content like
+// every other rendered string in this file), so this avoids ever
+// having to escape them for HTML injection at all, and keeps a live
+// reference to each row's own checkboxes instead of re-querying by an
+// interpolated id later.
+async function mainToolConfirmation(): Promise<void> {
+  await loadDictionary();
+  const app = document.querySelector<HTMLDivElement>("#app")!;
+  const items = await invoke<PendingConfirmationItem[]>("get_pending_tool_confirmations");
+
+  app.innerHTML = `
+    <main class="container-fluid tool-confirmation-window">
+      <h3>${t("tool_confirmation.heading")}</h3>
+      <div id="tool-confirmation-list"></div>
+      <div class="tool-confirmation-actions">
+        <button type="button" id="tool-confirmation-approve-all" class="secondary">${t("tool_confirmation.approve_all")}</button>
+        <button type="button" id="tool-confirmation-deny-all" class="secondary outline">${t("tool_confirmation.deny_all")}</button>
+      </div>
+      <button type="button" id="tool-confirmation-submit">${t("tool_confirmation.submit")}</button>
+    </main>
+  `;
+
+  const list = app.querySelector<HTMLDivElement>("#tool-confirmation-list")!;
+  const rows = items.map((item) => {
+    const row = document.createElement("div");
+    row.className = "tool-confirmation-item";
+
+    const approveLabel = document.createElement("label");
+    const approveInput = document.createElement("input");
+    approveInput.type = "checkbox";
+    approveLabel.appendChild(approveInput);
+    approveLabel.appendChild(document.createTextNode(` ${item.tool_name}: ${item.summary}`));
+    row.appendChild(approveLabel);
+
+    let rememberInput: HTMLInputElement | null = null;
+    if (item.allows_remember) {
+      const rememberLabel = document.createElement("label");
+      rememberLabel.className = "remember-label";
+      rememberInput = document.createElement("input");
+      rememberInput.type = "checkbox";
+      rememberLabel.appendChild(rememberInput);
+      rememberLabel.appendChild(document.createTextNode(` ${t("tool_confirmation.remember")}`));
+      row.appendChild(rememberLabel);
+    }
+
+    list.appendChild(row);
+    return { item, approveInput, rememberInput };
+  });
+
+  app.querySelector("#tool-confirmation-approve-all")!.addEventListener("click", () => {
+    for (const row of rows) row.approveInput.checked = true;
+  });
+  app.querySelector("#tool-confirmation-deny-all")!.addEventListener("click", () => {
+    for (const row of rows) row.approveInput.checked = false;
+  });
+
+  // The window itself is closed from the Rust side once
+  // `resolve_tool_confirmations` unblocks the waiting Agent Loop
+  // (`tool_confirmation.rs`'s own `confirm_via_popup`) -- nothing to
+  // do here beyond sending the batch.
+  app.querySelector("#tool-confirmation-submit")!.addEventListener("click", () => {
+    const responses: ToolConfirmationResponse[] = rows.map(({ item, approveInput, rememberInput }) => ({
+      id: item.id,
+      approved: approveInput.checked,
+      remember: approveInput.checked && (rememberInput?.checked ?? false),
+    }));
+    void invoke("resolve_tool_confirmations", { responses });
+  });
 }
 
 main();

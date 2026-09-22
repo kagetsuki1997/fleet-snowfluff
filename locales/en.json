@@ -84,6 +84,12 @@
   "chat.not_ready.disabled": "AI features are disabled. Enable them in Settings → AI.",
   "chat.not_ready.no_provider": "No AI provider configured. Set one up in Settings → AI.",
 
+  "tool_confirmation.heading": "A tool needs your permission",
+  "tool_confirmation.approve_all": "Approve All",
+  "tool_confirmation.deny_all": "Deny All",
+  "tool_confirmation.submit": "Submit",
+  "tool_confirmation.remember": "Remember for this session",
+
   "language.zh_hant": "Traditional Chinese",
   "language.zh_hans": "Simplified Chinese",
   "language.zh": "Chinese",

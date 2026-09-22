@@ -13,6 +13,7 @@ pub mod secrets_store;
 pub mod session_domain;
 pub mod status_bubble;
 pub mod task_router_rules_store;
+pub mod tool_confirmation;
 // Pet windows on Windows render via GDI instead (platform::windows's
 // LayeredSurface) -- see that module's doc comment for why. Nothing on
 // Windows references this module at all.
@@ -90,6 +91,8 @@ pub fn run() {
             chat_commands::send_chat_message,
             chat_commands::stop_generation,
             chat_commands::new_chat_session,
+            tool_confirmation::get_pending_tool_confirmations,
+            tool_confirmation::resolve_tool_confirmations,
         ])
         .setup(|app| {
             // Always on (not just debug builds) -- otherwise a release
@@ -206,6 +209,7 @@ pub fn run() {
             app.manage(Mutex::new(credentials));
             app.manage(chat_commands::ChatRuntimeState::default());
             app.manage(chat_pause::ChatPauseState::default());
+            app.manage(tool_confirmation::ToolConfirmationState::default());
             app.manage(Mutex::<Option<tauri_plugin_updater::Update>>::new(None));
             tray::build(&app_handle)?;
             updater::spawn_startup_check(app_handle.clone());

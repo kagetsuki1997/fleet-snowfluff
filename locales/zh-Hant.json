@@ -84,6 +84,12 @@
   "chat.not_ready.disabled": "AI 功能目前已停用，請至「設定 → AI」啟用。",
   "chat.not_ready.no_provider": "尚未設定 AI 提供者，請至「設定 → AI」設定。",
 
+  "tool_confirmation.heading": "工具需要你的許可",
+  "tool_confirmation.approve_all": "全部允許",
+  "tool_confirmation.deny_all": "全部拒絕",
+  "tool_confirmation.submit": "提交",
+  "tool_confirmation.remember": "在本次對話中記住此選擇",
+
   "language.zh_hant": "繁體中文",
   "language.zh_hans": "簡體中文",
   "language.zh": "中文",
