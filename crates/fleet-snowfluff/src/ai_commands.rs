@@ -8,12 +8,12 @@
 //! command here operates on a profile identified by its `ProfileKey`
 //! rather than a bare `ProviderKind`.
 
-use std::sync::Mutex;
+use std::{path::PathBuf, sync::Mutex};
 
 use fleet_snowfluff_ai::{
     AiProvider, AiSettings, Anthropic, AuthMethod, ClaudeCodeCli, ClaudeCodeToolAccess, Codex,
     Mock, ModelInfo, Ollama, OpenAiCompatible, ProfileKey, ProviderCredentials, ProviderError,
-    ProviderKind, ProviderProfile, ToolCallingProvider,
+    ProviderKind, ProviderProfile, TaskRouterMode, ToolCallingProvider,
 };
 use tauri::{AppHandle, State};
 
@@ -52,6 +52,51 @@ pub fn get_ai_settings(
 pub fn set_ai_enabled(app: AppHandle, ai_settings: State<Mutex<AiSettings>>, enabled: bool) {
     let mut settings = ai_settings.lock().unwrap();
     settings.ai_enabled = enabled;
+    ai_config_store::save(&app, &settings);
+}
+
+/// `agent-core-and-task-router`'s Task Router `mode` setting -- `Single`
+/// (today's behavior, always `default_profile`) vs `Mix` (local model
+/// tries first, escalates complex tasks). See `task_router.rs`'s own
+/// doc comment for the routing behavior this flips; this command only
+/// persists the choice.
+#[tauri::command]
+pub fn set_task_router_mode(
+    app: AppHandle,
+    ai_settings: State<Mutex<AiSettings>>,
+    mode: TaskRouterMode,
+) {
+    let mut settings = ai_settings.lock().unwrap();
+    settings.task_router_mode = mode;
+    ai_config_store::save(&app, &settings);
+}
+
+/// The native-tool auto-zone root (design.md's "`read_file`/
+/// `list_directory`: the configured project directory is an auto-zone,
+/// not a hard boundary"). An empty string clears it back to `None`
+/// (the frontend's "not configured" state) rather than persisting an
+/// empty path, matching `set_profile_model`/`set_profile_base_url`'s
+/// own empty-string-means-unset convention.
+#[tauri::command]
+pub fn set_project_root(app: AppHandle, ai_settings: State<Mutex<AiSettings>>, path: String) {
+    let mut settings = ai_settings.lock().unwrap();
+    settings.project_root = (!path.is_empty()).then(|| PathBuf::from(path));
+    ai_config_store::save(&app, &settings);
+}
+
+/// Persists the whole `ClaudeCodeToolAccess` struct at once (`Group 7`'s
+/// per-tool `--allowedTools`/`--disallowedTools` split) -- the frontend
+/// already holds the full current value from `get_ai_settings`'s
+/// snapshot and sends it back with one field flipped, so there's no
+/// need for a dozen single-tool commands.
+#[tauri::command]
+pub fn set_claude_code_tool_access(
+    app: AppHandle,
+    ai_settings: State<Mutex<AiSettings>>,
+    tool_access: ClaudeCodeToolAccess,
+) {
+    let mut settings = ai_settings.lock().unwrap();
+    settings.claude_code_tool_access = tool_access;
     ai_config_store::save(&app, &settings);
 }
 

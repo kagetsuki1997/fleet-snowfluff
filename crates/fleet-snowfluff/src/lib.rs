@@ -48,6 +48,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         // `.macos_launcher(...)` is a macOS-only builder method (its
         // default, LaunchAgent, is already what we want) -- omitted
         // rather than #[cfg]-gated, since calling it isn't needed.
@@ -77,6 +78,9 @@ pub fn run() {
             commands::install_update,
             ai_commands::get_ai_settings,
             ai_commands::set_ai_enabled,
+            ai_commands::set_task_router_mode,
+            ai_commands::set_project_root,
+            ai_commands::set_claude_code_tool_access,
             ai_commands::enable_profile,
             ai_commands::disable_profile,
             ai_commands::set_default_profile,

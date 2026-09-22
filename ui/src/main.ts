@@ -2,7 +2,8 @@ import { Channel, invoke } from "@tauri-apps/api/core";
 import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { open } from "@tauri-apps/plugin-shell";
+import { open as openExternalLink } from "@tauri-apps/plugin-shell";
+import { open as openFolderPicker } from "@tauri-apps/plugin-dialog";
 import "@picocss/pico/css/pico.min.css";
 import "./style.css";
 
@@ -52,10 +53,49 @@ interface ProviderProfile {
   base_url: string | null;
 }
 
+type TaskRouterMode = "single" | "mix";
+type NativeToolAccess = "auto" | "deny";
+
+// Mirrors `ClaudeCodeToolAccess` (`crates/fleet-snowfluff-ai/src/settings.rs`) --
+// field names are its Rust field names verbatim (no `rename_all`, so
+// `snake_case` round-trips as-is).
+interface ClaudeCodeToolAccess {
+  read: NativeToolAccess;
+  glob: NativeToolAccess;
+  grep: NativeToolAccess;
+  web_search: NativeToolAccess;
+  web_fetch: NativeToolAccess;
+  write: NativeToolAccess;
+  edit: NativeToolAccess;
+  bash: NativeToolAccess;
+  notebook_edit: NativeToolAccess;
+  task: NativeToolAccess;
+  slash_command: NativeToolAccess;
+  todo_write: NativeToolAccess;
+}
+
+const CLAUDE_CODE_TOOL_ACCESS_KEYS = [
+  "read",
+  "glob",
+  "grep",
+  "web_search",
+  "web_fetch",
+  "write",
+  "edit",
+  "bash",
+  "notebook_edit",
+  "task",
+  "slash_command",
+  "todo_write",
+] as const satisfies readonly (keyof ClaudeCodeToolAccess)[];
+
 interface AiSettings {
   ai_enabled: boolean;
   enabled_profiles: ProviderProfile[];
   default_profile: ProfileKey | null;
+  task_router_mode: TaskRouterMode;
+  project_root: string | null;
+  claude_code_tool_access: ClaudeCodeToolAccess;
 }
 
 interface AiSettingsSnapshot {
@@ -487,6 +527,18 @@ function renderAiPanel(panel: HTMLElement, snapshot: AiSettingsSnapshot): void {
         .join("")
     : `<option value="">${t("ai.default.none_enabled_option")}</option>`;
 
+  const taskRouterModeOptionsHtml = (["single", "mix"] as const satisfies TaskRouterMode[])
+    .map(
+      (mode) =>
+        `<option value="${mode}" ${mode === settings.task_router_mode ? "selected" : ""}>${t(`ai.task_router_mode.${mode}`)}</option>`,
+    )
+    .join("");
+
+  const toolAccessRowsHtml = CLAUDE_CODE_TOOL_ACCESS_KEYS.map(
+    (key) =>
+      `<label class="field-row ai-tool-access-row"><span>${t(`ai.tool_access.${key}`)}</span><input type="checkbox" class="ai-tool-access-checkbox" data-tool="${key}" ${settings.claude_code_tool_access[key] === "auto" ? "checked" : ""} /></label>`,
+  ).join("");
+
   panel.innerHTML = `
     ${field(t("ai.enabled_label"), `<input type="checkbox" id="ai-enabled-checkbox" ${settings.ai_enabled ? "checked" : ""} />`)}
     <fieldset class="ai-section">
@@ -496,6 +548,22 @@ function renderAiPanel(panel: HTMLElement, snapshot: AiSettingsSnapshot): void {
     <fieldset class="ai-section">
       <legend>${t("ai.default_section_title")}</legend>
       ${field(t("ai.default_label"), `<select id="ai-default-select" ${enabledSlots.length ? "" : "disabled"}>${defaultOptionsHtml}</select>`)}
+    </fieldset>
+    <fieldset class="ai-section">
+      <legend>${t("ai.task_router_section_title")}</legend>
+      ${field(t("ai.task_router_mode_label"), `<select id="ai-task-router-mode-select">${taskRouterModeOptionsHtml}</select>`)}
+    </fieldset>
+    <fieldset class="ai-section">
+      <legend>${t("ai.project_root_section_title")}</legend>
+      <p class="hint">${t("ai.project_root.hint")}</p>
+      ${field(t("ai.project_root_label"), `<span id="ai-project-root-value">${settings.project_root ?? t("ai.project_root.not_configured")}</span>`)}
+      <button type="button" id="ai-project-root-choose-button" class="secondary">${t("ai.project_root.choose_button")}</button>
+      <button type="button" id="ai-project-root-clear-button" class="secondary" ${settings.project_root ? "" : "disabled"}>${t("ai.project_root.clear_button")}</button>
+    </fieldset>
+    <fieldset class="ai-section">
+      <legend>${t("ai.tool_access_section_title")}</legend>
+      <p class="hint">${t("ai.tool_access.hint")}</p>
+      ${toolAccessRowsHtml}
     </fieldset>
     ${persona_warning ? `<p class="error">${t("ai.persona_warning", { error: persona_warning })}</p>` : ""}
   `;
@@ -516,6 +584,39 @@ function renderAiPanel(panel: HTMLElement, snapshot: AiSettingsSnapshot): void {
       defaultSelect.value = settings.default_profile ? slotKey(settings.default_profile) : "";
     await renderAi();
   });
+
+  panel
+    .querySelector<HTMLSelectElement>("#ai-task-router-mode-select")!
+    .addEventListener("change", (e) => {
+      invoke("set_task_router_mode", { mode: (e.target as HTMLSelectElement).value });
+    });
+
+  panel
+    .querySelector<HTMLButtonElement>("#ai-project-root-choose-button")!
+    .addEventListener("click", async () => {
+      const selected = await openFolderPicker({ directory: true, multiple: false });
+      if (!selected) return;
+      await invoke("set_project_root", { path: selected });
+      await renderAi();
+    });
+
+  panel
+    .querySelector<HTMLButtonElement>("#ai-project-root-clear-button")!
+    .addEventListener("click", async () => {
+      await invoke("set_project_root", { path: "" });
+      await renderAi();
+    });
+
+  for (const checkbox of panel.querySelectorAll<HTMLInputElement>(".ai-tool-access-checkbox")) {
+    checkbox.addEventListener("change", () => {
+      const key = checkbox.dataset.tool as keyof ClaudeCodeToolAccess;
+      const toolAccess: ClaudeCodeToolAccess = {
+        ...settings.claude_code_tool_access,
+        [key]: checkbox.checked ? "auto" : "deny",
+      };
+      invoke("set_claude_code_tool_access", { toolAccess });
+    });
+  }
 
   for (const slot of PROFILE_SLOTS) {
     wireProfileRow(panel, slot);
@@ -863,7 +964,7 @@ async function renderAbout(): Promise<void> {
   for (const link of panel.querySelectorAll<HTMLAnchorElement>("a.external-link")) {
     link.addEventListener("click", (e) => {
       e.preventDefault();
-      open(link.href);
+      openExternalLink(link.href);
     });
   }
 }
@@ -1112,11 +1213,13 @@ async function mainToolConfirmation(): Promise<void> {
   // (`tool_confirmation.rs`'s own `confirm_via_popup`) -- nothing to
   // do here beyond sending the batch.
   app.querySelector("#tool-confirmation-submit")!.addEventListener("click", () => {
-    const responses: ToolConfirmationResponse[] = rows.map(({ item, approveInput, rememberInput }) => ({
-      id: item.id,
-      approved: approveInput.checked,
-      remember: approveInput.checked && (rememberInput?.checked ?? false),
-    }));
+    const responses: ToolConfirmationResponse[] = rows.map(
+      ({ item, approveInput, rememberInput }) => ({
+        id: item.id,
+        approved: approveInput.checked,
+        remember: approveInput.checked && (rememberInput?.checked ?? false),
+      }),
+    );
     void invoke("resolve_tool_confirmations", { responses });
   });
 }
