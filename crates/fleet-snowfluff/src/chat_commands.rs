@@ -17,11 +17,11 @@ use std::{
 
 use fleet_snowfluff_ai::{
     detect_escalation, log::LogRole, prompt, with_task_router_rules, AemeathAgentRuntime,
-    AgentRuntime, AiProvider, AiSettings, AuthMethod, ChatStream, DefaultTaskRouter,
-    EscalationDecision, GetSystemContextTool, Language, ListDirectoryTool, LogEntry, Message,
-    Persona, ProfileKey, ProviderCredentials, ProviderKind, ProviderProfile, ReadFileTool,
-    ResponseLanguage, RoutingContext, RunCommandTool, Task, TaskRouter, TaskRouterMode,
-    ToolCallingProvider, ToolContext, ToolRegistry, WebSearchTool,
+    AgentRuntime, AiProvider, AiSettings, AuthMethod, ChatStream, ClaudeCodeToolAccess,
+    DefaultTaskRouter, EscalationDecision, GetSystemContextTool, Language, ListDirectoryTool,
+    LogEntry, Message, Persona, ProfileKey, ProviderCredentials, ProviderKind, ProviderProfile,
+    ReadFileTool, ResponseLanguage, RoutingContext, RunCommandTool, Task, TaskRouter,
+    TaskRouterMode, ToolCallingProvider, ToolContext, ToolRegistry, WebSearchTool,
 };
 use futures_util::StreamExt;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
@@ -342,6 +342,7 @@ pub async fn send_chat_message(
             messages: default_messages,
             credentials: creds_snapshot.clone(),
             project_root: settings_snapshot.project_root.clone(),
+            claude_code_tool_access: settings_snapshot.claude_code_tool_access,
         };
         tokio::spawn(async move {
             run_generation_mix_local(
@@ -367,12 +368,14 @@ pub async fn send_chat_message(
             .get(&(conversation_id.clone(), profile_key))
             .map(|r| r.0.clone());
         let project_root = settings_snapshot.project_root.clone();
+        let claude_code_tool_access = settings_snapshot.claude_code_tool_access;
         tokio::spawn(async move {
             run_generation_routed(
                 task_app,
                 creds_snapshot,
                 default_profile,
                 resume_session_id,
+                claude_code_tool_access,
                 project_root,
                 execution_id,
                 conversation_id,
@@ -400,6 +403,7 @@ struct FallbackAttempt {
     messages: Vec<Message>,
     credentials: ProviderCredentials,
     project_root: Option<PathBuf>,
+    claude_code_tool_access: ClaudeCodeToolAccess,
 }
 
 /// Retries the message against `fallback.profile` -- the destination
@@ -433,6 +437,7 @@ async fn run_generation_fallback(
         fallback.credentials,
         fallback.profile,
         resume_session_id,
+        fallback.claude_code_tool_access,
         fallback.project_root,
         execution_id,
         conversation_id,
@@ -460,6 +465,7 @@ async fn run_generation_routed(
     credentials: ProviderCredentials,
     profile: ProviderProfile,
     resume_session_id: Option<String>,
+    claude_code_tool_access: ClaudeCodeToolAccess,
     project_root: Option<PathBuf>,
     execution_id: ExecutionId,
     conversation_id: ConversationId,
@@ -469,7 +475,12 @@ async fn run_generation_routed(
     session_path: PathBuf,
 ) {
     let profile_key = profile.key();
-    match ai_commands::route_provider(&credentials, &profile, resume_session_id) {
+    match ai_commands::route_provider(
+        &credentials,
+        &profile,
+        resume_session_id,
+        &claude_code_tool_access,
+    ) {
         RoutedExecution::PlainChat(provider) => {
             run_generation(
                 app,
@@ -734,7 +745,16 @@ async fn run_generation_mix_local(
     // No `cli_sessions` lookup here: Ollama has no resumable-session
     // concept (`AiProvider::session_id`'s default `None`, never
     // overridden), so a mix-mode local attempt is always a fresh call.
-    let local_provider = ai_commands::build_provider(&credentials, &local_profile, None);
+    // `claude_code_tool_access` is read off `fallback` purely because
+    // it's already in scope there -- this call is always Ollama, so the
+    // value is provably unused by it (see `route_provider`'s own doc
+    // comment).
+    let local_provider = ai_commands::build_provider(
+        &credentials,
+        &local_profile,
+        None,
+        &fallback.claude_code_tool_access,
+    );
     let mut stream = match local_provider.chat(local_messages).await {
         Ok(stream) => stream,
         Err(_) => {

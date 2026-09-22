@@ -28,9 +28,13 @@
 //! not a coding-agent session -- verified live during design: without
 //! this, a trivial reply picked up ~13K tokens of unrelated
 //! project-hook context; with it, ~2.8K (baseline harness overhead that
-//! doesn't fully go away, see design.md Risks). `--disallowedTools`
-//! blocks the built-in file/shell/task tools so a chat reply can't
-//! wander into agentic side effects.
+//! doesn't fully go away, see design.md Risks). `--allowedTools`/
+//! `--disallowedTools`, built from the user-adjustable
+//! `ClaudeCodeToolAccess` setting (`agent-core-and-task-router`'s
+//! Group 7 -- replaces an earlier blanket `DISALLOWED_TOOLS` constant),
+//! keep a chat reply from wandering into agentic side effects while
+//! still letting read-only tools (including Claude's own first-party
+//! web search) through by default.
 
 use std::{
     process::Stdio,
@@ -49,13 +53,8 @@ use crate::{
     message::{Message, ModelInfo, ProviderError, ProviderKind, Role, StreamChunk},
     provider::{AiProvider, ChatStream},
     providers::{anthropic_stream_event, cli_process},
+    settings::ClaudeCodeToolAccess,
 };
-
-/// Built-in tools a plain chat reply has no business reaching for.
-/// `SlashCommand` is included because `-p` mode still resolves
-/// `/skill-name` invocations otherwise.
-const DISALLOWED_TOOLS: &str =
-    "Bash,Read,Write,Edit,Glob,Grep,WebFetch,WebSearch,NotebookEdit,Task,TodoWrite,SlashCommand";
 
 #[derive(Debug, Deserialize)]
 struct AuthStatus {
@@ -113,14 +112,19 @@ async fn check_logged_in() -> Result<(), ProviderError> {
 pub struct ClaudeCodeCli {
     pub model: Option<String>,
     session_id: Arc<Mutex<Option<String>>>,
+    tool_access: ClaudeCodeToolAccess,
 }
 
 impl ClaudeCodeCli {
     /// `resume_session_id` is the id returned by a prior instance's
     /// `session_id()`, if any -- supplied by the app crate, never
     /// stored by this crate itself.
-    pub fn new(model: Option<String>, resume_session_id: Option<String>) -> Self {
-        Self { model, session_id: Arc::new(Mutex::new(resume_session_id)) }
+    pub fn new(
+        model: Option<String>,
+        resume_session_id: Option<String>,
+        tool_access: ClaudeCodeToolAccess,
+    ) -> Self {
+        Self { model, session_id: Arc::new(Mutex::new(resume_session_id)), tool_access }
     }
 
     /// The Claude-CLI session id captured from this instance's most
@@ -250,33 +254,68 @@ fn looks_resume_related(err: &ProviderError) -> bool {
     lower.contains("resum") || lower.contains("session")
 }
 
+/// Builds the full `claude -p` argument list -- a pure function,
+/// separated from the actual spawn, specifically so the
+/// `--allowedTools`/`--disallowedTools` construction (task 7.1) is
+/// directly testable without spawning a real process.
+fn build_args(
+    model: Option<&str>,
+    resume: Option<&str>,
+    system_prompt: &str,
+    prompt: &str,
+    tool_access: &ClaudeCodeToolAccess,
+) -> Vec<String> {
+    let mut args = vec![
+        "-p".to_string(),
+        "--system-prompt".to_string(),
+        system_prompt.to_string(),
+        "--strict-mcp-config".to_string(),
+        "--setting-sources".to_string(),
+        String::new(),
+        "--output-format".to_string(),
+        "stream-json".to_string(),
+        "--include-partial-messages".to_string(),
+        "--verbose".to_string(),
+    ];
+    // Only passed when non-empty -- an explicit `--allowedTools ""` (or
+    // `--disallowedTools ""`) is an unverified edge case not worth
+    // risking when simply omitting the flag has an unambiguous meaning
+    // (this tier has nothing in it).
+    let allowed = tool_access.allowed_tools();
+    if !allowed.is_empty() {
+        args.push("--allowedTools".to_string());
+        args.push(allowed);
+    }
+    let disallowed = tool_access.disallowed_tools();
+    if !disallowed.is_empty() {
+        args.push("--disallowedTools".to_string());
+        args.push(disallowed);
+    }
+    if let Some(model) = model {
+        args.push("--model".to_string());
+        args.push(model.to_string());
+    }
+    if let Some(id) = resume {
+        args.push("--resume".to_string());
+        args.push(id.to_string());
+    }
+    args.push(prompt.to_string());
+    args
+}
+
 async fn spawn(
     model: Option<&str>,
     resume: Option<&str>,
     system_prompt: &str,
     prompt: &str,
+    tool_access: &ClaudeCodeToolAccess,
 ) -> std::io::Result<tokio::process::Child> {
-    let mut command = Command::new("claude");
-    command
-        .arg("-p")
-        .args(["--system-prompt", system_prompt])
-        .args(["--disallowedTools", DISALLOWED_TOOLS])
-        .arg("--strict-mcp-config")
-        .args(["--setting-sources", ""])
-        .args(["--output-format", "stream-json"])
-        .arg("--include-partial-messages")
-        .arg("--verbose")
+    Command::new("claude")
+        .args(build_args(model, resume, system_prompt, prompt, tool_access))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    if let Some(model) = model {
-        command.args(["--model", model]);
-    }
-    if let Some(id) = resume {
-        command.args(["--resume", id]);
-    }
-    command.arg(prompt);
-    command.spawn()
+        .stderr(Stdio::piped())
+        .spawn()
 }
 
 /// Reads one line from `lines`, mapping a read error to a
@@ -342,9 +381,10 @@ impl AiProvider for ClaudeCodeCli {
         let model = self.model.clone();
         let session_id_slot = self.session_id.clone();
 
-        let mut child = spawn(model.as_deref(), resume.as_deref(), &system_prompt, &prompt)
-            .await
-            .map_err(|e| cli_process::map_spawn_error("claude", e))?;
+        let mut child =
+            spawn(model.as_deref(), resume.as_deref(), &system_prompt, &prompt, &self.tool_access)
+                .await
+                .map_err(|e| cli_process::map_spawn_error("claude", e))?;
         let mut lines =
             BufReader::new(child.stdout.take().expect("stdout was piped by `spawn`")).lines();
 
@@ -360,9 +400,15 @@ impl AiProvider for ClaudeCodeCli {
                         let _ = child.kill().await;
                         let _ = child.wait().await;
                         *session_id_slot.lock().unwrap() = None;
-                        child = spawn(model.as_deref(), None, &system_prompt, &prompt)
-                            .await
-                            .map_err(|e| cli_process::map_spawn_error("claude", e))?;
+                        child = spawn(
+                            model.as_deref(),
+                            None,
+                            &system_prompt,
+                            &prompt,
+                            &self.tool_access,
+                        )
+                        .await
+                        .map_err(|e| cli_process::map_spawn_error("claude", e))?;
                         lines = BufReader::new(
                             child.stdout.take().expect("stdout was piped by `spawn`"),
                         )
@@ -447,6 +493,7 @@ const CLAUDE_MODEL_ALIASES: &[(&str, &str)] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::settings::NativeToolAccess;
 
     #[test]
     fn extracts_system_prompt_and_latest_user_message() {
@@ -458,6 +505,52 @@ mod tests {
         ];
         assert_eq!(system_prompt(&messages), "be brief");
         assert_eq!(latest_user_message(&messages), "second");
+    }
+
+    // -- task 7.1: `build_args`'s `--allowedTools`/`--disallowedTools` --
+
+    fn arg_value<'a>(args: &'a [String], flag: &str) -> Option<&'a str> {
+        args.iter().position(|a| a == flag).map(|i| args[i + 1].as_str())
+    }
+
+    #[test]
+    fn build_args_matches_the_default_allow_deny_split() {
+        let args = build_args(None, None, "persona", "hi", &ClaudeCodeToolAccess::default());
+        assert_eq!(arg_value(&args, "--allowedTools"), Some("Read,Glob,Grep,WebSearch,WebFetch"));
+        assert_eq!(
+            arg_value(&args, "--disallowedTools"),
+            Some("Write,Edit,Bash,NotebookEdit,Task,SlashCommand,TodoWrite")
+        );
+    }
+
+    #[test]
+    fn build_args_reflects_a_user_adjusted_setting() {
+        let access = ClaudeCodeToolAccess {
+            bash: NativeToolAccess::Auto,
+            web_search: NativeToolAccess::Deny,
+            ..ClaudeCodeToolAccess::default()
+        };
+        let args = build_args(None, None, "persona", "hi", &access);
+        let allowed = arg_value(&args, "--allowedTools").unwrap();
+        let disallowed = arg_value(&args, "--disallowedTools").unwrap();
+        assert!(allowed.split(',').any(|t| t == "Bash"), "Bash must move into allowed: {allowed}");
+        assert!(!allowed.contains("WebSearch"), "WebSearch must leave allowed: {allowed}");
+        assert!(disallowed.split(',').any(|t| t == "WebSearch"));
+        assert!(!disallowed.contains("Bash"));
+    }
+
+    #[test]
+    fn build_args_includes_model_resume_and_the_trailing_prompt() {
+        let args = build_args(
+            Some("claude-sonnet-5"),
+            Some("session-123"),
+            "persona",
+            "hello there",
+            &ClaudeCodeToolAccess::default(),
+        );
+        assert_eq!(arg_value(&args, "--model"), Some("claude-sonnet-5"));
+        assert_eq!(arg_value(&args, "--resume"), Some("session-123"));
+        assert_eq!(args.last().map(String::as_str), Some("hello there"));
     }
 
     // -- Literal fixtures captured live this session from
@@ -577,7 +670,7 @@ mod tests {
     async fn claude_code_cli_live_two_turn_session_resume() {
         use futures_util::StreamExt;
 
-        let first = ClaudeCodeCli::new(None, None);
+        let first = ClaudeCodeCli::new(None, None, ClaudeCodeToolAccess::default());
         let mut stream = first
             .chat(vec![
                 Message::system("You are a cheerful desktop pet. Reply in one short sentence."),
@@ -593,7 +686,7 @@ mod tests {
         let session_id = first.session_id();
         assert!(session_id.is_some(), "expected a session id to be captured from the live stream");
 
-        let second = ClaudeCodeCli::new(None, session_id.clone());
+        let second = ClaudeCodeCli::new(None, session_id.clone(), ClaudeCodeToolAccess::default());
         let mut stream = second
             .chat(vec![
                 Message::system("You are a cheerful desktop pet. Reply in one short sentence."),
@@ -643,7 +736,10 @@ mod tests {
 
     #[tokio::test]
     async fn list_models_offers_the_known_aliases_not_an_empty_list() {
-        let models = ClaudeCodeCli::new(None, None).list_models().await.unwrap();
+        let models = ClaudeCodeCli::new(None, None, ClaudeCodeToolAccess::default())
+            .list_models()
+            .await
+            .unwrap();
         assert!(!models.is_empty(), "settings UI needs something to show in the model picker");
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert!(ids.contains(&"sonnet"));

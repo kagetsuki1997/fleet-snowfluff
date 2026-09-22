@@ -59,6 +59,136 @@ pub enum TaskRouterMode {
     Mix,
 }
 
+/// Whether one Claude Code built-in tool is reachable from a `claude -p`
+/// call at all (`agent-core-and-task-router`'s Group 7 -- replaces the
+/// previous blanket `DISALLOWED_TOOLS` constant with a per-tool,
+/// user-adjustable setting). Deliberately only two values, not a third
+/// `Confirm` -- `claude_code_cli.rs`'s `spawn()` already closes stdin
+/// and has no channel to answer a live prompt through even if
+/// `--permission-mode manual` works headless (unverified), so "confirm"
+/// was never a real option for these CLI-owned tools to begin with; see
+/// design.md's Risks for the full reasoning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeToolAccess {
+    Auto,
+    Deny,
+}
+
+/// Per-tool `claude -p` access, one field per real Claude Code built-in
+/// tool name (`claude -p --help`'s own tool list). Read-only,
+/// side-effect-free tools default to `Auto` (`Read`/`Glob`/`Grep`/
+/// `WebSearch`/`WebFetch` -- the latter two moved into auto after
+/// confirming Claude Code's own `WebSearch` is Anthropic's first-party
+/// server-side tool, same risk tier as the other three); everything
+/// that can write, execute, or orchestrate further work defaults to
+/// `Deny`. `TodoWrite` is included even though design.md's own summary
+/// bullet only lists six deny-by-default tools -- it was already part
+/// of the original blanket `DISALLOWED_TOOLS` list this setting
+/// replaces, and a plain persona reply has no more business tracking a
+/// todo list than it does running a shell command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ClaudeCodeToolAccess {
+    #[serde(default = "NativeToolAccess::auto")]
+    pub read: NativeToolAccess,
+    #[serde(default = "NativeToolAccess::auto")]
+    pub glob: NativeToolAccess,
+    #[serde(default = "NativeToolAccess::auto")]
+    pub grep: NativeToolAccess,
+    #[serde(default = "NativeToolAccess::auto")]
+    pub web_search: NativeToolAccess,
+    #[serde(default = "NativeToolAccess::auto")]
+    pub web_fetch: NativeToolAccess,
+    #[serde(default = "NativeToolAccess::deny")]
+    pub write: NativeToolAccess,
+    #[serde(default = "NativeToolAccess::deny")]
+    pub edit: NativeToolAccess,
+    #[serde(default = "NativeToolAccess::deny")]
+    pub bash: NativeToolAccess,
+    #[serde(default = "NativeToolAccess::deny")]
+    pub notebook_edit: NativeToolAccess,
+    #[serde(default = "NativeToolAccess::deny")]
+    pub task: NativeToolAccess,
+    #[serde(default = "NativeToolAccess::deny")]
+    pub slash_command: NativeToolAccess,
+    #[serde(default = "NativeToolAccess::deny")]
+    pub todo_write: NativeToolAccess,
+}
+
+impl NativeToolAccess {
+    // Named functions (rather than inlining `NativeToolAccess::Auto` as
+    // a `#[serde(default = "...")]` path directly) because serde's
+    // `default = "..."` attribute requires a path to a fn, not an enum
+    // variant constructor.
+    fn auto() -> Self { NativeToolAccess::Auto }
+
+    fn deny() -> Self { NativeToolAccess::Deny }
+}
+
+impl Default for ClaudeCodeToolAccess {
+    fn default() -> Self {
+        Self {
+            read: NativeToolAccess::Auto,
+            glob: NativeToolAccess::Auto,
+            grep: NativeToolAccess::Auto,
+            web_search: NativeToolAccess::Auto,
+            web_fetch: NativeToolAccess::Auto,
+            write: NativeToolAccess::Deny,
+            edit: NativeToolAccess::Deny,
+            bash: NativeToolAccess::Deny,
+            notebook_edit: NativeToolAccess::Deny,
+            task: NativeToolAccess::Deny,
+            slash_command: NativeToolAccess::Deny,
+            todo_write: NativeToolAccess::Deny,
+        }
+    }
+}
+
+impl ClaudeCodeToolAccess {
+    /// Real Claude Code tool names (`claude -p --help`'s own
+    /// capitalization) paired with this setting's current value, in a
+    /// fixed order -- the one place the name/field mapping is spelled
+    /// out, so `allowed_tools`/`disallowed_tools` can't drift apart.
+    fn entries(&self) -> [(&'static str, NativeToolAccess); 12] {
+        [
+            ("Read", self.read),
+            ("Glob", self.glob),
+            ("Grep", self.grep),
+            ("WebSearch", self.web_search),
+            ("WebFetch", self.web_fetch),
+            ("Write", self.write),
+            ("Edit", self.edit),
+            ("Bash", self.bash),
+            ("NotebookEdit", self.notebook_edit),
+            ("Task", self.task),
+            ("SlashCommand", self.slash_command),
+            ("TodoWrite", self.todo_write),
+        ]
+    }
+
+    /// A comma-joined `--allowedTools` value listing every `Auto` tool,
+    /// empty if none are.
+    pub fn allowed_tools(&self) -> String {
+        self.entries()
+            .into_iter()
+            .filter(|(_, access)| *access == NativeToolAccess::Auto)
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    /// A comma-joined `--disallowedTools` value listing every `Deny`
+    /// tool, empty if none are.
+    pub fn disallowed_tools(&self) -> String {
+        self.entries()
+            .into_iter()
+            .filter(|(_, access)| *access == NativeToolAccess::Deny)
+            .map(|(name, _)| name)
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
 /// Identifies a profile by what the user actually configured --
 /// provider brand plus auth method -- rather than an arbitrary
 /// generated ID. There is never a reason to have two profiles with the
@@ -169,6 +299,12 @@ pub struct AiSettings {
     /// per-conversation, matching `default_profile`'s own scope.
     #[serde(default)]
     pub project_root: Option<PathBuf>,
+    /// Per-tool `claude -p` access for the Anthropic/Subscription
+    /// profile (`agent-core-and-task-router`'s Group 7) -- global, not
+    /// per-profile, since there is only ever one Claude Code CLI
+    /// profile slot today (mirrors `project_root`'s own reasoning).
+    #[serde(default)]
+    pub claude_code_tool_access: ClaudeCodeToolAccess,
 }
 
 impl AiSettings {
@@ -222,6 +358,7 @@ fn migrate_legacy_active_provider(obj: &serde_json::Map<String, Value>) -> AiSet
             acknowledged_disclosures: vec![],
             task_router_mode: TaskRouterMode::default(),
             project_root: None,
+            claude_code_tool_access: ClaudeCodeToolAccess::default(),
         };
     };
 
@@ -254,6 +391,7 @@ fn migrate_legacy_active_provider(obj: &serde_json::Map<String, Value>) -> AiSet
         acknowledged_disclosures: if disclosure_acknowledged { vec![key] } else { vec![] },
         task_router_mode: TaskRouterMode::default(),
         project_root: None,
+        claude_code_tool_access: ClaudeCodeToolAccess::default(),
     }
 }
 
@@ -309,6 +447,16 @@ pub fn sanitize(raw: &Value) -> AiSettings {
         _ => None,
     });
 
+    // Each field has its own `#[serde(default = ...)]`, so a partial
+    // object (e.g. only `{"bash": "auto"}` present) fills in every
+    // other field with its own correct default rather than falling
+    // back to `ClaudeCodeToolAccess::default()` wholesale -- same
+    // degrades-gracefully philosophy as every other field here.
+    let claude_code_tool_access = obj
+        .get("claude_code_tool_access")
+        .and_then(|v| serde_json::from_value::<ClaudeCodeToolAccess>(v.clone()).ok())
+        .unwrap_or_default();
+
     AiSettings {
         ai_enabled,
         enabled_profiles,
@@ -316,6 +464,7 @@ pub fn sanitize(raw: &Value) -> AiSettings {
         acknowledged_disclosures,
         task_router_mode,
         project_root,
+        claude_code_tool_access,
     }
 }
 
@@ -390,6 +539,59 @@ mod tests {
     fn project_root_of_the_wrong_json_type_falls_back_to_none_not_a_crash() {
         let raw = json!({ "enabled_profiles": [], "project_root": 12345 });
         assert_eq!(sanitize(&raw).project_root, None);
+    }
+
+    // -- `ClaudeCodeToolAccess` (agent-core-and-task-router Group 7) --
+
+    #[test]
+    fn claude_code_tool_access_default_matches_the_designed_split() {
+        let access = ClaudeCodeToolAccess::default();
+        assert_eq!(access.read, NativeToolAccess::Auto);
+        assert_eq!(access.glob, NativeToolAccess::Auto);
+        assert_eq!(access.grep, NativeToolAccess::Auto);
+        assert_eq!(access.web_search, NativeToolAccess::Auto);
+        assert_eq!(access.web_fetch, NativeToolAccess::Auto);
+        assert_eq!(access.write, NativeToolAccess::Deny);
+        assert_eq!(access.edit, NativeToolAccess::Deny);
+        assert_eq!(access.bash, NativeToolAccess::Deny);
+        assert_eq!(access.notebook_edit, NativeToolAccess::Deny);
+        assert_eq!(access.task, NativeToolAccess::Deny);
+        assert_eq!(access.slash_command, NativeToolAccess::Deny);
+        assert_eq!(access.todo_write, NativeToolAccess::Deny);
+    }
+
+    #[test]
+    fn claude_code_tool_access_default_builds_the_expected_cli_argument_strings() {
+        let access = ClaudeCodeToolAccess::default();
+        assert_eq!(access.allowed_tools(), "Read,Glob,Grep,WebSearch,WebFetch");
+        assert_eq!(
+            access.disallowed_tools(),
+            "Write,Edit,Bash,NotebookEdit,Task,SlashCommand,TodoWrite"
+        );
+    }
+
+    #[test]
+    fn claude_code_tool_access_defaults_when_missing_from_config() {
+        let raw = json!({ "enabled_profiles": [] });
+        assert_eq!(sanitize(&raw).claude_code_tool_access, ClaudeCodeToolAccess::default());
+    }
+
+    #[test]
+    fn claude_code_tool_access_partial_override_keeps_every_other_fields_default() {
+        // Only `bash` is set explicitly -- every other field must still
+        // resolve to its own correct default (`Auto` for the read-only
+        // ones, `Deny` for the rest), not a blanket fallback.
+        let raw = json!({ "enabled_profiles": [], "claude_code_tool_access": { "bash": "auto" } });
+        let access = sanitize(&raw).claude_code_tool_access;
+        assert_eq!(access.bash, NativeToolAccess::Auto);
+        assert_eq!(access.read, NativeToolAccess::Auto);
+        assert_eq!(access.write, NativeToolAccess::Deny);
+    }
+
+    #[test]
+    fn claude_code_tool_access_of_the_wrong_json_type_falls_back_to_the_full_default() {
+        let raw = json!({ "enabled_profiles": [], "claude_code_tool_access": "nonsense" });
+        assert_eq!(sanitize(&raw).claude_code_tool_access, ClaudeCodeToolAccess::default());
     }
 
     #[test]
@@ -531,6 +733,7 @@ mod tests {
             acknowledged_disclosures: vec![key],
             task_router_mode: TaskRouterMode::Mix,
             project_root: Some(PathBuf::from("/home/user/my-project")),
+            claude_code_tool_access: ClaudeCodeToolAccess::default(),
         };
 
         let json_str = to_json_string(&settings);

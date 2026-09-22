@@ -42,6 +42,18 @@
 //! the same warm-session model as `ClaudeCodeCli`, not the "maybe
 //! Codex doesn't support this" asymmetry design.md originally left as
 //! an open question.
+//!
+//! **No per-tool allow-list (`agent-core-and-task-router` Group 7).**
+//! Unlike `ClaudeCodeCli`, which builds a per-tool `--allowedTools`/
+//! `--disallowedTools` split from `ClaudeCodeToolAccess`, this provider
+//! does not attempt equivalent by-case granularity -- tool access stays
+//! at whatever coarse `--sandbox read-only` already grants below. This
+//! is deliberate, not an oversight: Codex's own by-case tool controls
+//! are unverified/experimental (no installed Codex CLI to check
+//! against during design), and `--sandbox read-only` may incidentally
+//! also block Codex's own first-party web search alongside file
+//! writes -- an open, documented risk (see design.md's Risks section)
+//! rather than a silently-assumed match to Claude Code's UI.
 
 use std::{
     process::Stdio,
