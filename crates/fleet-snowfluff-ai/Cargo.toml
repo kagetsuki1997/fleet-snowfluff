@@ -18,3 +18,6 @@ serde-saphyr = { workspace = true }
 serde_json   = { workspace = true }
 sysinfo      = { workspace = true }
 tokio        = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+winreg = { workspace = true }

@@ -35,6 +35,13 @@
 //! keep a chat reply from wandering into agentic side effects while
 //! still letting read-only tools (including Claude's own first-party
 //! web search) through by default.
+//!
+//! Every spawn resolves `claude` through `cli_locator::resolve` rather
+//! than a bare `Command::new("claude")` (`agent-core-and-task-router`
+//! Group 10) -- launched outside a terminal (Finder/Dock on macOS, a
+//! `.desktop` file on Linux), Aemeath inherits a minimal `PATH` that
+//! never sees the CLI's real install location; see that module's own
+//! doc comment for the full per-platform reasoning.
 
 use std::{
     process::Stdio,
@@ -52,7 +59,7 @@ use tokio::{
 use crate::{
     message::{Message, ModelInfo, ProviderError, ProviderKind, Role, StreamChunk},
     provider::{AiProvider, ChatStream},
-    providers::{anthropic_stream_event, cli_process},
+    providers::{anthropic_stream_event, cli_locator, cli_process},
     settings::ClaudeCodeToolAccess,
 };
 
@@ -84,7 +91,7 @@ fn parse_auth_status(stdout: &str) -> Result<bool, ProviderError> {
 /// `claude auth logout` run in a terminal takes effect on Aemeath's very
 /// next request.
 async fn check_logged_in() -> Result<(), ProviderError> {
-    let output = Command::new("claude")
+    let output = Command::new(cli_locator::resolve("claude").await)
         .args(["auth", "status", "--json"])
         .stdin(Stdio::null())
         .output()
@@ -310,7 +317,7 @@ async fn spawn(
     prompt: &str,
     tool_access: &ClaudeCodeToolAccess,
 ) -> std::io::Result<tokio::process::Child> {
-    Command::new("claude")
+    Command::new(cli_locator::resolve("claude").await)
         .args(build_args(model, resume, system_prompt, prompt, tool_access))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -342,7 +349,7 @@ impl AiProvider for ClaudeCodeCli {
     /// purely so it gets reaped instead of left a zombie, not so its
     /// result can be inspected.
     async fn trigger_login(&self) -> Result<(), ProviderError> {
-        let child = Command::new("claude")
+        let child = Command::new(cli_locator::resolve("claude").await)
             .args(["auth", "login"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

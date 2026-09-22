@@ -1398,6 +1398,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tokio",
+ "winreg 0.56.0",
 ]
 
 [[package]]
