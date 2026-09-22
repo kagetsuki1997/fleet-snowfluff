@@ -29,6 +29,22 @@ const SEARXNG_BASE_URL: &str = "https://searx.be";
 const DUCKDUCKGO_URL: &str = "https://api.duckduckgo.com/";
 const MAX_RESULTS: usize = 5;
 
+/// A real desktop-browser User-Agent -- `reqwest::Client::new()` sends
+/// none at all by default, and a bare/missing User-Agent is itself a
+/// simple, common bot-filter trigger independent of anything more
+/// sophisticated. Confirmed live (this session, via `curl` with this
+/// exact UA string) that this alone does **not** get past the JS
+/// proof-of-work/CAPTCHA challenge most public SearXNG instances run
+/// today (`searx.be` included) -- that class of gate can only be
+/// solved by executing JavaScript, which no HTTP client here does, so
+/// this is worth sending as basic hygiene, not a fix for that problem.
+/// See `parse_searxng_results`'s doc comment and the live tests below
+/// for how that's actually handled (graceful degrade, not a retry
+/// strategy this module can win).
+const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) \
+                                  AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 \
+                                  Safari/537.36";
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SearchResult {
     title: String,
@@ -38,9 +54,14 @@ struct SearchResult {
 
 /// SearXNG's `?format=json` response shape -- only the fields this
 /// tool actually uses. A response this can't parse (wrong shape, HTML
-/// instead of JSON because an instance disabled the JSON API) is
-/// treated the same as an empty result set, not an error -- the caller
-/// falls through to DuckDuckGo either way.
+/// instead of JSON because an instance disabled the JSON API -- or, as
+/// observed live against every public instance tried this session, an
+/// anti-bot JS-challenge/CAPTCHA/"you're rate-limited" HTML page served
+/// with a `200 OK` instead of the real search results) is treated the
+/// same as an empty result set, not an error -- the caller falls
+/// through to DuckDuckGo either way. See `live_searxng_...` in this
+/// module's tests for how to check a given instance's current state by
+/// hand.
 fn parse_searxng_results(body: &str) -> Vec<SearchResult> {
     #[derive(Deserialize)]
     struct Envelope {
@@ -141,6 +162,23 @@ struct ReqwestSearchTransport {
     client: reqwest::Client,
 }
 
+impl Default for ReqwestSearchTransport {
+    /// Builds the shared client once with `BROWSER_USER_AGENT` set --
+    /// `reqwest::Client::new()`'s bare default (no `User-Agent` header
+    /// at all) is worth avoiding regardless of whether it changes the
+    /// outcome for any particular instance (see that constant's doc
+    /// comment). Falls back to `reqwest::Client::new()`'s own default
+    /// only if the builder somehow fails (it can't, for a plain
+    /// `user_agent()` call with no TLS/proxy config involved -- this is
+    /// just avoiding an `.unwrap()` for a call that cannot practically
+    /// panic).
+    fn default() -> Self {
+        let client =
+            reqwest::Client::builder().user_agent(BROWSER_USER_AGENT).build().unwrap_or_default();
+        Self { client }
+    }
+}
+
 /// Appends `pairs` to `url`'s query string via `url::Url` (re-exported
 /// as `reqwest::Url`) rather than `RequestBuilder::query`, which needs
 /// reqwest's optional `query` feature -- not enabled workspace-wide,
@@ -166,6 +204,10 @@ impl SearchTransport for ReqwestSearchTransport {
         )?;
         self.client
             .get(url)
+            // On top of `?format=json`, some instances also gate on the
+            // `Accept` header before deciding whether to serve JSON at
+            // all versus redirecting to an HTML/challenge page.
+            .header(reqwest::header::ACCEPT, "application/json")
             .send()
             .await
             .and_then(reqwest::Response::error_for_status)
@@ -217,9 +259,7 @@ pub struct WebSearchTool {
 }
 
 impl Default for WebSearchTool {
-    fn default() -> Self {
-        Self { transport: Box::new(ReqwestSearchTransport { client: reqwest::Client::new() }) }
-    }
+    fn default() -> Self { Self { transport: Box::new(ReqwestSearchTransport::default()) } }
 }
 
 #[async_trait]
@@ -372,5 +412,99 @@ mod tests {
         let tool = WebSearchTool::default();
         let err = tool.execute(json!({}), &ctx()).await.unwrap_err();
         assert_eq!(err.to_string(), "missing \"query\" argument");
+    }
+
+    // -- Live network tests (agent-core-and-task-router follow-up) --
+    //
+    // `#[ignore]`d, same convention as this crate's other tests that
+    // depend on real external infrastructure (e.g.
+    // `task_router_rules_live_classification_round_trip`, the
+    // `claude_code_cli`/`codex` CLI-dependent tests) -- these hit real,
+    // third-party services this project doesn't control, so they don't
+    // run in normal `cargo test` or CI. Run by hand with:
+    //   cargo test -p fleet-snowfluff-ai native_tools::web_search -- --ignored
+    // A failure here reflects that external service's *current* state
+    // (bot-mitigation, rate-limiting, an API's inherent narrowness),
+    // not necessarily a bug in this module -- see each test's own doc
+    // comment for what it actually demonstrates.
+
+    /// As of this test's writing, every public SearXNG instance tried
+    /// by hand (`searx.be` plus roughly a dozen others commonly listed
+    /// as JSON-API-enabled) returned either an anti-bot JS-challenge/
+    /// CAPTCHA page (confirmed with a real Chrome `User-Agent`, so this
+    /// is not a simple UA-sniffing block a header can fix) or an HTTP
+    /// `429`. This test documents that reality rather than asserting a
+    /// specific outcome: it only requires the request to succeed at the
+    /// HTTP transport level (`fetch_searxng` returning `Ok`, i.e. no
+    /// connection/timeout failure) and prints whether the body actually
+    /// parsed into real results, so a human running it can see the
+    /// instance's current state without the test itself being flaky
+    /// (an `assert!(!results.is_empty())` here would fail today through
+    /// no fault of this module's code, on infrastructure this project
+    /// doesn't control).
+    #[tokio::test]
+    #[ignore = "hits a real, third-party SearXNG instance -- run manually"]
+    async fn live_searxng_reports_its_current_reachability_and_parse_result() {
+        let transport = ReqwestSearchTransport::default();
+        let body = transport
+            .fetch_searxng("rust programming language")
+            .await
+            .expect("the HTTP request itself should succeed even if SearXNG blocks the query");
+        let results = parse_searxng_results(&body);
+        eprintln!(
+            "live SearXNG ({SEARXNG_BASE_URL}) returned {} parsed result(s); first 200 chars of \
+             body: {:?}",
+            results.len(),
+            body.chars().take(200).collect::<String>()
+        );
+    }
+
+    /// A Wikipedia-entity-style query is the one shape the DuckDuckGo
+    /// Instant Answer API reliably answers -- confirmed live returning
+    /// a real `AbstractText`/`Heading` for exactly this query, with or
+    /// without a custom `User-Agent`, so headers were never the issue
+    /// for this tier.
+    #[tokio::test]
+    #[ignore = "hits the real DuckDuckGo Instant Answer API -- run manually"]
+    async fn live_duckduckgo_returns_an_abstract_for_a_wikipedia_style_entity_query() {
+        let transport = ReqwestSearchTransport::default();
+        let body = transport
+            .fetch_duckduckgo("rust programming language")
+            .await
+            .expect("DuckDuckGo request should succeed at the HTTP level");
+        let results = parse_duckduckgo_results(&body);
+        assert!(
+            !results.is_empty(),
+            "expected a Wikipedia-backed abstract for an entity-style query; got body: {body}"
+        );
+    }
+
+    /// Documents, rather than reports as a bug, what actually produced
+    /// the "test message" this test was written to explain: for most
+    /// ordinary natural-language queries (not a Wikipedia-style
+    /// entity), the Instant Answer API responds `200 OK` with every
+    /// content field empty and a `meta` object literally describing
+    /// itself as `"name":"Just Another Test"`/`"description":"testing"`
+    /// -- a real, documented placeholder response for "no instant
+    /// answer for this query," not a bot-block and not something a
+    /// header changes. This module's parser only reads
+    /// `AbstractText`/`Heading`/`RelatedTopics` (never `meta`), so that
+    /// placeholder already can't leak into a user-visible result --
+    /// this test pins that down against the real API instead of only a
+    /// hand-written fixture.
+    #[tokio::test]
+    #[ignore = "hits the real DuckDuckGo Instant Answer API -- run manually"]
+    async fn live_duckduckgo_yields_no_parseable_results_for_a_generic_free_form_query() {
+        let transport = ReqwestSearchTransport::default();
+        let body = transport
+            .fetch_duckduckgo("how to fix a leaky faucet")
+            .await
+            .expect("DuckDuckGo request should succeed at the HTTP level");
+        let results = parse_duckduckgo_results(&body);
+        assert!(
+            results.is_empty(),
+            "expected the narrow Instant Answer API to have nothing for a generic how-to query; \
+             got: {results:?}"
+        );
     }
 }
