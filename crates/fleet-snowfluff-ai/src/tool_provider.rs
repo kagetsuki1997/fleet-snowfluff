@@ -5,7 +5,7 @@
 //! "`ToolCallingProvider` is a separate trait from `AiProvider`" for
 //! why: extending `ChatStream`'s item type would touch all six
 //! existing providers, including `ClaudeCodeCli`/`Codex`, which must
-//! never receive Fleet's own tool definitions (they own their native
+//! never receive Aemeath's own tool definitions (they own their native
 //! tool loops entirely).
 //!
 //! **v1 implements this for `Ollama` only** -- `OpenAiCompatible`'s

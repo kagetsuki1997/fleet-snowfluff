@@ -9,7 +9,7 @@
 //! OpenClaw's own approach instead: shell out to the already-logged-in
 //! `claude` CLI and let it own the credential entirely
 //! (`subscription-first-chat`'s "No persisted credential for
-//! subscription auth" -- Fleet never reads, stores, or mints a token).
+//! subscription auth" -- Aemeath never reads, stores, or mints a token).
 //!
 //! Also follows OpenClaw's warm-session model: a Claude-CLI session is
 //! resumed across turns (`--resume <id>`) rather than started fresh
@@ -19,7 +19,7 @@
 //! runtime state (`Arc<Mutex<Option<String>>>`, exposed via
 //! `session_id()`, not the `AiProvider` trait) -- the app crate reads
 //! it after a generation completes and supplies it back in on the next
-//! `ClaudeCodeCli` it constructs for the same (Fleet chat session,
+//! `ClaudeCodeCli` it constructs for the same (Aemeath chat session,
 //! profile) pair. Never written to disk.
 //!
 //! The CLI's own default system prompt, project-settings/hooks, and
@@ -79,10 +79,10 @@ fn parse_auth_status(stdout: &str) -> Result<bool, ProviderError> {
 /// Runs `claude auth status --json` and returns `Ok(())` only if
 /// logged in. Called before every `chat()` rather than cached, per
 /// `subscription-first-chat`'s "No persisted credential for
-/// subscription auth" -- Fleet never stores a token or a login status,
+/// subscription auth" -- Aemeath never stores a token or a login status,
 /// it asks the CLI fresh every time, matching OpenClaw's own stated
 /// principle: "Claude owns the login and token refresh lifecycle." A
-/// `claude auth logout` run in a terminal takes effect on Fleet's very
+/// `claude auth logout` run in a terminal takes effect on Aemeath's very
 /// next request.
 async fn check_logged_in() -> Result<(), ProviderError> {
     let output = Command::new("claude")
@@ -298,7 +298,7 @@ impl AiProvider for ClaudeCodeCli {
 
     /// Spawns `claude auth login` detached -- the CLI owns the whole
     /// OAuth ceremony (opening a browser, running its own local
-    /// callback listener) from here on; Fleet neither waits for it nor
+    /// callback listener) from here on; Aemeath neither waits for it nor
     /// reads its output. The child is handed off to a background task
     /// purely so it gets reaped instead of left a zombie, not so its
     /// result can be inspected.

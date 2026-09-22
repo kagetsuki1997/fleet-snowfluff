@@ -1,4 +1,4 @@
-//! `ConversationId`: identifies a Fleet Conversation, derived from the
+//! `ConversationId`: identifies an Aemeath Conversation, derived from the
 //! session's log file path, not independently generated and stored.
 //! Originally introduced in the app crate's `session_domain.rs`
 //! alongside `ExecutionId`/`ExternalSessionRef` (both of which stay
@@ -11,7 +11,7 @@
 use std::path::Path;
 
 /// Nothing today needs to reference a conversation before its log file
-/// exists or after it's been moved/renamed (Fleet has no such
+/// exists or after it's been moved/renamed (Aemeath has no such
 /// feature), so an independently-persisted id would solve a problem
 /// that doesn't exist yet. Kept behind this one function rather than
 /// inlined at call sites specifically so that if that changes later,

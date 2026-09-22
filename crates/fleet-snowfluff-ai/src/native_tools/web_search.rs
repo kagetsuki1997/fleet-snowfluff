@@ -2,7 +2,7 @@
 //! tool that talks to a third-party network service. Scoped explicitly
 //! to that path -- Claude Code/Codex get their own first-party search
 //! for free via the native-tool allow-list instead (Group 7); this is
-//! not a general Fleet search feature.
+//! not a general Aemeath search feature.
 //!
 //! Two-tier, no-key, no-login fallback: a public SearXNG instance first
 //! (real ranked results, unofficial/no-SLA infrastructure), falling

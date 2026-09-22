@@ -1,6 +1,6 @@
 ## Purpose
 
-Defines how Fleet decides which provider profile handles a given chat message — the routing modes available, how a routing decision is made, and how it falls back when the chosen path is unavailable or unsuitable.
+Defines how Aemeath decides which provider profile handles a given chat message — the routing modes available, how a routing decision is made, and how it falls back when the chosen path is unavailable or unsuitable.
 
 ## ADDED Requirements
 

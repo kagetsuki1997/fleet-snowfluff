@@ -7,6 +7,28 @@ schema: spec-driven
 #     Tech stack: TypeScript, React, Node.js
 #     We use conventional commits
 #     Domain: e-commerce platform
+context: |
+  Naming convention -- "Fleet" vs "Aemeath":
+  - "Fleet Snowfluff" is the product/project name. Use it (in full,
+    never abbreviated to a bare "Fleet") when referring to the app
+    itself: package descriptions, window titles, crate names
+    (`fleet-snowfluff`, `fleet-snowfluff-ai`, `fleet-snowfluff-core`),
+    file/directory paths, and prose about "the app"/"the project".
+  - "Aemeath" is the short-form/code-identifier name for the AI
+    companion/agent that runs inside Fleet Snowfluff (also the name of
+    the original fan-made pet character the app is a Rust rewrite of --
+    spelled "Ameath" there, one fewer "e", a deliberate distinct
+    spelling for this project's own internal agent identifier). Use
+    "Aemeath" for any new struct/type/function name describing the
+    agent or its subsystems (e.g. `AemeathAgentRuntime`, "Aemeath's
+    Tool Registry"), and for any prose/comment/doc referring to the
+    running agent/system as an actor (e.g. "Aemeath never stores a
+    token", "Aemeath has exactly one conversation at a time").
+  - A bare "Fleet" (not "Fleet Snowfluff") must never be used as
+    shorthand for the agent/system in new code, comments, or docs --
+    that shorthand is "Aemeath". Archived changes under
+    `openspec/changes/archive/` predate this convention and are left
+    as their own historical record, not retroactively renamed.
 
 # Per-artifact rules (optional)
 # Add custom rules for specific artifacts.

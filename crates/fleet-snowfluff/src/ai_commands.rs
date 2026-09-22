@@ -455,7 +455,7 @@ pub async fn check_profile_status(
 /// profile's own CLI login flow in the user's browser
 /// (`subscription-first-chat`'s "CLI installed but not logged in"
 /// scenario, via `AiProvider::trigger_login()`) -- fire-and-forget:
-/// Fleet does not wait for the flow to complete, it only starts it.
+/// Aemeath does not wait for the flow to complete, it only starts it.
 /// `Ok(true)` means the login command was spawned; the caller should
 /// tell the user to complete it in their browser and then re-check
 /// status (`check_profile_status`). `Ok(false)` means the profile isn't

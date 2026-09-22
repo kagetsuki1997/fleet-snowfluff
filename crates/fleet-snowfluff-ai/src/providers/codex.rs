@@ -292,7 +292,7 @@ impl AiProvider for Codex {
 
     /// Spawns `codex login` detached -- mirrors
     /// `ClaudeCodeCli::trigger_login`: Codex's CLI owns the whole
-    /// browser-based login ceremony from here, Fleet only starts it.
+    /// browser-based login ceremony from here, Aemeath only starts it.
     /// Untested against a real login flow (same caveat as the rest of
     /// this experimental provider, see module doc) -- if headless
     /// `codex login` turns out not to complete this way, the spawn

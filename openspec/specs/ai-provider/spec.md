@@ -170,8 +170,8 @@ The application SHALL NOT write any subscription-auth token, session, or login s
 
 #### Scenario: Subscription status is not cached
 
-- **WHEN** the user logs out of the `claude` CLI in a terminal while Fleet is running
-- **THEN** the next chat request or settings-tab open reflects the logged-out state, without Fleet needing to be told about the change
+- **WHEN** the user logs out of the `claude` CLI in a terminal while Aemeath is running
+- **THEN** the next chat request or settings-tab open reflects the logged-out state, without Aemeath needing to be told about the change
 
 ### Requirement: Distinct provider/runtime failure states
 

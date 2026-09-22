@@ -1661,7 +1661,7 @@ DuckDuckGo IA 顧「至少永遠有一個官方、穩定的東西可以退回去
 struct AiSettings {
     // ...
     project_root: Option<PathBuf>, // 全域一份，不是 per-conversation——
-                                    // Fleet 現在本來就只有一個 conversation，
+                                    // Aemeath 現在本來就只有一個 conversation，
                                     // 之後真的需要多 conversation 各自
                                     // 綁定不同專案時再重新考慮
 }
@@ -2109,7 +2109,7 @@ CLI 的 native tools 時，**`confirm` 一律降級成 `deny`**——沒有驗�
 執行在 Anthropic 的基礎設施上，用的是同一個 subscription/API session，
 不需要另外的 API key、不另外計費；Codex 也有等價的第一方 web search（預設
 cached、`--search`/`web_search = "live"` 可切 live mode），同樣是 OpenAI
-自己的服務。純唯讀、沒有檔案/shell 副作用、也不是 Fleet 要另外掏錢或另外
+自己的服務。純唯讀、沒有檔案/shell 副作用、也不是 Aemeath 要另外掏錢或另外
 管理的依賴——風險等級跟 `Read`/`Glob`/`Grep` 同一類，所以移到 auto。
 
 使用者可以在設定裡把個別 tool 從 deny 改成 auto（代表自己承擔「這個

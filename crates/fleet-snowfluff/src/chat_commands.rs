@@ -58,9 +58,9 @@ pub struct ChatRuntimeState {
     /// subscription providers"). Runtime-only, never written to disk
     /// (design.md's "session id is runtime-only" decision) -- an app
     /// restart just starts fresh sessions, same as `new_chat_session`
-    /// already clears this map for a new Fleet chat session. Keyed by
+    /// already clears this map for a new Aemeath chat session. Keyed by
     /// `ConversationId` as well as `ProfileKey`, not `ProfileKey` alone
-    /// -- Fleet has exactly one conversation at a time today, so this
+    /// -- Aemeath has exactly one conversation at a time today, so this
     /// makes no observable difference yet, but a `ProfileKey`-only key
     /// would silently hand one conversation's session to another's
     /// request for the same profile the moment that's no longer true

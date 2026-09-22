@@ -31,7 +31,7 @@ use crate::message::ProviderKind;
 pub enum AuthMethod {
     ApiKey,
     /// Reuses the provider's own official CLI login/session
-    /// (`claude`/`codex`) rather than a Fleet-managed credential --
+    /// (`claude`/`codex`) rather than an Aemeath-managed credential --
     /// see `subscription-first-chat`'s "Subscription auth via the
     /// provider's own CLI" requirement. Deliberately one generic
     /// variant regardless of *how* the underlying implementation talks

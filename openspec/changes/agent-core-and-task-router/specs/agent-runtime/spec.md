@@ -1,6 +1,6 @@
 ## Purpose
 
-Defines Fleet's own agent loop for tool-calling-capable provider profiles: what native tools exist, how permission for each tool call is decided and enforced, and how the user is asked to confirm a tool call when required.
+Defines Aemeath's own agent loop for tool-calling-capable provider profiles: what native tools exist, how permission for each tool call is decided and enforced, and how the user is asked to confirm a tool call when required.
 
 ## ADDED Requirements
 
