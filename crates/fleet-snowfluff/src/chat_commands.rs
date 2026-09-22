@@ -16,16 +16,19 @@ use std::{
 };
 
 use fleet_snowfluff_ai::{
-    detect_escalation, log::LogRole, prompt, with_task_router_rules, AiProvider, AiSettings,
-    AuthMethod, ChatStream, DefaultTaskRouter, EscalationDecision, Language, LogEntry, Message,
-    Persona, ProfileKey, ProviderCredentials, ProviderKind, ProviderProfile, ResponseLanguage,
-    RoutingContext, Task, TaskRouter,
+    detect_escalation, log::LogRole, prompt, with_task_router_rules, AemeathAgentRuntime,
+    AgentRuntime, AiProvider, AiSettings, AuthMethod, ChatStream, DefaultTaskRouter,
+    EscalationDecision, GetSystemContextTool, Language, ListDirectoryTool, LogEntry, Message,
+    PendingToolCall, PermissionDecider, Persona, ProfileKey, ProviderCredentials, ProviderKind,
+    ProviderProfile, ReadFileTool, ResponseLanguage, RoutingContext, RunCommandTool, Task,
+    TaskRouter, TaskRouterMode, ToolCallingProvider, ToolContext, ToolRegistry, WebSearchTool,
 };
 use futures_util::StreamExt;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
 
 use crate::{
-    ai_commands, chat_log_store, chat_pause, chat_window,
+    ai_commands::{self, RoutedExecution},
+    chat_log_store, chat_pause, chat_window,
     manager::PetManager,
     persona_store,
     session_domain::{ConversationId, ExecutionId, ExternalSessionRef},
@@ -247,7 +250,20 @@ pub async fn send_chat_message(
             return Ok(());
         }
     };
-    let routed_to_local = route.profile_key == local_profile_key;
+    // Bug found during Group 6 wiring, fixed here: comparing only
+    // `route.profile_key` against `local_profile_key` is not enough --
+    // `single` mode always resolves to `default_profile` (see
+    // `DefaultTaskRouter::route`), so if the user happens to have set
+    // *Ollama* as their `default_profile` (a normal, supported choice,
+    // nothing stops it), `route.profile_key` trivially equals
+    // `local_profile_key` even in `single` mode, and this would
+    // incorrectly run the mix-mode local-classification dance
+    // (`task-router-rules.md` injected, `<<ESCALATE>>` detection) for a
+    // mode that's supposed to mean "always use `default_profile`
+    // directly, no routing games at all". Gating on `mode == Mix` too
+    // closes that.
+    let routed_to_local = settings_snapshot.task_router_mode == TaskRouterMode::Mix
+        && route.profile_key == local_profile_key;
 
     let session_path = resolve_session_path(&app, &chat_state);
     let conversation_id = ConversationId::from_session_path(&session_path);
@@ -290,6 +306,7 @@ pub async fn send_chat_message(
             profile: default_profile,
             messages: default_messages,
             credentials: creds_snapshot.clone(),
+            project_root: settings_snapshot.project_root.clone(),
         };
         tokio::spawn(async move {
             run_generation_mix_local(
@@ -314,15 +331,16 @@ pub async fn send_chat_message(
             .unwrap()
             .get(&(conversation_id.clone(), profile_key))
             .map(|r| r.0.clone());
-        let provider_impl =
-            ai_commands::build_provider(&creds_snapshot, &default_profile, resume_session_id);
+        let project_root = settings_snapshot.project_root.clone();
         tokio::spawn(async move {
-            run_generation(
+            run_generation_routed(
                 task_app,
-                provider_impl,
+                creds_snapshot,
+                default_profile,
+                resume_session_id,
+                project_root,
                 execution_id,
                 conversation_id,
-                profile_key,
                 default_messages,
                 task_channel,
                 task_partial_text,
@@ -346,6 +364,7 @@ struct FallbackAttempt {
     profile: ProviderProfile,
     messages: Vec<Message>,
     credentials: ProviderCredentials,
+    project_root: Option<PathBuf>,
 }
 
 /// Retries the message against `fallback.profile` -- the destination
@@ -374,20 +393,78 @@ async fn run_generation_fallback(
         .unwrap()
         .get(&(conversation_id.clone(), profile_key))
         .map(|r| r.0.clone());
-    let provider_impl =
-        ai_commands::build_provider(&fallback.credentials, &fallback.profile, resume_session_id);
-    run_generation(
+    run_generation_routed(
         app,
-        provider_impl,
+        fallback.credentials,
+        fallback.profile,
+        resume_session_id,
+        fallback.project_root,
         execution_id,
         conversation_id,
-        profile_key,
         fallback.messages,
         channel,
         partial_text,
         session_path,
     )
     .await;
+}
+
+/// Decides, for a message's *final* destination profile, whether to run
+/// the existing plain `chat()` path or the tool-calling Agent Loop --
+/// the two places that decision needs making (`send_chat_message`'s own
+/// direct-to-`default_profile` branch, and `run_generation_fallback`
+/// above). Deliberately not applied inside `run_generation_mix_local`'s
+/// own local-classification attempt: that's a separate, text-only
+/// escalation-detection mechanism (`task-router-rules.md`,
+/// `<<ESCALATE>>` detection) that doesn't yet interact with tool
+/// calling -- see design.md for why combining the two is future work,
+/// not resolved here.
+#[allow(clippy::too_many_arguments)]
+async fn run_generation_routed(
+    app: AppHandle,
+    credentials: ProviderCredentials,
+    profile: ProviderProfile,
+    resume_session_id: Option<String>,
+    project_root: Option<PathBuf>,
+    execution_id: ExecutionId,
+    conversation_id: ConversationId,
+    messages: Vec<Message>,
+    channel: Channel<ChatEvent>,
+    partial_text: Arc<Mutex<String>>,
+    session_path: PathBuf,
+) {
+    let profile_key = profile.key();
+    match ai_commands::route_provider(&credentials, &profile, resume_session_id) {
+        RoutedExecution::PlainChat(provider) => {
+            run_generation(
+                app,
+                provider,
+                execution_id,
+                conversation_id,
+                profile_key,
+                messages,
+                channel,
+                partial_text,
+                session_path,
+            )
+            .await;
+        }
+        RoutedExecution::ToolCapable(provider) => {
+            run_generation_with_tools(
+                app,
+                provider,
+                execution_id,
+                conversation_id,
+                profile_key,
+                project_root,
+                messages,
+                channel,
+                partial_text,
+                session_path,
+            )
+            .await;
+        }
+    }
 }
 
 /// Persists `provider`'s captured session/thread id (if any) for
@@ -506,6 +583,94 @@ async fn stream_to_completion(
     mark_unread_unless_focused(&app, UnreadKind::Reply);
 }
 
+/// A `PermissionDecider` that denies every `Confirm`-tier call outright
+/// -- a deliberate fail-closed placeholder until Group 6's real
+/// popup-backed decider (tasks 6.2-6.4) exists, not a design decision.
+/// `Auto`-tier tools (`web_search`, `get_system_context`, an in-
+/// `project_root` `read_file`/`list_directory`) already work end to
+/// end; anything needing confirmation (an out-of-root path,
+/// `run_command`) is reported back to the model as "not permitted to
+/// run" until the real UI lands.
+struct DenyAllConfirm;
+
+#[async_trait::async_trait]
+impl PermissionDecider for DenyAllConfirm {
+    async fn decide(&self, _calls: &[PendingToolCall]) -> std::collections::HashSet<String> {
+        std::collections::HashSet::new()
+    }
+}
+
+/// Same contract as `run_generation`, but for a `ToolCapable` provider:
+/// runs `AemeathAgentRuntime` instead of a plain `chat()` stream. Text
+/// deltas stream live via the `on_text_delta` callback (see
+/// `AgentRuntime::run`'s own doc comment -- every iteration's text
+/// streams, not just the final one that ends the loop); tool calls and
+/// their results never reach the UI or the chat log, only the model's
+/// own narration and final answer do. `partial_text` (accumulated by
+/// the same callback) is used as the definitive final content once the
+/// loop finishes, exactly like `stream_to_completion` does for a plain
+/// stream, rather than `AgentRuntime::run`'s own `Ok(String)` return
+/// value alone (which is only the *last* iteration's text).
+#[allow(clippy::too_many_arguments)]
+async fn run_generation_with_tools(
+    app: AppHandle,
+    provider: Box<dyn ToolCallingProvider>,
+    execution_id: ExecutionId,
+    conversation_id: ConversationId,
+    profile_key: ProfileKey,
+    project_root: Option<PathBuf>,
+    messages: Vec<Message>,
+    channel: Channel<ChatEvent>,
+    partial_text: Arc<Mutex<String>>,
+    session_path: PathBuf,
+) {
+    log::debug!("{execution_id:?} starting tool-calling generation for {profile_key:?}");
+
+    // No `store_cli_session_id` call here: `route_provider` only ever
+    // resolves `ToolCapable` for `(Ollama, Local)`, and Ollama has no
+    // resumable-session concept (`AiProvider::session_id`'s default
+    // `None`, never overridden -- same reasoning as
+    // `run_generation_mix_local`'s own local attempt). Revisit if a
+    // future `ToolCapable` provider ever does have one.
+    let ctx = ToolContext { project_root, conversation_id: conversation_id.clone() };
+    let registry = ToolRegistry::new(vec![
+        Arc::new(WebSearchTool::default()),
+        Arc::new(ReadFileTool),
+        Arc::new(ListDirectoryTool),
+        Arc::new(RunCommandTool::default()),
+        Arc::new(GetSystemContextTool),
+    ]);
+    let runtime = AemeathAgentRuntime::default();
+
+    let result = {
+        let mut on_text_delta = |delta: &str| {
+            partial_text.lock().unwrap().push_str(delta);
+            channel.send(ChatEvent::Chunk { delta: delta.to_string() }).ok();
+        };
+        runtime
+            .run(provider.as_ref(), messages, &registry, &ctx, &DenyAllConfirm, &mut on_text_delta)
+            .await
+    };
+
+    match result {
+        Ok(_) => {
+            let final_text = partial_text.lock().unwrap().clone();
+            chat_log_store::append_entry(
+                &session_path,
+                &LogEntry {
+                    role: LogRole::Assistant,
+                    content: final_text.clone(),
+                    timestamp: now_rfc3339(),
+                },
+            );
+            channel.send(ChatEvent::Done { content: final_text }).ok();
+            clear_pending(&app);
+            mark_unread_unless_focused(&app, UnreadKind::Reply);
+        }
+        Err(err) => finish_with_error(&app, &session_path, &channel, &err.to_string()),
+    }
+}
+
 /// `mode: mix`'s local-first attempt (`agent-core-and-task-router`'s
 /// "Local-first classification in mixed mode"). Buffers the local
 /// provider's own reply through [`detect_escalation`] *before*
@@ -521,7 +686,12 @@ async fn stream_to_completion(
 ///   fresh [`run_generation`] call instead.
 ///
 /// Either way, `TaskRouter::route()` is never called a second time --
-/// see `task_router.rs`'s own module doc.
+/// see `task_router.rs`'s own module doc. Deliberately never routes
+/// through `run_generation_with_tools`, even when `local_profile`
+/// happens to be `ToolCapable` -- this classification attempt is a
+/// separate, text-only escalation-detection mechanism that doesn't yet
+/// interact with tool calling (see `run_generation_routed`'s own doc
+/// comment).
 #[allow(clippy::too_many_arguments)]
 async fn run_generation_mix_local(
     app: AppHandle,

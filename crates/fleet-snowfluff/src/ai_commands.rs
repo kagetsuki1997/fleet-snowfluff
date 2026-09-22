@@ -293,7 +293,7 @@ impl RoutedExecution {
 /// `(Ollama, Local)` -- `ToolCallingProvider`'s v1 implementation, per
 /// design.md's "`ToolCallingProvider` is a separate trait from
 /// `AiProvider`".
-fn route_provider(
+pub(crate) fn route_provider(
     credentials: &ProviderCredentials,
     profile: &ProviderProfile,
     resume_session_id: Option<String>,

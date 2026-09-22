@@ -102,6 +102,16 @@ impl std::error::Error for AgentError {}
 /// never need to manage `Conversation`/session lifecycle themselves --
 /// `run`'s job ends at producing the final answer text, the same
 /// boundary `TaskRouter::route()` draws for itself.
+///
+/// `on_text_delta` is invoked for every [`ToolCallStreamItem::TextDelta`]
+/// as it arrives, on *every* iteration -- not just the final one that
+/// ends the loop -- so a caller can forward it live to the UI the same
+/// way every existing (non-tool-calling) chat path already streams
+/// `ChatEvent::Chunk`s. Tool-call JSON and tool execution stay
+/// invisible either way; only real model-generated text ever reaches
+/// this callback. A model that narrates before calling a tool
+/// therefore still streams that narration live, exactly as if the tool
+/// call never happened.
 #[async_trait::async_trait]
 pub trait AgentRuntime: Send + Sync {
     async fn run(
@@ -111,6 +121,7 @@ pub trait AgentRuntime: Send + Sync {
         registry: &ToolRegistry,
         ctx: &ToolContext,
         permission: &dyn PermissionDecider,
+        on_text_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> Result<String, AgentError>;
 }
 
@@ -148,6 +159,7 @@ impl AgentRuntime for AemeathAgentRuntime {
         registry: &ToolRegistry,
         ctx: &ToolContext,
         permission: &dyn PermissionDecider,
+        on_text_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> Result<String, AgentError> {
         let mut last_text = String::new();
 
@@ -161,7 +173,10 @@ impl AgentRuntime for AemeathAgentRuntime {
             let mut calls = Vec::new();
             while let Some(item) = stream.next().await {
                 match item.map_err(AgentError::Provider)? {
-                    ToolCallStreamItem::TextDelta(delta) => text.push_str(&delta),
+                    ToolCallStreamItem::TextDelta(delta) => {
+                        on_text_delta(&delta);
+                        text.push_str(&delta);
+                    }
                     ToolCallStreamItem::ToolCall { id, name, arguments } => {
                         calls.push(PendingToolCall { id, name, arguments })
                     }
@@ -404,7 +419,14 @@ mod tests {
         let runtime = AemeathAgentRuntime::default();
 
         let result = runtime
-            .run(&provider, vec![Message::user("hi")], &registry, &ctx(), &AlwaysApprove)
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &mut |_: &str| {},
+            )
             .await
             .unwrap();
 
@@ -426,7 +448,14 @@ mod tests {
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            runtime.run(&provider, vec![Message::user("hi")], &registry, &ctx(), &AlwaysApprove),
+            runtime.run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &mut |_: &str| {},
+            ),
         )
         .await
         .expect("the loop must terminate on its own well within the timeout");
@@ -450,7 +479,14 @@ mod tests {
         let runtime = AemeathAgentRuntime::default();
 
         let result = runtime
-            .run(&provider, vec![Message::user("hi")], &registry, &ctx(), &AlwaysApprove)
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &mut |_: &str| {},
+            )
             .await
             .unwrap();
 
@@ -473,7 +509,14 @@ mod tests {
         let runtime = AemeathAgentRuntime::default();
 
         runtime
-            .run(&provider, vec![Message::user("hi")], &registry, &ctx(), &AlwaysDeny)
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysDeny,
+                &mut |_: &str| {},
+            )
             .await
             .unwrap();
         assert_eq!(*alpha.calls.lock().unwrap(), 0, "AlwaysDeny must block a Confirm-tier call");
@@ -487,7 +530,14 @@ mod tests {
             vec![ToolCallStreamItem::TextDelta("ok".to_string())],
         ]);
         runtime
-            .run(&provider, vec![Message::user("hi")], &registry, &ctx(), &AlwaysApprove)
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &mut |_: &str| {},
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -511,9 +561,54 @@ mod tests {
         let runtime = AemeathAgentRuntime::default();
 
         let result = runtime
-            .run(&provider, vec![Message::user("hi")], &registry, &ctx(), &AlwaysApprove)
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &mut |_: &str| {},
+            )
             .await
             .unwrap();
         assert_eq!(result, "ok");
+    }
+
+    #[tokio::test]
+    async fn text_deltas_stream_live_from_every_iteration_not_just_the_final_one() {
+        // A model that narrates before calling a tool, then continues
+        // after the tool result comes back, should have *both* pieces
+        // of text streamed live -- not just the final iteration's.
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                ToolCallStreamItem::TextDelta("checking".to_string()),
+                ToolCallStreamItem::ToolCall {
+                    id: "call_0".to_string(),
+                    name: "alpha".to_string(),
+                    arguments: json!({}),
+                },
+            ],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let alpha = Arc::new(CountingTool::new("alpha", PermissionTier::Auto));
+        let registry = ToolRegistry::new(vec![alpha.clone()]);
+        let runtime = AemeathAgentRuntime::default();
+        let streamed = Arc::new(Mutex::new(String::new()));
+        let streamed_in_callback = streamed.clone();
+
+        let result = runtime
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &mut |delta: &str| streamed_in_callback.lock().unwrap().push_str(delta),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result, "done");
+        assert_eq!(*streamed.lock().unwrap(), "checkingdone");
     }
 }
