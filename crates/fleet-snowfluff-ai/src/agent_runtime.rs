@@ -98,7 +98,7 @@ impl std::fmt::Display for AgentError {
 
 impl std::error::Error for AgentError {}
 
-/// Runs the tool-calling loop for a `ToolCallingProvider`. Implementors
+/// Runs the tool-calling loop for a `ToolCallingProvider`. Implementers
 /// never need to manage `Conversation`/session lifecycle themselves --
 /// `run`'s job ends at producing the final answer text, the same
 /// boundary `TaskRouter::route()` draws for itself.
