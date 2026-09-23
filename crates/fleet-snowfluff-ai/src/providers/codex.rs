@@ -42,6 +42,24 @@
 //! the same warm-session model as `ClaudeCodeCli`, not the "maybe
 //! Codex doesn't support this" asymmetry design.md originally left as
 //! an open question.
+//!
+//! **No per-tool allow-list (`agent-core-and-task-router` Group 7).**
+//! Unlike `ClaudeCodeCli`, which builds a per-tool `--allowedTools`/
+//! `--disallowedTools` split from `ClaudeCodeToolAccess`, this provider
+//! does not attempt equivalent by-case granularity -- tool access stays
+//! at whatever coarse `--sandbox read-only` already grants below. This
+//! is deliberate, not an oversight: Codex's own by-case tool controls
+//! are unverified/experimental (no installed Codex CLI to check
+//! against during design), and `--sandbox read-only` may incidentally
+//! also block Codex's own first-party web search alongside file
+//! writes -- an open, documented risk (see design.md's Risks section)
+//! rather than a silently-assumed match to Claude Code's UI.
+//!
+//! Every spawn resolves `codex` through `cli_locator::resolve` rather
+//! than a bare `Command::new("codex")` (`agent-core-and-task-router`
+//! Group 10), for the same launched-outside-a-terminal reason as
+//! `ClaudeCodeCli` -- see that module's own doc comment for the full
+//! per-platform search-order reasoning shared by both providers.
 
 use std::{
     process::Stdio,
@@ -59,7 +77,7 @@ use tokio::{
 use crate::{
     message::{Message, ModelInfo, ProviderError, ProviderKind, Role, StreamChunk},
     provider::{AiProvider, ChatStream},
-    providers::{cli_process, mock},
+    providers::{cli_locator, cli_process, mock},
 };
 
 /// Small enough to feel responsive, large enough to visibly show
@@ -126,7 +144,7 @@ fn temp_instructions_path() -> std::path::PathBuf {
 /// subcommand's documented contract is exit-code-based (0 = logged in,
 /// 1 = not) with plain text on stdout/stderr, not structured JSON.
 async fn check_logged_in() -> Result<(), ProviderError> {
-    let output = Command::new("codex")
+    let output = Command::new(cli_locator::resolve("codex").await)
         .args(["login", "status"])
         .stdin(Stdio::null())
         .output()
@@ -255,7 +273,7 @@ async fn spawn(
     instructions_path: &std::path::Path,
     prompt: &str,
 ) -> std::io::Result<tokio::process::Child> {
-    let mut command = Command::new("codex");
+    let mut command = Command::new(cli_locator::resolve("codex").await);
     command.arg("exec");
     if let Some(id) = resume {
         command.args(["resume", id]);
@@ -292,7 +310,7 @@ impl AiProvider for Codex {
 
     /// Spawns `codex login` detached -- mirrors
     /// `ClaudeCodeCli::trigger_login`: Codex's CLI owns the whole
-    /// browser-based login ceremony from here, Fleet only starts it.
+    /// browser-based login ceremony from here, Aemeath only starts it.
     /// Untested against a real login flow (same caveat as the rest of
     /// this experimental provider, see module doc) -- if headless
     /// `codex login` turns out not to complete this way, the spawn
@@ -300,7 +318,7 @@ impl AiProvider for Codex {
     /// wait-for-success check), and the settings UI's existing
     /// not-logged-in status text remains the fallback instruction.
     async fn trigger_login(&self) -> Result<(), ProviderError> {
-        let child = Command::new("codex")
+        let child = Command::new(cli_locator::resolve("codex").await)
             .arg("login")
             .stdin(Stdio::null())
             .stdout(Stdio::null())

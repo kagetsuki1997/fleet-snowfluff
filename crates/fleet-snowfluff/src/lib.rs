@@ -12,6 +12,8 @@ pub mod persona_store;
 pub mod secrets_store;
 pub mod session_domain;
 pub mod status_bubble;
+pub mod task_router_rules_store;
+pub mod tool_confirmation;
 // Pet windows on Windows render via GDI instead (platform::windows's
 // LayeredSurface) -- see that module's doc comment for why. Nothing on
 // Windows references this module at all.
@@ -46,6 +48,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_dialog::init())
         // `.macos_launcher(...)` is a macOS-only builder method (its
         // default, LaunchAgent, is already what we want) -- omitted
         // rather than #[cfg]-gated, since calling it isn't needed.
@@ -75,6 +78,9 @@ pub fn run() {
             commands::install_update,
             ai_commands::get_ai_settings,
             ai_commands::set_ai_enabled,
+            ai_commands::set_task_router_mode,
+            ai_commands::set_project_root,
+            ai_commands::set_claude_code_tool_access,
             ai_commands::enable_profile,
             ai_commands::disable_profile,
             ai_commands::set_default_profile,
@@ -89,6 +95,8 @@ pub fn run() {
             chat_commands::send_chat_message,
             chat_commands::stop_generation,
             chat_commands::new_chat_session,
+            tool_confirmation::get_pending_tool_confirmations,
+            tool_confirmation::resolve_tool_confirmations,
         ])
         .setup(|app| {
             // Always on (not just debug builds) -- otherwise a release
@@ -192,6 +200,12 @@ pub fn run() {
             // first run so there's a file to inspect/edit later; a
             // no-op if one already exists.
             persona_store::seed_if_missing(&app_handle);
+            // Same idea for `mix` mode's task-router-rules.md
+            // (`agent-core-and-task-router`'s "Task routing mode") --
+            // seeded even though `mix` mode isn't enabled by default,
+            // so the file already exists to look at/edit the moment a
+            // user turns it on.
+            task_router_rules_store::seed_if_missing(&app_handle);
 
             app.manage(Mutex::new(pet_manager));
             app.manage(Mutex::new(config));
@@ -199,6 +213,7 @@ pub fn run() {
             app.manage(Mutex::new(credentials));
             app.manage(chat_commands::ChatRuntimeState::default());
             app.manage(chat_pause::ChatPauseState::default());
+            app.manage(tool_confirmation::ToolConfirmationState::default());
             app.manage(Mutex::<Option<tauri_plugin_updater::Update>>::new(None));
             tray::build(&app_handle)?;
             updater::spawn_startup_check(app_handle.clone());

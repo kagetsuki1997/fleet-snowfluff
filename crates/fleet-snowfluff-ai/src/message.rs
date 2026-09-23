@@ -3,36 +3,80 @@
 //! `Deserialize` on everything that crosses IPC).
 
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// A turn's speaker. `System` carries the assembled persona prompt;
 /// each provider's `build_request` decides where that belongs in its
 /// own wire format (a leading message for OpenAI-compatible/Ollama, a
-/// separate top-level field for Anthropic).
+/// separate top-level field for Anthropic). `Tool` exists only for
+/// `AemeathAgentRuntime`'s internal tool-calling loop (Ollama's
+/// `ToolCallingProvider` path) -- it is never persisted to a
+/// conversation's session log and never reaches a plain `AiProvider`
+/// (`ClaudeCodeCli`/`Codex`/`Anthropic`/`OpenAiCompatible`'s `chat()`),
+/// so those providers' own message-mapping code may treat it as
+/// unreachable rather than needing a real case for it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
     System,
     User,
     Assistant,
+    Tool,
+}
+
+/// One tool call requested by the model, carried on an `Assistant`
+/// turn's [`Message::tool_calls`] -- the same shape
+/// `tool_provider::ToolCallStreamItem::ToolCall` streams out as, kept
+/// here (not re-derived) so the Agent Loop can push a call straight
+/// back into the next turn's message list unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ToolCallRecord {
+    pub id: String,
+    pub name: String,
+    pub arguments: Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Message {
     pub role: Role,
     pub content: String,
+    /// Populated only on an `Assistant` turn that called one or more
+    /// tools -- empty (and omitted from the wire format entirely, via
+    /// `skip_serializing_if`) for every plain-text message, which is
+    /// still every message outside `AemeathAgentRuntime`'s own loop.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tool_calls: Vec<ToolCallRecord>,
 }
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: Role::System, content: content.into() }
+        Self { role: Role::System, content: content.into(), tool_calls: Vec::new() }
     }
 
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: Role::User, content: content.into() }
+        Self { role: Role::User, content: content.into(), tool_calls: Vec::new() }
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: content.into() }
+        Self { role: Role::Assistant, content: content.into(), tool_calls: Vec::new() }
+    }
+
+    /// An assistant turn that requested tool calls instead of (or
+    /// alongside) replying with text -- `content` is often empty, since
+    /// a model that decides to call a tool frequently has nothing else
+    /// to say yet.
+    pub fn assistant_with_tool_calls(
+        content: impl Into<String>,
+        tool_calls: Vec<ToolCallRecord>,
+    ) -> Self {
+        Self { role: Role::Assistant, content: content.into(), tool_calls }
+    }
+
+    /// A tool's result, reported back to the model on its own turn --
+    /// Ollama's own wire format for this is `{"role": "tool", "content":
+    /// "..."}`, which this maps onto directly.
+    pub fn tool(content: impl Into<String>) -> Self {
+        Self { role: Role::Tool, content: content.into(), tool_calls: Vec::new() }
     }
 }
 
@@ -125,6 +169,47 @@ mod tests {
         let back: Message = serde_json::from_str(&json).unwrap();
         assert_eq!(back, msg);
         assert!(json.contains("\"role\":\"user\""));
+    }
+
+    #[test]
+    fn plain_messages_never_serialize_a_tool_calls_field() {
+        // Every message outside `AemeathAgentRuntime`'s own loop is one
+        // of these -- the wire format must stay byte-identical to
+        // before `tool_calls` existed, since providers that never
+        // implement `ToolCallingProvider` (and existing session log
+        // files) never expect this field.
+        let json = serde_json::to_string(&Message::user("hi")).unwrap();
+        assert!(!json.contains("tool_calls"));
+    }
+
+    #[test]
+    fn a_message_missing_tool_calls_deserializes_with_an_empty_one() {
+        // Backward compatibility for every session log line written
+        // before this field existed.
+        let msg: Message = serde_json::from_str(r#"{"role":"user","content":"hi"}"#).unwrap();
+        assert_eq!(msg.tool_calls, vec![]);
+    }
+
+    #[test]
+    fn assistant_with_tool_calls_round_trips_through_json() {
+        let msg = Message::assistant_with_tool_calls(
+            "",
+            vec![ToolCallRecord {
+                id: "call_0".to_string(),
+                name: "get_current_weather".to_string(),
+                arguments: serde_json::json!({"location": "Paris"}),
+            }],
+        );
+        let json = serde_json::to_string(&msg).unwrap();
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
+        assert_eq!(back.tool_calls[0].name, "get_current_weather");
+    }
+
+    #[test]
+    fn tool_role_serializes_snake_case() {
+        assert_eq!(serde_json::to_string(&Role::Tool).unwrap(), "\"tool\"");
+        assert_eq!(Message::tool("42 degrees").role, Role::Tool);
     }
 
     #[test]

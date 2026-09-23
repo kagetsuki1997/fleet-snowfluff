@@ -12,6 +12,7 @@ use crate::{
     message::{Message, ModelInfo, ProviderError, ProviderKind, StreamChunk},
     provider::{AiProvider, ChatStream},
     providers::http_stream,
+    tool_provider::{ToolCallStream, ToolCallStreamItem, ToolCallingProvider, ToolDefinition},
 };
 
 pub const DEFAULT_BASE_URL: &str = "http://localhost:11434";
@@ -51,6 +52,47 @@ pub fn build_chat_body(model: &str, messages: &[Message]) -> Value {
         "think": false,
         "options": { "num_predict": MAX_RESPONSE_TOKENS },
     })
+}
+
+/// `chat_with_tools`'s own request body, kept as a separate function
+/// from [`build_chat_body`] rather than adding an optional `tools`
+/// parameter to it -- every plain-chat call site (`AiProvider::chat`)
+/// would otherwise have to pass `&[]` for a field it never uses.
+/// `"think": false` is required here for a second, stronger reason than
+/// plain chat's own (see this module's doc comment): [ollama/ollama#10976](https://github.com/ollama/ollama/issues/10976)
+/// documents `think: true` combined with tool definitions producing
+/// **empty output entirely** for Qwen3 models, independent of budget
+/// size -- not just "wastes the budget on invisible reasoning" like the
+/// plain-chat case.
+pub fn build_chat_with_tools_body(
+    model: &str,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+) -> Value {
+    let mut body = json!({
+        "model": model,
+        "messages": messages,
+        "stream": true,
+        "think": false,
+        "options": { "num_predict": MAX_RESPONSE_TOKENS },
+    });
+    if !tools.is_empty() {
+        let tools_json: Vec<Value> = tools
+            .iter()
+            .map(|tool| {
+                json!({
+                    "type": "function",
+                    "function": {
+                        "name": tool.name,
+                        "description": tool.description,
+                        "parameters": tool.parameters,
+                    },
+                })
+            })
+            .collect();
+        body["tools"] = Value::Array(tools_json);
+    }
+    body
 }
 
 pub fn chat_url(base_url: &str) -> String { format!("{}/api/chat", base_url.trim_end_matches('/')) }
@@ -107,6 +149,68 @@ pub fn parse_ndjson_line(line: &str) -> Result<Option<StreamChunk>, ProviderErro
         .and_then(|m| (!m.content.is_empty()).then_some(StreamChunk { delta: m.content })))
 }
 
+/// `chat_with_tools`'s own line parser -- distinct from
+/// [`parse_ndjson_line`] because that one only deserializes
+/// `message.content`/`done` and would silently drop a `tool_calls`
+/// field if one appeared. Returns every item a single line carries
+/// (zero, one, or several) rather than `Option<T>`, since a line can in
+/// principle carry both a text delta and one or more tool calls at
+/// once. Ollama's own tool-call objects have no `id` field (unlike
+/// OpenAI's) -- one is synthesized from the call's position in the
+/// array, which is stable within a single line/turn.
+pub fn parse_ndjson_tool_line(line: &str) -> Result<Vec<ToolCallStreamItem>, ProviderError> {
+    let line = line.trim();
+    if line.is_empty() {
+        return Ok(vec![]);
+    }
+
+    #[derive(Deserialize)]
+    struct ChatToolChunk {
+        #[serde(default)]
+        message: Option<ToolMessageDelta>,
+    }
+    #[derive(Deserialize)]
+    struct ToolMessageDelta {
+        #[serde(default)]
+        content: String,
+        #[serde(default)]
+        tool_calls: Vec<OllamaToolCall>,
+    }
+    #[derive(Deserialize)]
+    struct OllamaToolCall {
+        #[serde(default)]
+        id: Option<String>,
+        function: OllamaFunctionCall,
+    }
+    #[derive(Deserialize)]
+    struct OllamaFunctionCall {
+        name: String,
+        #[serde(default)]
+        arguments: Value,
+    }
+
+    let chunk: ChatToolChunk = serde_json::from_str(line)
+        .map_err(|e| ProviderError::InvalidResponse(format!("malformed chunk: {e}")))?;
+
+    let Some(message) = chunk.message else {
+        return Ok(vec![]);
+    };
+
+    let mut items = Vec::new();
+    if !message.content.is_empty() {
+        items.push(ToolCallStreamItem::TextDelta(message.content));
+    }
+    for (index, call) in message.tool_calls.into_iter().enumerate() {
+        let id = call.id.unwrap_or_else(|| format!("call_{index}"));
+        items.push(ToolCallStreamItem::ToolCall {
+            id,
+            name: call.function.name,
+            arguments: call.function.arguments,
+        });
+    }
+    Ok(items)
+}
+
 pub fn parse_model_list(body: &str) -> Result<Vec<ModelInfo>, ProviderError> {
     #[derive(Deserialize)]
     struct TagsEnvelope {
@@ -141,6 +245,22 @@ impl AiProvider for Ollama {
     async fn list_models(&self) -> Result<Vec<ModelInfo>, ProviderError> {
         let request = self.client.get(tags_url(&self.base_url));
         http_stream::fetch_and_parse(request, parse_model_list, parse_error_response).await
+    }
+}
+
+#[async_trait]
+impl ToolCallingProvider for Ollama {
+    async fn chat_with_tools(
+        &self,
+        messages: Vec<Message>,
+        tools: Vec<ToolDefinition>,
+    ) -> Result<ToolCallStream, ProviderError> {
+        let request = self.client.post(chat_url(&self.base_url)).json(&build_chat_with_tools_body(
+            &self.model,
+            &messages,
+            &tools,
+        ));
+        http_stream::stream_lines_multi(request, parse_ndjson_tool_line, parse_error_response).await
     }
 }
 
@@ -197,6 +317,66 @@ mod tests {
         let body = r#"{"error":"model 'xyz' not found, try pulling it first"}"#;
         let err = parse_error_response(404, body);
         assert!(matches!(err, ProviderError::InvalidResponse(msg) if msg.contains("not found")));
+    }
+
+    #[test]
+    fn build_chat_with_tools_body_disables_thinking_even_with_tools_present() {
+        let tools = vec![ToolDefinition {
+            name: "get_current_weather".into(),
+            description: "Get the current weather for a location".into(),
+            parameters: json!({"type": "object", "properties": {}}),
+        }];
+        let body = build_chat_with_tools_body("qwen3:8b", &[Message::user("hi")], &tools);
+        assert_eq!(body["think"], false);
+        assert_eq!(body["tools"][0]["function"]["name"], "get_current_weather");
+    }
+
+    #[test]
+    fn build_chat_with_tools_body_omits_tools_field_when_empty() {
+        let body = build_chat_with_tools_body("llama3.2", &[Message::user("hi")], &[]);
+        assert!(body.get("tools").is_none());
+    }
+
+    #[test]
+    fn parse_ndjson_tool_line_extracts_a_text_delta() {
+        let line =
+            r#"{"model":"llama3.2","message":{"role":"assistant","content":"Hello"},"done":false}"#;
+        let items = parse_ndjson_tool_line(line).unwrap();
+        assert_eq!(items, vec![ToolCallStreamItem::TextDelta("Hello".to_string())]);
+    }
+
+    #[test]
+    fn parse_ndjson_tool_line_extracts_a_tool_call_per_ollamas_documented_shape() {
+        // Ollama's own tool-call response shape has no `id` field on
+        // each entry (unlike OpenAI's) -- `parse_ndjson_tool_line`
+        // synthesizes one from position instead.
+        let line = r#"{"model":"llama3.2","message":{"role":"assistant","content":"","tool_calls":[{"function":{"name":"get_current_weather","arguments":{"format":"celsius","location":"Paris, FR"}}}]},"done":false}"#;
+        let items = parse_ndjson_tool_line(line).unwrap();
+        assert_eq!(
+            items,
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: "get_current_weather".to_string(),
+                arguments: json!({"format": "celsius", "location": "Paris, FR"}),
+            }]
+        );
+    }
+
+    #[test]
+    fn parse_ndjson_tool_line_returns_empty_on_a_done_line_with_no_message() {
+        let line = r#"{"model":"llama3.2","done":true,"total_duration":123}"#;
+        assert_eq!(parse_ndjson_tool_line(line).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn parse_ndjson_tool_line_ignores_blank_lines() {
+        assert_eq!(parse_ndjson_tool_line("").unwrap(), vec![]);
+    }
+
+    #[test]
+    fn parse_ndjson_tool_line_rejects_malformed_json() {
+        let err = parse_ndjson_tool_line("not json").unwrap_err();
+        assert!(matches!(err, ProviderError::InvalidResponse(_)));
     }
 
     #[test]

@@ -8,12 +8,12 @@
 //! command here operates on a profile identified by its `ProfileKey`
 //! rather than a bare `ProviderKind`.
 
-use std::sync::Mutex;
+use std::{path::PathBuf, sync::Mutex};
 
 use fleet_snowfluff_ai::{
-    AiProvider, AiSettings, Anthropic, AuthMethod, ClaudeCodeCli, Codex, Mock, ModelInfo, Ollama,
-    OpenAiCompatible, ProfileKey, ProviderCredentials, ProviderError, ProviderKind,
-    ProviderProfile,
+    AiProvider, AiSettings, Anthropic, AuthMethod, ClaudeCodeCli, ClaudeCodeToolAccess, Codex,
+    Mock, ModelInfo, Ollama, OpenAiCompatible, ProfileKey, ProviderCredentials, ProviderError,
+    ProviderKind, ProviderProfile, TaskRouterMode, ToolCallingProvider,
 };
 use tauri::{AppHandle, State};
 
@@ -52,6 +52,51 @@ pub fn get_ai_settings(
 pub fn set_ai_enabled(app: AppHandle, ai_settings: State<Mutex<AiSettings>>, enabled: bool) {
     let mut settings = ai_settings.lock().unwrap();
     settings.ai_enabled = enabled;
+    ai_config_store::save(&app, &settings);
+}
+
+/// `agent-core-and-task-router`'s Task Router `mode` setting -- `Single`
+/// (today's behavior, always `default_profile`) vs `Mix` (local model
+/// tries first, escalates complex tasks). See `task_router.rs`'s own
+/// doc comment for the routing behavior this flips; this command only
+/// persists the choice.
+#[tauri::command]
+pub fn set_task_router_mode(
+    app: AppHandle,
+    ai_settings: State<Mutex<AiSettings>>,
+    mode: TaskRouterMode,
+) {
+    let mut settings = ai_settings.lock().unwrap();
+    settings.task_router_mode = mode;
+    ai_config_store::save(&app, &settings);
+}
+
+/// The native-tool auto-zone root (design.md's "`read_file`/
+/// `list_directory`: the configured project directory is an auto-zone,
+/// not a hard boundary"). An empty string clears it back to `None`
+/// (the frontend's "not configured" state) rather than persisting an
+/// empty path, matching `set_profile_model`/`set_profile_base_url`'s
+/// own empty-string-means-unset convention.
+#[tauri::command]
+pub fn set_project_root(app: AppHandle, ai_settings: State<Mutex<AiSettings>>, path: String) {
+    let mut settings = ai_settings.lock().unwrap();
+    settings.project_root = (!path.is_empty()).then(|| PathBuf::from(path));
+    ai_config_store::save(&app, &settings);
+}
+
+/// Persists the whole `ClaudeCodeToolAccess` struct at once (`Group 7`'s
+/// per-tool `--allowedTools`/`--disallowedTools` split) -- the frontend
+/// already holds the full current value from `get_ai_settings`'s
+/// snapshot and sends it back with one field flipped, so there's no
+/// need for a dozen single-tool commands.
+#[tauri::command]
+pub fn set_claude_code_tool_access(
+    app: AppHandle,
+    ai_settings: State<Mutex<AiSettings>>,
+    tool_access: ClaudeCodeToolAccess,
+) {
+    let mut settings = ai_settings.lock().unwrap();
+    settings.claude_code_tool_access = tool_access;
     ai_config_store::save(&app, &settings);
 }
 
@@ -257,43 +302,93 @@ pub struct ModelListResult {
     error: Option<String>,
 }
 
-/// Builds a live `Box<dyn AiProvider>` for `profile`. `resume_session_id`
-/// is only meaningful for CLI-backed subscription profiles
+/// Whether a routed profile can only carry on a plain conversation, or
+/// can additionally call tools mid-turn -- decided once, at construction
+/// time, alongside the rest of `route_provider()`'s provider selection,
+/// rather than via `Box<dyn AiProvider>` downcasting later (the concrete
+/// type is already known here; Rust has no clean way to ask a type-
+/// erased trait object whether it also implements a second trait).
+/// `ToolCapable` also satisfies `AiProvider` (`ToolCallingProvider:
+/// AiProvider`), so [`RoutedExecution::into_ai_provider`] can hand back
+/// a plain `Box<dyn AiProvider>` for either variant.
+pub(crate) enum RoutedExecution {
+    PlainChat(Box<dyn AiProvider>),
+    ToolCapable(Box<dyn ToolCallingProvider>),
+}
+
+impl RoutedExecution {
+    /// Discards the tool-calling capability, if any, and returns a
+    /// plain `Box<dyn AiProvider>` -- what every call site needs today
+    /// (the Agent Loop that would actually use `ToolCapable`'s extra
+    /// capability doesn't exist yet). Relies on `dyn` trait upcasting
+    /// (stable since Rust 1.86) to coerce `Box<dyn ToolCallingProvider>`
+    /// into `Box<dyn AiProvider>`.
+    pub(crate) fn into_ai_provider(self) -> Box<dyn AiProvider> {
+        match self {
+            RoutedExecution::PlainChat(provider) => provider,
+            RoutedExecution::ToolCapable(provider) => provider,
+        }
+    }
+}
+
+/// Builds a live, routed provider for `profile`. `resume_session_id` is
+/// only meaningful for CLI-backed subscription profiles
 /// (`ClaudeCodeCli`/`Codex`'s own warm-session model) -- every other
-/// branch ignores it.
-pub(crate) fn build_provider(
+/// branch ignores it. `claude_code_tool_access` is only meaningful for
+/// `ClaudeCodeCli` (Group 7's by-case native-tool allow-list); every
+/// other branch ignores it too. Tool-calling capability is granted only
+/// to `(Ollama, Local)` -- `ToolCallingProvider`'s v1 implementation,
+/// per design.md's "`ToolCallingProvider` is a separate trait from
+/// `AiProvider`".
+pub(crate) fn route_provider(
     credentials: &ProviderCredentials,
     profile: &ProviderProfile,
     resume_session_id: Option<String>,
-) -> Box<dyn AiProvider> {
+    claude_code_tool_access: &ClaudeCodeToolAccess,
+) -> RoutedExecution {
     match (profile.provider, profile.auth_method) {
-        (ProviderKind::OpenAi, AuthMethod::ApiKey) => Box::new(OpenAiCompatible::new(
-            credentials.openai_api_key.clone().unwrap_or_default(),
-            profile.base_url.clone().unwrap_or_else(|| {
-                fleet_snowfluff_ai::providers::openai::DEFAULT_BASE_URL.to_string()
-            }),
-            profile.model.clone().unwrap_or_default(),
-        )),
-        (ProviderKind::Anthropic, AuthMethod::ApiKey) => Box::new(Anthropic::new(
-            credentials.anthropic_api_key.clone().unwrap_or_default(),
-            profile.base_url.clone().unwrap_or_else(|| {
-                fleet_snowfluff_ai::providers::anthropic::DEFAULT_BASE_URL.to_string()
-            }),
-            profile.model.clone().unwrap_or_default(),
-        )),
+        (ProviderKind::OpenAi, AuthMethod::ApiKey) => {
+            RoutedExecution::PlainChat(Box::new(OpenAiCompatible::new(
+                credentials.openai_api_key.clone().unwrap_or_default(),
+                profile.base_url.clone().unwrap_or_else(|| {
+                    fleet_snowfluff_ai::providers::openai::DEFAULT_BASE_URL.to_string()
+                }),
+                profile.model.clone().unwrap_or_default(),
+            )))
+        }
+        (ProviderKind::Anthropic, AuthMethod::ApiKey) => {
+            RoutedExecution::PlainChat(Box::new(Anthropic::new(
+                credentials.anthropic_api_key.clone().unwrap_or_default(),
+                profile.base_url.clone().unwrap_or_else(|| {
+                    fleet_snowfluff_ai::providers::anthropic::DEFAULT_BASE_URL.to_string()
+                }),
+                profile.model.clone().unwrap_or_default(),
+            )))
+        }
         (ProviderKind::Anthropic, AuthMethod::Subscription) => {
-            Box::new(ClaudeCodeCli::new(profile.model.clone(), resume_session_id))
+            RoutedExecution::PlainChat(Box::new(ClaudeCodeCli::new(
+                profile.model.clone(),
+                resume_session_id,
+                *claude_code_tool_access,
+            )))
         }
-        (ProviderKind::OpenAi, AuthMethod::Subscription) => {
-            Box::new(Codex::new(profile.model.clone(), resume_session_id))
-        }
-        (ProviderKind::Ollama, _) => Box::new(Ollama::new(
-            profile.base_url.clone().unwrap_or_else(|| {
-                fleet_snowfluff_ai::providers::ollama::DEFAULT_BASE_URL.to_string()
-            }),
-            profile.model.clone().unwrap_or_default(),
+        (ProviderKind::OpenAi, AuthMethod::Subscription) => RoutedExecution::PlainChat(Box::new(
+            Codex::new(profile.model.clone(), resume_session_id),
         )),
-        (ProviderKind::Mock, _) => Box::new(Mock),
+        (ProviderKind::Ollama, auth_method) => {
+            let provider = Ollama::new(
+                profile.base_url.clone().unwrap_or_else(|| {
+                    fleet_snowfluff_ai::providers::ollama::DEFAULT_BASE_URL.to_string()
+                }),
+                profile.model.clone().unwrap_or_default(),
+            );
+            if auth_method == AuthMethod::Local {
+                RoutedExecution::ToolCapable(Box::new(provider))
+            } else {
+                RoutedExecution::PlainChat(Box::new(provider))
+            }
+        }
+        (ProviderKind::Mock, _) => RoutedExecution::PlainChat(Box::new(Mock)),
         (ProviderKind::OpenAi | ProviderKind::Anthropic, AuthMethod::Local) => {
             unreachable!(
                 "{:?} never has AuthMethod::Local -- only Ollama/Mock do (see AuthMethod's own \
@@ -302,6 +397,21 @@ pub(crate) fn build_provider(
             )
         }
     }
+}
+
+/// Builds a live `Box<dyn AiProvider>` for `profile` -- every existing
+/// call site only ever needs plain chat behavior today, so this stays
+/// the thin, non-tool-aware entry point; `route_provider` is the one
+/// that actually decides tool-calling capability, for whichever future
+/// caller (the Agent Loop) needs to keep it.
+pub(crate) fn build_provider(
+    credentials: &ProviderCredentials,
+    profile: &ProviderProfile,
+    resume_session_id: Option<String>,
+    claude_code_tool_access: &ClaudeCodeToolAccess,
+) -> Box<dyn AiProvider> {
+    route_provider(credentials, profile, resume_session_id, claude_code_tool_access)
+        .into_ai_provider()
 }
 
 /// Fetches the live model list for the (`provider`, `auth_method`)
@@ -331,7 +441,7 @@ pub async fn fetch_provider_models(
             model: None,
             base_url: None,
         });
-        build_provider(&creds, &profile, None)
+        build_provider(&creds, &profile, None, &settings.claude_code_tool_access)
     };
 
     Ok(match provider_impl.list_models().await {
@@ -379,7 +489,7 @@ pub async fn check_profile_status(
         {
             return Ok(ProfileStatus::DisclosurePending);
         }
-        build_provider(&creds, &profile, None)
+        build_provider(&creds, &profile, None, &settings.claude_code_tool_access)
     };
 
     Ok(match provider_impl.check_availability().await {
@@ -399,7 +509,7 @@ pub async fn check_profile_status(
 /// profile's own CLI login flow in the user's browser
 /// (`subscription-first-chat`'s "CLI installed but not logged in"
 /// scenario, via `AiProvider::trigger_login()`) -- fire-and-forget:
-/// Fleet does not wait for the flow to complete, it only starts it.
+/// Aemeath does not wait for the flow to complete, it only starts it.
 /// `Ok(true)` means the login command was spawned; the caller should
 /// tell the user to complete it in their browser and then re-check
 /// status (`check_profile_status`). `Ok(false)` means the profile isn't
@@ -422,7 +532,7 @@ pub async fn trigger_profile_login(
         let Some(profile) = settings.profile(key).cloned() else {
             return Ok(false);
         };
-        build_provider(&creds, &profile, None)
+        build_provider(&creds, &profile, None, &settings.claude_code_tool_access)
     };
 
     provider_impl.trigger_login().await.map(|()| true).map_err(|err| err.to_string())
@@ -442,6 +552,9 @@ mod tests {
             enabled_profiles: profiles,
             default_profile: None,
             acknowledged_disclosures: vec![],
+            task_router_mode: Default::default(),
+            project_root: None,
+            claude_code_tool_access: Default::default(),
         }
     }
 
@@ -454,6 +567,9 @@ mod tests {
             enabled_profiles: profiles,
             default_profile: None,
             acknowledged_disclosures: acknowledged,
+            task_router_mode: Default::default(),
+            project_root: None,
+            claude_code_tool_access: Default::default(),
         }
     }
 
@@ -547,14 +663,20 @@ mod tests {
     #[test]
     fn build_provider_dispatches_anthropic_by_auth_method() {
         let creds = ProviderCredentials::default();
-        let api_key_provider =
-            build_provider(&creds, &profile(ProviderKind::Anthropic, AuthMethod::ApiKey), None);
+        let tool_access = ClaudeCodeToolAccess::default();
+        let api_key_provider = build_provider(
+            &creds,
+            &profile(ProviderKind::Anthropic, AuthMethod::ApiKey),
+            None,
+            &tool_access,
+        );
         assert_eq!(api_key_provider.kind(), ProviderKind::Anthropic);
 
         let subscription_provider = build_provider(
             &creds,
             &profile(ProviderKind::Anthropic, AuthMethod::Subscription),
             Some("prior-session-id".to_string()),
+            &tool_access,
         );
         assert_eq!(subscription_provider.kind(), ProviderKind::Anthropic);
     }
@@ -562,12 +684,75 @@ mod tests {
     #[test]
     fn build_provider_dispatches_openai_by_auth_method() {
         let creds = ProviderCredentials::default();
-        let api_key_provider =
-            build_provider(&creds, &profile(ProviderKind::OpenAi, AuthMethod::ApiKey), None);
+        let tool_access = ClaudeCodeToolAccess::default();
+        let api_key_provider = build_provider(
+            &creds,
+            &profile(ProviderKind::OpenAi, AuthMethod::ApiKey),
+            None,
+            &tool_access,
+        );
         assert_eq!(api_key_provider.kind(), ProviderKind::OpenAi);
 
-        let subscription_provider =
-            build_provider(&creds, &profile(ProviderKind::OpenAi, AuthMethod::Subscription), None);
+        let subscription_provider = build_provider(
+            &creds,
+            &profile(ProviderKind::OpenAi, AuthMethod::Subscription),
+            None,
+            &tool_access,
+        );
         assert_eq!(subscription_provider.kind(), ProviderKind::OpenAi);
+    }
+
+    #[test]
+    fn only_ollama_local_is_tool_capable() {
+        let creds = ProviderCredentials::default();
+        let tool_access = ClaudeCodeToolAccess::default();
+        let combinations = [
+            profile(ProviderKind::OpenAi, AuthMethod::ApiKey),
+            profile(ProviderKind::OpenAi, AuthMethod::Subscription),
+            profile(ProviderKind::Anthropic, AuthMethod::ApiKey),
+            profile(ProviderKind::Anthropic, AuthMethod::Subscription),
+            profile(ProviderKind::Ollama, AuthMethod::ApiKey),
+            profile(ProviderKind::Ollama, AuthMethod::Subscription),
+            profile(ProviderKind::Mock, AuthMethod::ApiKey),
+            profile(ProviderKind::Mock, AuthMethod::Local),
+        ];
+        for profile in combinations {
+            let routed = route_provider(&creds, &profile, None, &tool_access);
+            assert!(
+                matches!(routed, RoutedExecution::PlainChat(_)),
+                "{:?} should not be tool-capable",
+                (profile.provider, profile.auth_method)
+            );
+        }
+
+        let ollama_local = profile(ProviderKind::Ollama, AuthMethod::Local);
+        let routed = route_provider(&creds, &ollama_local, None, &tool_access);
+        assert!(
+            matches!(routed, RoutedExecution::ToolCapable(_)),
+            "(Ollama, Local) should be the only tool-capable combination"
+        );
+    }
+
+    #[test]
+    fn into_ai_provider_works_for_both_routed_execution_variants() {
+        let creds = ProviderCredentials::default();
+        let tool_access = ClaudeCodeToolAccess::default();
+        let plain = route_provider(
+            &creds,
+            &profile(ProviderKind::OpenAi, AuthMethod::ApiKey),
+            None,
+            &tool_access,
+        )
+        .into_ai_provider();
+        assert_eq!(plain.kind(), ProviderKind::OpenAi);
+
+        let tool_capable = route_provider(
+            &creds,
+            &profile(ProviderKind::Ollama, AuthMethod::Local),
+            None,
+            &tool_access,
+        )
+        .into_ai_provider();
+        assert_eq!(tool_capable.kind(), ProviderKind::Ollama);
     }
 }

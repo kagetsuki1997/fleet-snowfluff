@@ -56,13 +56,13 @@ pub trait AiProvider: Send + Sync {
 
     /// Best-effort attempt to start this provider's own login flow (a
     /// browser-based OAuth ceremony owned entirely by the CLI, not
-    /// Fleet) for a subscription auth method that isn't logged in yet
+    /// Aemeath) for a subscription auth method that isn't logged in yet
     /// (`subscription-first-chat`'s "CLI installed but not logged in"
     /// scenario). Default is a no-op `Ok(())` for every provider
     /// without a CLI-owned login flow of its own -- API-key and local
     /// providers have nothing to trigger. CLI-backed subscription
     /// providers override this to spawn their CLI's own login
-    /// subcommand, detached, without waiting for it to finish: Fleet
+    /// subcommand, detached, without waiting for it to finish: Aemeath
     /// starts the ceremony, it does not drive or babysit it. Returning
     /// `Ok(())` means only "the command was spawned," not "login
     /// succeeded" -- the caller must re-check `check_availability()`
