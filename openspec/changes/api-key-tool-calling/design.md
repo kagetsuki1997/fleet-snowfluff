@@ -1,0 +1,57 @@
+## Context
+
+See `proposal.md` for motivation. Current state:
+
+- `ToolCallingProvider` (`chat_with_tools(messages, tools) -> ToolCallStream` of `TextDelta` / `ToolCall{id,name,arguments}`) exists and only `Ollama` implements it. `route_provider` grants `ToolCapable` solely to `(Ollama, Local)`, decided at construction rather than per request.
+- `Message` has `Role::Tool` and `tool_calls: Vec<ToolCallRecord>`, but `Message::tool(content)` carries no id. Ollama pairs results by order; OpenAI (`tool_call_id`) and Anthropic (`tool_use_id`) require the pairing to be explicit. The loop already holds `call.id` when it pushes each result.
+- `OpenAiCompatible::build_chat_body` and Ollama's tool body both serialize `messages` directly. `ToolCallRecord`'s serialized shape (`{id,name,arguments}`) is not OpenAI's (`{id,type:"function",function:{name,arguments:<string>}}`), so a real mapping is needed for OpenAI; Anthropic already maps messages by hand and has an `unreachable!` arm for `Role::Tool`.
+- `run_generation_mix_local` deliberately runs the local attempt text-only; the agent loop runs only when a `ToolCapable` profile is the routed profile directly. So in `mix` mode tool-needing requests already escalate to `default_profile` by rule (`personas/task-router-rules.md`); this change makes a cloud `default_profile` able to act on them.
+- Cloud disclosure text lives in five locale files under `ai.disclosure.<provider>.<auth_method>`; acknowledgement is stored as `AiSettings.acknowledged_disclosures: Vec<ProfileKey>`.
+
+## Goals / Non-Goals
+
+**Goals:**
+
+- OpenAI and Anthropic API-key profiles on their default endpoints run the existing agent loop with the existing five native tools.
+- No behavior change for Ollama, for custom-endpoint API-key profiles, or for the CLI-backed subscription profiles.
+- Users are told, before it happens, that tool results now go to their cloud provider.
+
+**Non-Goals:**
+
+- Tool use on custom endpoints (a per-profile opt-in could be added later without redoing anything here).
+- A file-writing native tool, or any change to permission tiers.
+- `mix` mode's local attempt running the tool loop, loop-level escalation on `MaxIterationsReached`, and capability-aware routing. See Decision 8 for the recorded limit and a sketch for later.
+- Verifying against live paid endpoints in the automated suite.
+
+## Decisions
+
+**1. `Message` gains `tool_call_id: Option<String>`, omitted from serialization when absent.** Plain messages serialize byte-identically to today, and the agent loop sets the id on every tool result it pushes (`Message::tool_result(id, content)`; `Message::tool(content)` remains for callers with no id). Ollama's wire format must not change: its body builder either strips the field or a test asserts it never appears in Ollama's request. Alternative: a separate message type for tool results (wider blast radius across the loop and every provider for no gain).
+
+**2. Tool-path request building is separate from plain-chat building in both providers.** `build_chat_body` stays as is, so plain chat and custom endpoints are untouched; new tool-aware builders map `Message` to each API's real shape. This also replaces `Anthropic`'s `unreachable!` for `Role::Tool` on the tool path only; the plain-chat builder keeps its guard because `Role::Tool` still never reaches it (tool messages exist only inside the loop and are never persisted).
+
+**3. OpenAI-compatible mapping and streaming.** Request: `tools: [{type:"function", function:{name, description, parameters}}]`. An assistant turn with tool calls becomes `{role:"assistant", content:<text|null>, tool_calls:[{id, type:"function", function:{name, arguments:<JSON string>}}]}`; a result becomes `{role:"tool", tool_call_id, content}`. Stream: `delta.tool_calls[]` fragments arrive keyed by `index`, with `id` and `function.name` on the first fragment and `function.arguments` as string pieces. A per-stream accumulator concatenates argument pieces per index and emits each complete `ToolCall` (parsing the accumulated string as JSON; empty means `{}`; unparseable is a provider error, not a silent drop) when `finish_reason` arrives or the stream ends. The accumulator is stateful across lines, so it is built as a small fold over parsed fragments layered on the existing SSE line handling rather than by widening the stateless per-line parser.
+
+**4. Anthropic mapping and streaming.** Request: `tools: [{name, description, input_schema}]`, system prompt stays top-level as today. An assistant turn with tool calls becomes content blocks `[{type:"text"}?, {type:"tool_use", id, name, input}]`. Results become `tool_result` blocks (`tool_use_id`, `content`) inside a **single** user message per turn — Anthropic requires every result for an assistant turn to arrive together in the next user turn, so consecutive `Role::Tool` messages are merged rather than emitted as separate user turns. Stream: `content_block_start` with a `tool_use` block gives `id`/`name`; `content_block_delta` with `input_json_delta` gives `partial_json` pieces; `content_block_stop` completes the block and emits the `ToolCall`. Text deltas continue through the existing extraction, which is shared with `ClaudeCodeCli`, so tool handling is added beside it and must not change what `ClaudeCodeCli` sees.
+
+**5. Capability is decided at construction, from brand, auth method, and endpoint.** `route_provider` returns `ToolCapable` for `(OpenAi|Anthropic, ApiKey)` only when `base_url` is unset or equals the provider's default (compared after trimming a trailing slash). Custom endpoints stay `PlainChat`. Alternatives: all API-key profiles (breaks users of endpoints that reject a `tools` field, on every message); retry as plain chat when a request fails with a tools-related error (depends on matching error text across many OpenAI-compatible servers, which is fragile); a per-profile setting (a possible later addition; not needed to deliver the value here).
+
+**6. Disclosure changes and one-time re-acknowledgement.** The two API-key disclosure strings in all five locales gain the tool-result statement and a note that tool use may make several billed requests per message. Settings gains a small version marker for the disclosure text; on load, when it is below the current value, the OpenAI and Anthropic API-key entries are removed from `acknowledged_disclosures` and the marker is raised, so the migration runs exactly once. Permission tiers are left unchanged on purpose: a read inside `project_root` is already automatic and Claude Code's read tools behave the same way, so the honest fix is the disclosure, not the tiers. Alternative: downgrade file reads to `confirm` for cloud loops (safer, but noisy and inconsistent with Claude Code).
+
+**7. `read_file` output is capped, for every provider.** `ReadFileTool` currently returns a whole file via `read_to_string`; only `run_command` truncates. Once results go to a cloud API an unbounded file is unbounded cost, a context-overflow risk, and more data leaving the machine than the disclosure implies, so `read_file` gets the same style of bound as `run_command` (a fixed byte limit and a visible truncation marker). It applies to Ollama too, which is a small behavior change there; a truncated read is still usable and the marker tells the model it was cut off. Alternative: cap only on cloud loops (two behaviors for one tool, and the tool has no notion of which provider is calling it).
+
+**8. Known limit, recorded not fixed: `ESCALATE` lands on `default_profile` regardless of what it can do.** The rules file sends `needs_code_edit` / `needs_shell` work to escalation, but the native tools have no file-writing tool, and Claude Code and Codex are read-only by default. A destination lacking the capability replies that it cannot; the user can see why but the router did not prevent the handoff. If this proves common, the smallest sound fix keeps `<<ESCALATE>>` unchanged and lets the reply carry an optional suffix of capability flags (`<<ESCALATE>> needs: shell, code_edit`) that the router compares against a per-profile capability descriptor. The current detector matches only the marker prefix, so it stays backward compatible, and unparseable or absent flags mean "unknown", treated as a plain escalate. Flags rather than tool names because the flags are runtime-agnostic and are already the vocabulary in the rules file. That, plus what to do on a mismatch, is a separate change.
+
+## Risks / Trade-offs
+
+- [Two independent streaming parsers plus message mapping are real work and easy to get subtly wrong] → built from each API's documented shapes as literal fixtures, including split-argument, multiple-call, empty-argument, and text-then-tool cases; optional `#[ignore]`d live tests using the user's own keys for manual confirmation.
+- [Anthropic rejects a conversation whose tool results are not grouped in the immediately following user turn] → merging is a dedicated, tested step in the message mapping.
+- [File contents and command output now leave the machine for these two profiles] → disclosure updated in five locales and re-shown once; tiers deliberately unchanged and consistent with Claude Code.
+- [The re-acknowledgement may leave an already-enabled profile unusable until re-acknowledged, depending on how the UI gates an enabled-but-unacknowledged profile] → verify that gating during implementation and make the resulting state explicit rather than silent.
+- [The loop can make up to its iteration limit of requests per message, each resending the conversation, all billed to the API key] → stated in the updated disclosure rather than hidden; the iteration limit already bounds it.
+- [A user with a custom endpoint gets no tools] → intended and unchanged from today; a per-profile opt-in is the natural later addition.
+- [An escalated task may land on a profile that cannot perform it] → recorded as a known limit (Decision 8), not fixed here.
+- [Ollama's wire format could shift through the shared `Message` type] → the new field is omitted when absent and a test asserts Ollama's request never carries it.
+
+## Migration Plan
+
+No data migration beyond the one-time disclosure re-acknowledgement in Decision 6, which runs on first load after upgrade and is idempotent. Existing configurations keep their profiles, default, and custom endpoints unchanged. Rollback is reverting the change; a leftover disclosure-version marker is ignored by older builds.
