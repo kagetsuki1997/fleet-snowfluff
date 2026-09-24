@@ -20,8 +20,12 @@
 
 ## 4. Capability routing
 
-- [ ] 4.1 Make `route_provider` return `ToolCapable` for `(OpenAi|Anthropic, ApiKey)` only when `base_url` is unset or equals the provider default (trailing slash trimmed); every other combination stays as it is. Verify by extending the existing dispatch tests: default and unset URL are tool-capable, a custom URL is plain chat, subscription profiles and Mock are plain chat, Ollama Local is still tool-capable.
+- [x] 4.1 Make `route_provider` return `ToolCapable` for `(OpenAi|Anthropic, ApiKey)` only when `base_url` is unset or equals the provider default (trailing slash trimmed); every other combination stays as it is. Verify by extending the existing dispatch tests: default and unset URL are tool-capable, a custom URL is plain chat, subscription profiles and Mock are plain chat, Ollama Local is still tool-capable. The rule lives in one place, `ProviderProfile::supports_tool_calling()` (`settings.rs`), and `route_provider` asks it. Endpoint match ignores case, a trailing slash, and blank; a different path on the same host (`/v2`) does not count. Tests: 4 on the rule itself and one routing test covering tool-capable (Ollama Local; both API-key brands unset/default/trailing-slash) versus plain (custom URLs, both subscriptions, Ollama non-Local, Mock).
 - [ ] 4.2 Confirm `run_generation_with_tools` and the mix-mode fallback path work with a cloud tool-capable profile as `default_profile` (the confirmation popup, project-root scoping, streaming, and the logged final text); verify by reading the flow and with a manual run in `just dev` against a real key, recording the result.
+
+  **Verified so far:** by reading the flow, `run_generation_with_tools` is written entirely against the `ToolCallingProvider` trait — the confirmation popup, `project_root` scoping (`ToolContext`), live text streaming, and the logged final reply have no Ollama-specific step, and `run_generation_fallback` reaches it through `run_generation_routed`, so a `mix`-mode escalation to a cloud `default_profile` runs the loop. Stale "Ollama-only" comments in `chat_commands.rs`, `ai_commands.rs` and `tool_provider.rs` were corrected.
+
+  **Not done:** the manual `just dev` run against a real key — no `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` was available where this was implemented, and the GUI cannot be driven from here. Left unchecked until someone runs it.
 
 ## 5. Disclosure
 

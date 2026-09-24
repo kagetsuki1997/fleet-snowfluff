@@ -238,6 +238,32 @@ impl ProviderProfile {
         )
     }
 
+    /// Whether this profile can run Aemeath's tool-calling agent loop.
+    /// Decided from what the profile *is* -- brand, auth method, and
+    /// endpoint -- never guessed per request:
+    ///
+    /// - local Ollama: yes;
+    /// - an OpenAI or Anthropic API-key profile: yes, but only on the
+    ///   provider's own default endpoint. A custom `base_url` (OpenRouter,
+    ///   vLLM, LM Studio, a proxy) may reject a `tools` field, and such a
+    ///   profile chats fine today, so it stays plain chat rather than risking
+    ///   every message failing;
+    /// - everything else (subscription CLIs own their own tool loops; Mock has
+    ///   none): no.
+    pub fn supports_tool_calling(&self) -> bool {
+        use crate::providers::{anthropic, openai};
+        match (self.provider, self.auth_method) {
+            (ProviderKind::Ollama, AuthMethod::Local) => true,
+            (ProviderKind::OpenAi, AuthMethod::ApiKey) => {
+                is_default_endpoint(self.base_url.as_deref(), openai::DEFAULT_BASE_URL)
+            }
+            (ProviderKind::Anthropic, AuthMethod::ApiKey) => {
+                is_default_endpoint(self.base_url.as_deref(), anthropic::DEFAULT_BASE_URL)
+            }
+            _ => false,
+        }
+    }
+
     /// Whether this profile runs a provider's own CLI (`claude`, `codex`)
     /// as a subprocess -- the only kind of profile that has a working
     /// directory or a resumable session.
@@ -246,6 +272,15 @@ impl ProviderProfile {
             (self.provider, self.auth_method),
             (ProviderKind::Anthropic | ProviderKind::OpenAi, AuthMethod::Subscription)
         )
+    }
+}
+
+/// Unset, blank, or the provider's own URL (ignoring case and a trailing
+/// slash) all mean "the default endpoint".
+fn is_default_endpoint(base_url: Option<&str>, default: &str) -> bool {
+    match base_url.map(str::trim).filter(|url| !url.is_empty()) {
+        None => true,
+        Some(url) => url.trim_end_matches('/').eq_ignore_ascii_case(default.trim_end_matches('/')),
     }
 }
 
@@ -835,5 +870,83 @@ mod tests {
         assert!(!profile(ProviderKind::OpenAi, AuthMethod::ApiKey).uses_cli());
         assert!(!profile(ProviderKind::Ollama, AuthMethod::Local).uses_cli());
         assert!(!profile(ProviderKind::Mock, AuthMethod::Local).uses_cli());
+    }
+
+    // -- tool-calling capability (api-key-tool-calling) --
+
+    fn api_key_profile(provider: ProviderKind, base_url: Option<&str>) -> ProviderProfile {
+        ProviderProfile {
+            provider,
+            auth_method: AuthMethod::ApiKey,
+            model: None,
+            base_url: base_url.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn api_key_profiles_on_the_default_endpoint_support_tool_calling() {
+        for provider in [ProviderKind::OpenAi, ProviderKind::Anthropic] {
+            assert!(api_key_profile(provider, None).supports_tool_calling(), "{provider:?} unset");
+            assert!(
+                api_key_profile(provider, Some("")).supports_tool_calling(),
+                "{provider:?} blank"
+            );
+            assert!(
+                api_key_profile(provider, Some("  ")).supports_tool_calling(),
+                "{provider:?} spaces"
+            );
+        }
+        assert!(api_key_profile(ProviderKind::OpenAi, Some("https://api.openai.com/v1"))
+            .supports_tool_calling());
+        assert!(api_key_profile(ProviderKind::Anthropic, Some("https://api.anthropic.com/v1"))
+            .supports_tool_calling());
+    }
+
+    #[test]
+    fn the_default_endpoint_is_recognised_despite_a_trailing_slash_or_case() {
+        assert!(api_key_profile(ProviderKind::OpenAi, Some("https://api.openai.com/v1/"))
+            .supports_tool_calling());
+        assert!(api_key_profile(ProviderKind::OpenAi, Some(" HTTPS://API.OPENAI.COM/v1// "))
+            .supports_tool_calling());
+    }
+
+    #[test]
+    fn a_custom_endpoint_never_supports_tool_calling() {
+        for url in [
+            "https://openrouter.ai/api/v1",
+            "http://localhost:1234/v1",
+            "https://my-proxy.example.com/v1",
+            // Same host, different path: not the provider's own endpoint.
+            "https://api.openai.com/v2",
+        ] {
+            assert!(
+                !api_key_profile(ProviderKind::OpenAi, Some(url)).supports_tool_calling(),
+                "{url}"
+            );
+        }
+        // An OpenAI URL on an Anthropic profile is not Anthropic's default either.
+        assert!(!api_key_profile(ProviderKind::Anthropic, Some("https://api.openai.com/v1"))
+            .supports_tool_calling());
+    }
+
+    #[test]
+    fn local_ollama_supports_tool_calling_and_nothing_else_does() {
+        let profile = |provider, auth_method| ProviderProfile {
+            provider,
+            auth_method,
+            model: None,
+            base_url: None,
+        };
+        assert!(profile(ProviderKind::Ollama, AuthMethod::Local).supports_tool_calling());
+        for (provider, auth) in [
+            (ProviderKind::OpenAi, AuthMethod::Subscription),
+            (ProviderKind::Anthropic, AuthMethod::Subscription),
+            (ProviderKind::Ollama, AuthMethod::ApiKey),
+            (ProviderKind::Ollama, AuthMethod::Subscription),
+            (ProviderKind::Mock, AuthMethod::ApiKey),
+            (ProviderKind::Mock, AuthMethod::Local),
+        ] {
+            assert!(!profile(provider, auth).supports_tool_calling(), "{provider:?}/{auth:?}");
+        }
     }
 }

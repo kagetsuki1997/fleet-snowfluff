@@ -811,12 +811,12 @@ async fn run_generation_with_tools(
 ) {
     log::debug!("{execution_id:?} starting tool-calling generation for {profile_key:?}");
 
-    // No `store_cli_session_id` call here: `route_provider` only ever
-    // resolves `ToolCapable` for `(Ollama, Local)`, and Ollama has no
-    // resumable-session concept (`AiProvider::session_id`'s default
-    // `None`, never overridden -- same reasoning as
-    // `run_generation_mix_local`'s own local attempt). Revisit if a
-    // future `ToolCapable` provider ever does have one.
+    // No `store_cli_session_id` call here: `route_provider` only resolves
+    // `ToolCapable` for Ollama and the OpenAI/Anthropic API-key profiles,
+    // and none of them has a resumable-session concept
+    // (`AiProvider::session_id`'s default `None`, never overridden --
+    // only the CLI-backed subscription providers keep one, and those are
+    // never `ToolCapable`). Revisit if a `ToolCapable` provider ever does.
     let ctx = ToolContext { project_root, conversation_id: conversation_id.clone() };
     let registry = ToolRegistry::new(vec![
         Arc::new(WebSearchTool::default()),
