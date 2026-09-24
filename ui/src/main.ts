@@ -180,7 +180,7 @@ interface LogEntry {
   timestamp: string;
 }
 
-type NotReadyReason = "disabled" | "no_provider";
+type NotReadyReason = "disabled" | "no_provider" | "disclosure_pending";
 
 interface ChatStateSnapshot {
   entries: LogEntry[];
@@ -840,6 +840,30 @@ async function refreshProfileStatus(
     el.className = `ai-profile-status ai-profile-status--${status.state}`;
     if ("detail" in status) el.title = status.detail;
 
+    // An *enabled* profile whose acknowledgement was cleared (its
+    // disclosure text changed): show the updated disclosure right here,
+    // with the one action that resolves it. Chat is blocked for this
+    // profile until then (`chat_readiness`), so it must not be a bare
+    // status label with no way forward.
+    if (status.state === "disclosure_pending") {
+      const disclosureEl = panel.querySelector<HTMLElement>(`.ai-disclosure[data-slot="${key}"]`);
+      if (disclosureEl && !disclosureEl.querySelector(".ai-disclosure-accept")) {
+        disclosureEl.innerHTML = `
+          <p class="hint">${t(`ai.disclosure.${slot.provider}.${slot.auth_method}`)}</p>
+          <button type="button" class="ai-disclosure-accept">${t("ai.disclosure.accept")}</button>
+        `;
+        disclosureEl
+          .querySelector<HTMLButtonElement>(".ai-disclosure-accept")!
+          .addEventListener("click", async () => {
+            await invoke("acknowledge_profile_disclosure", {
+              provider: slot.provider,
+              authMethod: slot.auth_method,
+            });
+            await renderAi();
+          });
+      }
+    }
+
     // Only offer the login-trigger button for the one state it actually
     // applies to (`subscription-first-chat`'s "CLI installed but not
     // logged in" scenario) -- every other state either doesn't need a
@@ -1094,6 +1118,23 @@ async function renderChatWindow(): Promise<void> {
   // than inventing one, a still-pending state just polls this snapshot
   // until it resolves; the common case (window stays open throughout)
   // never touches this path at all, since the channel handles it live.
+  //
+  // The same snapshot also says whether chat is *ready*. While it isn't --
+  // AI disabled, no provider, or a cloud disclosure awaiting review -- the
+  // input is disabled, so no send ever happens and no event ever fires to
+  // re-check it; fixing the cause in the Settings window would otherwise
+  // leave this window blocked until it is reopened. So it re-checks on
+  // focus, and slowly while blocked. One timer chain serves both cases, so
+  // a focus refresh during a pending generation cannot double the polling.
+  let refreshTimer: number | undefined;
+  function scheduleRefresh(ms: number): void {
+    if (refreshTimer !== undefined) return;
+    refreshTimer = window.setTimeout(() => {
+      refreshTimer = undefined;
+      void refresh();
+    }, ms);
+  }
+
   async function refresh(): Promise<void> {
     const state = await invoke<ChatStateSnapshot>("get_chat_state");
     committedEntries = state.entries;
@@ -1101,9 +1142,13 @@ async function renderChatWindow(): Promise<void> {
     setPendingUi(state.is_pending);
     updateReadiness(state.ai_ready, state.not_ready_reason);
     if (state.is_pending) {
-      setTimeout(() => void refresh(), 1000);
+      scheduleRefresh(1000);
+    } else if (!state.ai_ready) {
+      scheduleRefresh(2000);
     }
   }
+
+  window.addEventListener("focus", () => void refresh());
 
   form.addEventListener("submit", (e) => {
     e.preventDefault();

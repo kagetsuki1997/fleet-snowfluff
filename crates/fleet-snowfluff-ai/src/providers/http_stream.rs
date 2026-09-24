@@ -110,6 +110,76 @@ pub async fn stream_lines_multi<T: Send + 'static>(
     Ok(Box::pin(stream))
 }
 
+/// A line parser that keeps state across lines -- needed where one
+/// logical item arrives in fragments (a tool call's JSON arguments
+/// streamed piece by piece) and can only be emitted once complete.
+/// [`stream_lines_stateful`] feeds it every complete line, then calls
+/// [`finish`](LineParser::finish) once when the response ends, so
+/// anything still buffered is flushed even if the server never sent a
+/// terminating marker.
+pub trait LineParser: Send + 'static {
+    type Item: Send + 'static;
+
+    fn push_line(&mut self, line: &str) -> Result<Vec<Self::Item>, ProviderError>;
+
+    /// Called once at the end of the stream. Must be safe to call after
+    /// the parser already flushed on its own terminating marker.
+    fn finish(&mut self) -> Result<Vec<Self::Item>, ProviderError> { Ok(Vec::new()) }
+}
+
+/// Like [`stream_lines_multi`], but driving a stateful [`LineParser`]
+/// instead of a stateless function.
+pub async fn stream_lines_stateful<P: LineParser>(
+    request: reqwest::RequestBuilder,
+    mut parser: P,
+    parse_error: fn(u16, &str) -> ProviderError,
+) -> Result<Pin<Box<dyn Stream<Item = Result<P::Item, ProviderError>> + Send>>, ProviderError> {
+    let response = request.send().await.map_err(|e| ProviderError::Network(e.to_string()))?;
+
+    if !response.status().is_success() {
+        let status = response.status().as_u16();
+        let body = response.text().await.unwrap_or_default();
+        return Err(parse_error(status, &body));
+    }
+
+    let mut byte_stream = response.bytes_stream();
+    let stream = async_stream::stream! {
+        let mut buffer = LineBuffer::new();
+        while let Some(chunk) = byte_stream.next().await {
+            let bytes = match chunk {
+                Ok(b) => b,
+                Err(e) => {
+                    yield Err(ProviderError::Network(e.to_string()));
+                    return;
+                }
+            };
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            for line in buffer.push(&text) {
+                match parser.push_line(&line) {
+                    Ok(items) => {
+                        for item in items {
+                            yield Ok(item);
+                        }
+                    }
+                    Err(e) => {
+                        yield Err(e);
+                        return;
+                    }
+                }
+            }
+        }
+        match parser.finish() {
+            Ok(items) => {
+                for item in items {
+                    yield Ok(item);
+                }
+            }
+            Err(e) => yield Err(e),
+        }
+    };
+    Ok(Box::pin(stream))
+}
+
 /// Shared by every real provider's `list_models`: GET a URL, and
 /// either hand the body to the provider's own list-parser or turn a
 /// non-2xx response into a [`ProviderError`].

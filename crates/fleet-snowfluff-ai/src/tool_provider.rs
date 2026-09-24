@@ -8,11 +8,13 @@
 //! never receive Aemeath's own tool definitions (they own their native
 //! tool loops entirely).
 //!
-//! **v1 implements this for `Ollama` only** -- `OpenAiCompatible`'s
-//! fragmented `delta.tool_calls[].function.arguments` streaming and
-//! `Anthropic`'s `tool_use`/`input_json_delta` content blocks are each
-//! independent, real parsing work, deliberately deferred to a fast-
-//! follow change.
+//! Implemented by `Ollama`, `OpenAiCompatible`, and `Anthropic`. The
+//! latter two arrived in `api-key-tool-calling`: each has its own
+//! streaming tool-call wire format (`OpenAiCompatible`'s fragmented
+//! `delta.tool_calls[].function.arguments`; `Anthropic`'s
+//! `tool_use`/`input_json_delta` content blocks), so each is its own
+//! independent parser, and whether a given profile gets this capability
+//! at all is `ProviderProfile::supports_tool_calling`'s call.
 
 use std::pin::Pin;
 
@@ -28,8 +30,9 @@ use crate::{
 /// every provider's own wire format can be built from (Ollama's
 /// `{"type": "function", "function": {name, description, parameters}}`
 /// mirrors OpenAI's own tool schema almost exactly, so this shape is
-/// deliberately provider-agnostic rather than Ollama-specific, even
-/// though only Ollama consumes it today).
+/// deliberately provider-agnostic rather than Ollama-specific: OpenAI
+/// consumes it as-is and Anthropic renames `parameters` to
+/// `input_schema`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolDefinition {
     pub name: String,

@@ -8,6 +8,8 @@ mod cli_process;
 mod history_preamble;
 mod http_stream;
 mod line_buffer;
+#[cfg(test)]
+pub(crate) mod test_server;
 
 pub mod anthropic;
 pub mod claude_code_cli;

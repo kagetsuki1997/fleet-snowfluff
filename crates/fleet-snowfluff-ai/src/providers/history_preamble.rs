@@ -106,7 +106,7 @@ mod tests {
     use super::*;
 
     fn turn(role: Role, content: &str) -> Message {
-        Message { role, content: content.to_string(), tool_calls: Vec::new() }
+        Message { role, content: content.to_string(), tool_calls: Vec::new(), tool_call_id: None }
     }
 
     #[test]

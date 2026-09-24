@@ -9,11 +9,44 @@ how each one behaves. For the high-level feature list and setup, see
 ## Tool calling
 
 Tool calling — letting the model read files, run commands, or search the
-web as part of answering you — is currently available **only for the local
-Ollama provider**. OpenAI/Anthropic API-key profiles don't support it yet;
+web as part of answering you — is available for:
+
+- the **local Ollama** provider, and
+- **OpenAI and Anthropic API-key profiles**, when they use the provider's
+  own endpoint (the default). An API-key profile pointed at a **custom
+  endpoint** (OpenRouter, a local server, a proxy…) stays plain chat: many
+  such servers reject tool definitions, and those profiles chat fine today,
+  so they're left exactly as they were.
+
 Claude Code and Codex (the subscription-auth providers) have their own,
 separate native-tool system instead — see
 [Claude Code / Codex own tools](#claude-code--codex-own-tools) below.
+
+### What leaves your machine
+
+With a cloud API-key profile, the **results of tool calls** — file
+contents, command output, search results — are sent to the provider along
+with the conversation, because the model needs them to continue. One
+message can also trigger several requests (the loop stops after a fixed
+number of steps), each billed to your API key. The provider's one-time
+data disclosure says both; it was updated for this, so if you had already
+accepted an API-key disclosure you'll be asked to review the new text once,
+and chat with that profile waits until you do (Settings → AI). The local
+Ollama provider doesn't send your conversation to a cloud model — though a
+`web_search` it runs still sends the search query to a search service (see
+[Web search](#web-search)).
+
+### When a task needs more than these tools
+
+In `mix` mode, a request that needs tools is escalated from the local model
+to your default profile; if that's an API-key profile on its default
+endpoint, it now runs the tool loop instead of just chatting. Fleet
+Snowfluff's own tools can read, search and (with confirmation) run
+commands, but they have **no tool for writing files** — a request to edit
+code may be declined, and a Claude Code profile only writes files if you've
+turned those tools on.
+
+### How each call is permitted
 
 When the model requests a tool call, it goes through a permission check
 before running:
@@ -35,7 +68,7 @@ before running:
 | Tool                 | What it does                                                                                 |
 | -------------------- | -------------------------------------------------------------------------------------------- |
 | `web_search`         | Searches the web — see [below](#web-search) for the full fallback chain and its limitations. |
-| `read_file`          | Reads a file's contents.                                                                     |
+| `read_file`          | Reads a file's contents (first 20 KB only — see below).                                      |
 | `list_directory`     | Lists a directory's contents.                                                                |
 | `run_command`        | Runs a shell command.                                                                        |
 | `get_system_context` | Reports the current date/time, OS, and CPU/memory/uptime.                                    |
@@ -44,6 +77,10 @@ before running:
 configured **project folder** (Settings → AI); a path outside it — or any
 path at all, if no project folder is set — asks for confirmation instead of
 being refused outright.
+
+`read_file` returns at most the first **20 KB** of a file and says so when it
+has cut one off, so a huge file can't flood the chat, run up your bill, or
+send more of your data to a cloud provider than the model needed.
 
 `run_command` runs in your project folder as its working directory (it
 isn't configurable per-request the way file access is, since a shell

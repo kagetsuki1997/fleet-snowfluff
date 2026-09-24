@@ -107,7 +107,7 @@ pub fn set_claude_code_tool_access(
 /// `AiSettings::disclosure_acknowledged`'s own doc comment). `None`
 /// (clearing the default) and any `Local`-auth profile (Ollama, Mock)
 /// never need one.
-fn disclosure_ok(settings: &AiSettings, key: Option<ProfileKey>) -> bool {
+pub(crate) fn disclosure_ok(settings: &AiSettings, key: Option<ProfileKey>) -> bool {
     let Some(key) = key else { return true };
     match key.auth_method {
         AuthMethod::Local => true,
@@ -336,10 +336,12 @@ impl RoutedExecution {
 /// (`ClaudeCodeCli`/`Codex`'s own warm-session model) -- every other
 /// branch ignores it. `claude_code_tool_access` is only meaningful for
 /// `ClaudeCodeCli` (Group 7's by-case native-tool allow-list); every
-/// other branch ignores it too. Tool-calling capability is granted only
-/// to `(Ollama, Local)` -- `ToolCallingProvider`'s v1 implementation,
-/// per design.md's "`ToolCallingProvider` is a separate trait from
-/// `AiProvider`".
+/// other branch ignores it too. Tool-calling capability comes from
+/// `ProviderProfile::supports_tool_calling` -- local Ollama, and
+/// OpenAI/Anthropic API-key profiles on the provider's own endpoint --
+/// decided here, once, at construction; `ToolCallingProvider` is a
+/// separate trait from `AiProvider` (see the original design.md's
+/// reasoning).
 pub(crate) fn route_provider(
     credentials: &ProviderCredentials,
     profile: &ProviderProfile,
@@ -348,22 +350,34 @@ pub(crate) fn route_provider(
 ) -> RoutedExecution {
     match (profile.provider, profile.auth_method) {
         (ProviderKind::OpenAi, AuthMethod::ApiKey) => {
-            RoutedExecution::PlainChat(Box::new(OpenAiCompatible::new(
+            let provider = OpenAiCompatible::new(
                 credentials.openai_api_key.clone().unwrap_or_default(),
                 profile.base_url.clone().unwrap_or_else(|| {
                     fleet_snowfluff_ai::providers::openai::DEFAULT_BASE_URL.to_string()
                 }),
                 profile.model.clone().unwrap_or_default(),
-            )))
+            );
+            // Tool-capable only on the provider's own endpoint; a custom
+            // one stays plain chat (see `supports_tool_calling`).
+            if profile.supports_tool_calling() {
+                RoutedExecution::ToolCapable(Box::new(provider))
+            } else {
+                RoutedExecution::PlainChat(Box::new(provider))
+            }
         }
         (ProviderKind::Anthropic, AuthMethod::ApiKey) => {
-            RoutedExecution::PlainChat(Box::new(Anthropic::new(
+            let provider = Anthropic::new(
                 credentials.anthropic_api_key.clone().unwrap_or_default(),
                 profile.base_url.clone().unwrap_or_else(|| {
                     fleet_snowfluff_ai::providers::anthropic::DEFAULT_BASE_URL.to_string()
                 }),
                 profile.model.clone().unwrap_or_default(),
-            )))
+            );
+            if profile.supports_tool_calling() {
+                RoutedExecution::ToolCapable(Box::new(provider))
+            } else {
+                RoutedExecution::PlainChat(Box::new(provider))
+            }
         }
         (ProviderKind::Anthropic, AuthMethod::Subscription) => RoutedExecution::PlainChat(
             Box::new(ClaudeCodeCli::new(profile.model.clone(), cli, *claude_code_tool_access)),
@@ -378,7 +392,7 @@ pub(crate) fn route_provider(
                 }),
                 profile.model.clone().unwrap_or_default(),
             );
-            if auth_method == AuthMethod::Local {
+            if auth_method == AuthMethod::Local && profile.supports_tool_calling() {
                 RoutedExecution::ToolCapable(Box::new(provider))
             } else {
                 RoutedExecution::PlainChat(Box::new(provider))
@@ -560,6 +574,7 @@ mod tests {
             task_router_mode: Default::default(),
             project_root: None,
             claude_code_tool_access: Default::default(),
+            disclosure_version: fleet_snowfluff_ai::settings::CURRENT_DISCLOSURE_VERSION,
         }
     }
 
@@ -575,6 +590,7 @@ mod tests {
             task_router_mode: Default::default(),
             project_root: None,
             claude_code_tool_access: Default::default(),
+            disclosure_version: fleet_snowfluff_ai::settings::CURRENT_DISCLOSURE_VERSION,
         }
     }
 
@@ -708,36 +724,53 @@ mod tests {
     }
 
     #[test]
-    fn only_ollama_local_is_tool_capable() {
+    fn tool_capability_follows_brand_auth_method_and_endpoint() {
         let creds = ProviderCredentials::default();
         let tool_access = ClaudeCodeToolAccess::default();
-        let combinations = [
+        let route = |profile: &ProviderProfile| {
+            route_provider(&creds, profile, CliContext::fresh(PathBuf::new()), &tool_access)
+        };
+        let with_url = |provider, url: &str| ProviderProfile {
+            provider,
+            auth_method: AuthMethod::ApiKey,
+            model: None,
+            base_url: Some(url.to_string()),
+        };
+
+        // Tool-capable: local Ollama, and API-key profiles on the default endpoint.
+        for tool_capable in [
+            profile(ProviderKind::Ollama, AuthMethod::Local),
             profile(ProviderKind::OpenAi, AuthMethod::ApiKey),
-            profile(ProviderKind::OpenAi, AuthMethod::Subscription),
             profile(ProviderKind::Anthropic, AuthMethod::ApiKey),
+            with_url(ProviderKind::OpenAi, "https://api.openai.com/v1/"),
+            with_url(ProviderKind::Anthropic, "https://api.anthropic.com/v1"),
+        ] {
+            assert!(
+                matches!(route(&tool_capable), RoutedExecution::ToolCapable(_)),
+                "{:?} (url {:?}) should be tool-capable",
+                (tool_capable.provider, tool_capable.auth_method),
+                tool_capable.base_url
+            );
+        }
+
+        // Plain chat: custom endpoints, subscription CLIs, Mock, and odd combinations.
+        for plain in [
+            with_url(ProviderKind::OpenAi, "https://openrouter.ai/api/v1"),
+            with_url(ProviderKind::Anthropic, "http://localhost:8080/v1"),
+            profile(ProviderKind::OpenAi, AuthMethod::Subscription),
             profile(ProviderKind::Anthropic, AuthMethod::Subscription),
             profile(ProviderKind::Ollama, AuthMethod::ApiKey),
             profile(ProviderKind::Ollama, AuthMethod::Subscription),
             profile(ProviderKind::Mock, AuthMethod::ApiKey),
             profile(ProviderKind::Mock, AuthMethod::Local),
-        ];
-        for profile in combinations {
-            let routed =
-                route_provider(&creds, &profile, CliContext::fresh(PathBuf::new()), &tool_access);
+        ] {
             assert!(
-                matches!(routed, RoutedExecution::PlainChat(_)),
-                "{:?} should not be tool-capable",
-                (profile.provider, profile.auth_method)
+                matches!(route(&plain), RoutedExecution::PlainChat(_)),
+                "{:?} (url {:?}) should be plain chat",
+                (plain.provider, plain.auth_method),
+                plain.base_url
             );
         }
-
-        let ollama_local = profile(ProviderKind::Ollama, AuthMethod::Local);
-        let routed =
-            route_provider(&creds, &ollama_local, CliContext::fresh(PathBuf::new()), &tool_access);
-        assert!(
-            matches!(routed, RoutedExecution::ToolCapable(_)),
-            "(Ollama, Local) should be the only tool-capable combination"
-        );
     }
 
     #[test]

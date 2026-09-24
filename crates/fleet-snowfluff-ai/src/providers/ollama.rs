@@ -69,9 +69,22 @@ pub fn build_chat_with_tools_body(
     messages: &[Message],
     tools: &[ToolDefinition],
 ) -> Value {
+    // Ollama pairs a tool result with its call by order and has no
+    // `tool_call_id`; `Message` now carries one for the APIs that need
+    // it (OpenAI, Anthropic), so drop it here to keep Ollama's request
+    // exactly what it was before that field existed.
+    let mut messages_json =
+        serde_json::to_value(messages).expect("Message serialization is infallible");
+    if let Value::Array(items) = &mut messages_json {
+        for item in items {
+            if let Some(object) = item.as_object_mut() {
+                object.remove("tool_call_id");
+            }
+        }
+    }
     let mut body = json!({
         "model": model,
-        "messages": messages,
+        "messages": messages_json,
         "stream": true,
         "think": false,
         "options": { "num_predict": MAX_RESPONSE_TOKENS },
@@ -329,6 +342,30 @@ mod tests {
         let body = build_chat_with_tools_body("qwen3:8b", &[Message::user("hi")], &tools);
         assert_eq!(body["think"], false);
         assert_eq!(body["tools"][0]["function"]["name"], "get_current_weather");
+    }
+
+    #[test]
+    fn build_chat_with_tools_body_never_sends_a_tool_call_id_to_ollama() {
+        let messages = [
+            Message::user("what is 6*7?"),
+            Message::assistant_with_tool_calls(
+                "",
+                vec![crate::message::ToolCallRecord {
+                    id: "call_1".into(),
+                    name: "calc".into(),
+                    arguments: json!({"expr": "6*7"}),
+                }],
+            ),
+            Message::tool_result("call_1", "42"),
+        ];
+        let body = build_chat_with_tools_body("qwen3:8b", &messages, &[]);
+        assert!(
+            !body.to_string().contains("tool_call_id"),
+            "Ollama has no such field, so it must not be sent: {body}"
+        );
+        // The result itself is still there, in Ollama's own shape.
+        assert_eq!(body["messages"][2]["role"], "tool");
+        assert_eq!(body["messages"][2]["content"], "42");
     }
 
     #[test]
