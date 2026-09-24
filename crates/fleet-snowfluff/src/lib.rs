@@ -6,6 +6,7 @@ pub mod chat_commands;
 pub mod chat_log_store;
 pub mod chat_pause;
 pub mod chat_window;
+pub mod cli_session_store;
 pub mod cli_workdir;
 pub mod commands;
 pub mod config_store;
