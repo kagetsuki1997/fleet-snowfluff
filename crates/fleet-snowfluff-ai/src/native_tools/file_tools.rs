@@ -215,7 +215,10 @@ mod tests {
         let dir = std::env::temp_dir()
             .join(format!("fleet-snowfluff-file-tools-test-{}-{name}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
-        std::fs::create_dir_all(&dir).unwrap();
+        // A bare `unwrap()` here failed once in a full run with no message and
+        // was never reproduced; say which path and why if it ever recurs.
+        std::fs::create_dir_all(&dir)
+            .unwrap_or_else(|err| panic!("could not create test dir {}: {err}", dir.display()));
         dir
     }
 

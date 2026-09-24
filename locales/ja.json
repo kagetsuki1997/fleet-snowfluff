@@ -107,7 +107,7 @@
   "chat.new_chat_button": "新しいチャット",
   "chat.not_ready.disabled": "AI 機能は現在無効です。「設定 → AI」で有効にしてください。",
   "chat.not_ready.no_provider": "AI プロバイダーが未設定です。「設定 → AI」で設定してください。",
-  "chat.not_ready.disclosure_pending": "チャットを続けるには、設定 → AI で AI プロバイダーの更新されたデータに関する説明を確認してください。",
+  "chat.not_ready.disclosure_pending": "チャットを続けるには、「設定 → AI」で AI プロバイダーの更新されたデータに関する説明を確認してください。",
 
   "tool_confirmation.heading": "ツールに許可が必要です",
   "tool_confirmation.approve_all": "すべて許可",

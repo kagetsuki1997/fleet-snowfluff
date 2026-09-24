@@ -106,10 +106,18 @@ pub fn build_chat_with_tools_body(
     messages: &[Message],
     tools: &[ToolDefinition],
 ) -> Value {
+    // `max_completion_tokens`, not `max_tokens`: OpenAI's own API spec marks
+    // `max_tokens` on chat completions "deprecated in favor of
+    // `max_completion_tokens`" and "not compatible with o-series models".
+    // Only the provider's own endpoint gets this builder (custom endpoints
+    // stay on plain chat -- `supports_tool_calling`), and every chat turn
+    // for a default-endpoint profile goes through it, so it has to be the
+    // parameter that endpoint accepts for every model. The plain builder
+    // keeps `max_tokens`, which is what OpenAI-compatible servers expect.
     let mut body = json!({
         "model": model,
         "messages": messages.iter().map(to_openai_message).collect::<Vec<_>>(),
-        "max_tokens": MAX_RESPONSE_TOKENS,
+        "max_completion_tokens": MAX_RESPONSE_TOKENS,
         "stream": true,
     });
     if !tools.is_empty() {
@@ -458,6 +466,20 @@ mod tests {
         assert_eq!(body["tools"][0]["function"]["name"], "get_weather");
         assert_eq!(body["tools"][0]["function"]["description"], "Get the weather");
         assert_eq!(body["tools"][0]["function"]["parameters"]["type"], "object");
+    }
+
+    #[test]
+    fn the_tool_path_bounds_the_reply_with_max_completion_tokens_not_max_tokens() {
+        let body = build_chat_with_tools_body("o3-mini", &[Message::user("hi")], &[]);
+        assert_eq!(body["max_completion_tokens"], MAX_RESPONSE_TOKENS);
+        assert!(body.get("max_tokens").is_none(), "o-series models reject the deprecated field");
+    }
+
+    #[test]
+    fn plain_chat_keeps_max_tokens_for_openai_compatible_servers() {
+        let body = build_chat_body("some-local-model", &[Message::user("hi")]);
+        assert_eq!(body["max_tokens"], MAX_RESPONSE_TOKENS);
+        assert!(body.get("max_completion_tokens").is_none());
     }
 
     #[test]

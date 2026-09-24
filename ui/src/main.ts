@@ -1118,6 +1118,23 @@ async function renderChatWindow(): Promise<void> {
   // than inventing one, a still-pending state just polls this snapshot
   // until it resolves; the common case (window stays open throughout)
   // never touches this path at all, since the channel handles it live.
+  //
+  // The same snapshot also says whether chat is *ready*. While it isn't --
+  // AI disabled, no provider, or a cloud disclosure awaiting review -- the
+  // input is disabled, so no send ever happens and no event ever fires to
+  // re-check it; fixing the cause in the Settings window would otherwise
+  // leave this window blocked until it is reopened. So it re-checks on
+  // focus, and slowly while blocked. One timer chain serves both cases, so
+  // a focus refresh during a pending generation cannot double the polling.
+  let refreshTimer: number | undefined;
+  function scheduleRefresh(ms: number): void {
+    if (refreshTimer !== undefined) return;
+    refreshTimer = window.setTimeout(() => {
+      refreshTimer = undefined;
+      void refresh();
+    }, ms);
+  }
+
   async function refresh(): Promise<void> {
     const state = await invoke<ChatStateSnapshot>("get_chat_state");
     committedEntries = state.entries;
@@ -1125,9 +1142,13 @@ async function renderChatWindow(): Promise<void> {
     setPendingUi(state.is_pending);
     updateReadiness(state.ai_ready, state.not_ready_reason);
     if (state.is_pending) {
-      setTimeout(() => void refresh(), 1000);
+      scheduleRefresh(1000);
+    } else if (!state.ai_ready) {
+      scheduleRefresh(2000);
     }
   }
+
+  window.addEventListener("focus", () => void refresh());
 
   form.addEventListener("submit", (e) => {
     e.preventDefault();

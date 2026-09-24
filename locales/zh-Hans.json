@@ -107,7 +107,7 @@
   "chat.new_chat_button": "新建对话",
   "chat.not_ready.disabled": "AI 功能目前已停用，请至“设置 → AI”启用。",
   "chat.not_ready.no_provider": "尚未设置 AI 提供者，请至“设置 → AI”设置。",
-  "chat.not_ready.disclosure_pending": "请在“设置 → AI”中查看你的 AI 服务商更新后的数据说明，然后才能继续聊天。",
+  "chat.not_ready.disclosure_pending": "请在“设置 → AI”中查看你的 AI 提供者更新后的数据说明，然后才能继续聊天。",
 
   "tool_confirmation.heading": "工具需要你的许可",
   "tool_confirmation.approve_all": "全部允许",
