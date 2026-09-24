@@ -40,10 +40,11 @@ running natively on **Windows**, **macOS**, and **Linux (X11)**.
 - 🔌 **Choose your own AI provider** — OpenAI, Anthropic (Claude), a local
   Ollama model, or a built-in offline demo mode; off by default, and cloud
   providers ask for one-time confirmation before anything leaves your device
-- 🛠️ **Tool-calling agent** — the local Ollama provider can read files, run
+- 🛠️ **Tool-calling agent** — the local Ollama provider and OpenAI/Anthropic
+  API-key profiles (on their default endpoints) can read files, run
   commands, and search the web as part of a reply, with a permission system
   to confirm anything risky; see [`AI_FEATURES.md`](AI_FEATURES.md) for the
-  full breakdown
+  full breakdown, including what is sent to a cloud provider
 - 👥 **Multiple instances** — several pets on screen at once, with settings
   applying live to every one
 - 📏 **Adjustable scale and opacity** — both apply immediately, no restart
