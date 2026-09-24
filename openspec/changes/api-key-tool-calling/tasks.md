@@ -9,7 +9,7 @@
 ## 2. OpenAI-compatible tool calling
 
 - [ ] 2.1 Add a tool-aware request builder: `tools` in OpenAI function format, and message mapping for assistant turns with `tool_calls` (arguments as a JSON string, `content` null when empty) and `tool` results with `tool_call_id`; leave `build_chat_body` untouched. Verify with tests against literal expected bodies, including a multi-call turn and a plain conversation with no tools.
-- [ ] 2.2 Add the streaming accumulator: parse `delta.tool_calls[]` fragments keyed by `index`, concatenate argument pieces, and emit one complete `ToolCall` per index at `finish_reason` or end of stream (empty arguments become `{}`, unparseable arguments become a provider error). Verify with fixtures for: arguments split across many fragments, two calls in one turn, text followed by a call, an empty-argument call, and malformed argument JSON.
+- [ ] 2.2 Add the streaming accumulator: parse `delta.tool_calls[]` fragments keyed by `index`, concatenate argument pieces, and emit one complete `ToolCall` per index at `finish_reason` or end of stream (empty arguments become `{}`, unparsable arguments become a provider error). Verify with fixtures for: arguments split across many fragments, two calls in one turn, text followed by a call, an empty-argument call, and malformed argument JSON.
 - [ ] 2.3 Implement `ToolCallingProvider` for `OpenAiCompatible` using 2.1 and 2.2 and the existing HTTP/SSE plumbing; verify `chat()` behavior and its existing tests are unchanged, and add an `#[ignore]`d live test that runs one tool round trip with a real key from the environment.
 
 ## 3. Anthropic tool calling
