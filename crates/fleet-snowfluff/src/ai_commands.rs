@@ -345,6 +345,7 @@ pub(crate) fn route_provider(
     profile: &ProviderProfile,
     resume_session_id: Option<String>,
     history: Vec<Message>,
+    working_dir: PathBuf,
     claude_code_tool_access: &ClaudeCodeToolAccess,
 ) -> RoutedExecution {
     match (profile.provider, profile.auth_method) {
@@ -371,11 +372,12 @@ pub(crate) fn route_provider(
                 profile.model.clone(),
                 resume_session_id,
                 history,
+                working_dir,
                 *claude_code_tool_access,
             )))
         }
         (ProviderKind::OpenAi, AuthMethod::Subscription) => RoutedExecution::PlainChat(Box::new(
-            Codex::new(profile.model.clone(), resume_session_id, history),
+            Codex::new(profile.model.clone(), resume_session_id, history, working_dir),
         )),
         (ProviderKind::Ollama, auth_method) => {
             let provider = Ollama::new(
@@ -406,17 +408,25 @@ pub(crate) fn route_provider(
 /// the thin, non-tool-aware entry point; `route_provider` is the one
 /// that actually decides tool-calling capability, for whichever future
 /// caller (the Agent Loop) needs to keep it. Passes no conversation
-/// history: its callers (status checks, model listing, login, and
-/// `mix` mode's Ollama attempt) never seed a CLI session; a real chat
-/// turn goes through `route_provider` directly.
+/// history and a throwaway working directory: its callers (status
+/// checks, model listing, login, and `mix` mode's Ollama attempt) never
+/// run a CLI chat turn, so neither is ever used; a real chat turn goes
+/// through `route_provider` directly.
 pub(crate) fn build_provider(
     credentials: &ProviderCredentials,
     profile: &ProviderProfile,
     resume_session_id: Option<String>,
     claude_code_tool_access: &ClaudeCodeToolAccess,
 ) -> Box<dyn AiProvider> {
-    route_provider(credentials, profile, resume_session_id, Vec::new(), claude_code_tool_access)
-        .into_ai_provider()
+    route_provider(
+        credentials,
+        profile,
+        resume_session_id,
+        Vec::new(),
+        std::env::temp_dir(),
+        claude_code_tool_access,
+    )
+    .into_ai_provider()
 }
 
 /// Fetches the live model list for the (`provider`, `auth_method`)
@@ -722,7 +732,8 @@ mod tests {
             profile(ProviderKind::Mock, AuthMethod::Local),
         ];
         for profile in combinations {
-            let routed = route_provider(&creds, &profile, None, vec![], &tool_access);
+            let routed =
+                route_provider(&creds, &profile, None, vec![], PathBuf::new(), &tool_access);
             assert!(
                 matches!(routed, RoutedExecution::PlainChat(_)),
                 "{:?} should not be tool-capable",
@@ -731,7 +742,8 @@ mod tests {
         }
 
         let ollama_local = profile(ProviderKind::Ollama, AuthMethod::Local);
-        let routed = route_provider(&creds, &ollama_local, None, vec![], &tool_access);
+        let routed =
+            route_provider(&creds, &ollama_local, None, vec![], PathBuf::new(), &tool_access);
         assert!(
             matches!(routed, RoutedExecution::ToolCapable(_)),
             "(Ollama, Local) should be the only tool-capable combination"
@@ -747,6 +759,7 @@ mod tests {
             &profile(ProviderKind::OpenAi, AuthMethod::ApiKey),
             None,
             vec![],
+            PathBuf::new(),
             &tool_access,
         )
         .into_ai_provider();
@@ -757,6 +770,7 @@ mod tests {
             &profile(ProviderKind::Ollama, AuthMethod::Local),
             None,
             vec![],
+            PathBuf::new(),
             &tool_access,
         )
         .into_ai_provider();

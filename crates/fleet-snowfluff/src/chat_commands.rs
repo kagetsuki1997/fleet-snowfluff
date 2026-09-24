@@ -28,7 +28,7 @@ use tauri::{ipc::Channel, AppHandle, Manager, State};
 
 use crate::{
     ai_commands::{self, RoutedExecution},
-    chat_log_store, chat_pause, chat_window,
+    chat_log_store, chat_pause, chat_window, cli_workdir,
     manager::PetManager,
     persona_store,
     session_domain::{ConversationId, ExecutionId, ExternalSessionRef},
@@ -300,6 +300,10 @@ pub async fn send_chat_message(
     let routed_to_local = settings_snapshot.task_router_mode == TaskRouterMode::Mix
         && route.profile_key == local_profile_key;
 
+    // Where a CLI-backed provider runs this turn -- resolved once, up
+    // front, so the resume lookup below and the spawn agree on it.
+    let cli_working_dir = cli_workdir::for_app(&app, settings_snapshot.project_root.as_deref());
+
     let session_path = resolve_session_path(&app, &chat_state);
     let conversation_id = ConversationId::from_session_path(&session_path);
     let execution_id = ExecutionId::new();
@@ -341,6 +345,7 @@ pub async fn send_chat_message(
             profile: default_profile,
             messages: default_messages,
             history: context,
+            working_dir: cli_working_dir,
             credentials: creds_snapshot.clone(),
             project_root: settings_snapshot.project_root.clone(),
             claude_code_tool_access: settings_snapshot.claude_code_tool_access,
@@ -377,6 +382,7 @@ pub async fn send_chat_message(
                 default_profile,
                 resume_session_id,
                 context,
+                cli_working_dir,
                 claude_code_tool_access,
                 project_root,
                 execution_id,
@@ -408,6 +414,8 @@ struct FallbackAttempt {
     /// fallback target's fresh session so an escalated message isn't
     /// answered without the turns a local provider handled earlier.
     history: Vec<Message>,
+    /// Where a CLI-backed fallback target runs (`cli_workdir`).
+    working_dir: PathBuf,
     credentials: ProviderCredentials,
     project_root: Option<PathBuf>,
     claude_code_tool_access: ClaudeCodeToolAccess,
@@ -445,6 +453,7 @@ async fn run_generation_fallback(
         fallback.profile,
         resume_session_id,
         fallback.history,
+        fallback.working_dir,
         fallback.claude_code_tool_access,
         fallback.project_root,
         execution_id,
@@ -474,6 +483,7 @@ async fn run_generation_routed(
     profile: ProviderProfile,
     resume_session_id: Option<String>,
     history: Vec<Message>,
+    working_dir: PathBuf,
     claude_code_tool_access: ClaudeCodeToolAccess,
     project_root: Option<PathBuf>,
     execution_id: ExecutionId,
@@ -489,6 +499,7 @@ async fn run_generation_routed(
         &profile,
         resume_session_id,
         history,
+        working_dir,
         &claude_code_tool_access,
     ) {
         RoutedExecution::PlainChat(provider) => {

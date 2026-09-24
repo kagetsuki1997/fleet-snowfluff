@@ -62,6 +62,7 @@
 //! per-platform search-order reasoning shared by both providers.
 
 use std::{
+    path::PathBuf,
     process::Stdio,
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
@@ -95,6 +96,9 @@ pub struct Codex {
     /// used to seed any request that isn't resuming a session -- see
     /// `history_preamble`.
     history: Vec<Message>,
+    /// Where the CLI is run -- always explicit, never inherited from
+    /// the app's launch directory (see `cli_workdir` in the app crate).
+    working_dir: PathBuf,
 }
 
 impl Codex {
@@ -107,8 +111,9 @@ impl Codex {
         model: Option<String>,
         resume_session_id: Option<String>,
         history: Vec<Message>,
+        working_dir: PathBuf,
     ) -> Self {
-        Self { model, session_id: Arc::new(Mutex::new(resume_session_id)), history }
+        Self { model, session_id: Arc::new(Mutex::new(resume_session_id)), history, working_dir }
     }
 
     /// The Codex thread id captured from this instance's most recent
@@ -286,13 +291,18 @@ fn parse_codex_json_line(line: &str) -> ParsedLine {
     ParsedLine { session_id, outcome }
 }
 
-async fn spawn(
+/// The fully-configured `codex exec` command for one chat request,
+/// separated from the spawn itself so the working directory it will run
+/// in is directly inspectable in tests without launching a process.
+fn chat_command(
+    program: impl AsRef<std::ffi::OsStr>,
     model: Option<&str>,
     resume: Option<&str>,
     instructions_path: &std::path::Path,
     prompt: &str,
-) -> std::io::Result<tokio::process::Child> {
-    let mut command = Command::new(cli_locator::resolve("codex").await);
+    working_dir: &std::path::Path,
+) -> Command {
+    let mut command = Command::new(program);
     command.arg("exec");
     if let Some(id) = resume {
         command.args(["resume", id]);
@@ -302,15 +312,31 @@ async fn spawn(
         .arg("--sandbox")
         .arg("read-only")
         .arg("--skip-git-repo-check")
-        .args(["-c", &format!("model_instructions_file={}", instructions_path.display())])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .args(["-c", &format!("model_instructions_file={}", instructions_path.display())]);
     if let Some(model) = model {
         command.args(["--model", model]);
     }
     command.arg(prompt);
-    command.spawn()
+    cli_process::apply_chat_spawn_settings(&mut command, working_dir);
+    command
+}
+
+async fn spawn(
+    model: Option<&str>,
+    resume: Option<&str>,
+    instructions_path: &std::path::Path,
+    prompt: &str,
+    working_dir: &std::path::Path,
+) -> std::io::Result<tokio::process::Child> {
+    chat_command(
+        cli_locator::resolve("codex").await,
+        model,
+        resume,
+        instructions_path,
+        prompt,
+        working_dir,
+    )
+    .spawn()
 }
 
 async fn read_line(
@@ -373,9 +399,15 @@ impl AiProvider for Codex {
             ))
         })?;
 
-        let mut child = spawn(model.as_deref(), resume.as_deref(), &instructions_path, &prompt)
-            .await
-            .map_err(|e| cli_process::map_spawn_error("codex", e))?;
+        let mut child = spawn(
+            model.as_deref(),
+            resume.as_deref(),
+            &instructions_path,
+            &prompt,
+            &self.working_dir,
+        )
+        .await
+        .map_err(|e| cli_process::map_spawn_error("codex", e))?;
         let mut lines =
             BufReader::new(child.stdout.take().expect("stdout was piped by `spawn`")).lines();
 
@@ -391,9 +423,15 @@ impl AiProvider for Codex {
                         // The stale session took its memory with it, so
                         // the retry is seeded from the transcript.
                         let fresh_prompt = build_prompt(&messages, &self.history, false);
-                        child = spawn(model.as_deref(), None, &instructions_path, &fresh_prompt)
-                            .await
-                            .map_err(|e| cli_process::map_spawn_error("codex", e))?;
+                        child = spawn(
+                            model.as_deref(),
+                            None,
+                            &instructions_path,
+                            &fresh_prompt,
+                            &self.working_dir,
+                        )
+                        .await
+                        .map_err(|e| cli_process::map_spawn_error("codex", e))?;
                         lines = BufReader::new(
                             child.stdout.take().expect("stdout was piped by `spawn`"),
                         )
@@ -492,6 +530,34 @@ mod tests {
 
     fn real_history() -> Vec<Message> {
         vec![Message::user("earlier question"), Message::assistant("earlier answer")]
+    }
+
+    #[test]
+    fn the_chat_command_runs_in_the_supplied_working_directory() {
+        let dir = std::path::Path::new("/some/project");
+        let command = chat_command(
+            "codex",
+            None,
+            None,
+            std::path::Path::new("/tmp/instructions.md"),
+            "hello",
+            dir,
+        );
+        assert_eq!(command.as_std().get_current_dir(), Some(dir));
+    }
+
+    #[test]
+    fn a_resumed_chat_command_also_runs_in_the_supplied_working_directory() {
+        let dir = std::path::Path::new("/some/project");
+        let command = chat_command(
+            "codex",
+            None,
+            Some("thread-1"),
+            std::path::Path::new("/tmp/instructions.md"),
+            "hello",
+            dir,
+        );
+        assert_eq!(command.as_std().get_current_dir(), Some(dir));
     }
 
     #[test]
@@ -617,7 +683,7 @@ mod tests {
         // `list_models_offers_the_known_aliases_not_an_empty_list` -- see this
         // function's own doc comment for why the two providers can't share the
         // same answer here.
-        let models = Codex::new(None, None, vec![]).list_models().await.unwrap();
+        let models = Codex::new(None, None, vec![], PathBuf::new()).list_models().await.unwrap();
         assert!(models.is_empty());
     }
 

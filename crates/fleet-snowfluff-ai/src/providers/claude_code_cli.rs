@@ -44,6 +44,7 @@
 //! doc comment for the full per-platform reasoning.
 
 use std::{
+    path::PathBuf,
     process::Stdio,
     sync::{Arc, Mutex},
 };
@@ -125,6 +126,9 @@ pub struct ClaudeCodeCli {
     /// used to seed any request that isn't resuming a session -- see
     /// `history_preamble`.
     history: Vec<Message>,
+    /// Where the CLI is run -- always explicit, never inherited from
+    /// the app's launch directory (see `cli_workdir` in the app crate).
+    working_dir: PathBuf,
 }
 
 impl ClaudeCodeCli {
@@ -137,9 +141,16 @@ impl ClaudeCodeCli {
         model: Option<String>,
         resume_session_id: Option<String>,
         history: Vec<Message>,
+        working_dir: PathBuf,
         tool_access: ClaudeCodeToolAccess,
     ) -> Self {
-        Self { model, session_id: Arc::new(Mutex::new(resume_session_id)), tool_access, history }
+        Self {
+            model,
+            session_id: Arc::new(Mutex::new(resume_session_id)),
+            tool_access,
+            history,
+            working_dir,
+        }
     }
 
     /// The Claude-CLI session id captured from this instance's most
@@ -326,19 +337,42 @@ fn build_args(
     args
 }
 
+/// The fully-configured `claude -p` command for one chat request,
+/// separated from the spawn itself so the working directory it will run
+/// in is directly inspectable in tests without launching a process.
+fn chat_command(
+    program: impl AsRef<std::ffi::OsStr>,
+    model: Option<&str>,
+    resume: Option<&str>,
+    system_prompt: &str,
+    prompt: &str,
+    tool_access: &ClaudeCodeToolAccess,
+    working_dir: &std::path::Path,
+) -> Command {
+    let mut command = Command::new(program);
+    command.args(build_args(model, resume, system_prompt, prompt, tool_access));
+    cli_process::apply_chat_spawn_settings(&mut command, working_dir);
+    command
+}
+
 async fn spawn(
     model: Option<&str>,
     resume: Option<&str>,
     system_prompt: &str,
     prompt: &str,
     tool_access: &ClaudeCodeToolAccess,
+    working_dir: &std::path::Path,
 ) -> std::io::Result<tokio::process::Child> {
-    Command::new(cli_locator::resolve("claude").await)
-        .args(build_args(model, resume, system_prompt, prompt, tool_access))
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+    chat_command(
+        cli_locator::resolve("claude").await,
+        model,
+        resume,
+        system_prompt,
+        prompt,
+        tool_access,
+        working_dir,
+    )
+    .spawn()
 }
 
 /// Reads one line from `lines`, mapping a read error to a
@@ -404,10 +438,16 @@ impl AiProvider for ClaudeCodeCli {
         let model = self.model.clone();
         let session_id_slot = self.session_id.clone();
 
-        let mut child =
-            spawn(model.as_deref(), resume.as_deref(), &system_prompt, &prompt, &self.tool_access)
-                .await
-                .map_err(|e| cli_process::map_spawn_error("claude", e))?;
+        let mut child = spawn(
+            model.as_deref(),
+            resume.as_deref(),
+            &system_prompt,
+            &prompt,
+            &self.tool_access,
+            &self.working_dir,
+        )
+        .await
+        .map_err(|e| cli_process::map_spawn_error("claude", e))?;
         let mut lines =
             BufReader::new(child.stdout.take().expect("stdout was piped by `spawn`")).lines();
 
@@ -432,6 +472,7 @@ impl AiProvider for ClaudeCodeCli {
                             &system_prompt,
                             &fresh_prompt,
                             &self.tool_access,
+                            &self.working_dir,
                         )
                         .await
                         .map_err(|e| cli_process::map_spawn_error("claude", e))?;
@@ -581,6 +622,36 @@ mod tests {
 
     fn real_history() -> Vec<Message> {
         vec![Message::user("earlier question"), Message::assistant("earlier answer")]
+    }
+
+    #[test]
+    fn the_chat_command_runs_in_the_supplied_working_directory() {
+        let dir = std::path::Path::new("/some/project");
+        let command = chat_command(
+            "claude",
+            None,
+            None,
+            "be brief",
+            "hello",
+            &ClaudeCodeToolAccess::default(),
+            dir,
+        );
+        assert_eq!(command.as_std().get_current_dir(), Some(dir));
+    }
+
+    #[test]
+    fn a_resumed_chat_command_also_runs_in_the_supplied_working_directory() {
+        let dir = std::path::Path::new("/some/project");
+        let command = chat_command(
+            "claude",
+            None,
+            Some("session-1"),
+            "be brief",
+            "hello",
+            &ClaudeCodeToolAccess::default(),
+            dir,
+        );
+        assert_eq!(command.as_std().get_current_dir(), Some(dir));
     }
 
     #[test]
@@ -744,7 +815,8 @@ mod tests {
     async fn claude_code_cli_live_two_turn_session_resume() {
         use futures_util::StreamExt;
 
-        let first = ClaudeCodeCli::new(None, None, vec![], ClaudeCodeToolAccess::default());
+        let first =
+            ClaudeCodeCli::new(None, None, vec![], PathBuf::new(), ClaudeCodeToolAccess::default());
         let mut stream = first
             .chat(vec![
                 Message::system("You are a cheerful desktop pet. Reply in one short sentence."),
@@ -760,8 +832,13 @@ mod tests {
         let session_id = first.session_id();
         assert!(session_id.is_some(), "expected a session id to be captured from the live stream");
 
-        let second =
-            ClaudeCodeCli::new(None, session_id.clone(), vec![], ClaudeCodeToolAccess::default());
+        let second = ClaudeCodeCli::new(
+            None,
+            session_id.clone(),
+            vec![],
+            PathBuf::new(),
+            ClaudeCodeToolAccess::default(),
+        );
         let mut stream = second
             .chat(vec![
                 Message::system("You are a cheerful desktop pet. Reply in one short sentence."),
@@ -811,10 +888,11 @@ mod tests {
 
     #[tokio::test]
     async fn list_models_offers_the_known_aliases_not_an_empty_list() {
-        let models = ClaudeCodeCli::new(None, None, vec![], ClaudeCodeToolAccess::default())
-            .list_models()
-            .await
-            .unwrap();
+        let models =
+            ClaudeCodeCli::new(None, None, vec![], PathBuf::new(), ClaudeCodeToolAccess::default())
+                .list_models()
+                .await
+                .unwrap();
         assert!(!models.is_empty(), "settings UI needs something to show in the model picker");
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert!(ids.contains(&"sonnet"));
