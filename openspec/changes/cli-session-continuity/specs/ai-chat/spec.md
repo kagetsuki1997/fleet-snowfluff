@@ -2,7 +2,7 @@
 
 ### Requirement: Session persistence
 
-Each conversation session SHALL be persisted as an append-only log, one file per session, organized by the date the session started. A new session file SHALL be created only by an explicit user action, never automatically by closing/reopening the window or by inactivity. The references to any CLI-backed provider sessions used within a conversation SHALL be persisted alongside that conversation's log, with the same lifetime as the log, so that reopening the application resumes those sessions where they are still valid.
+Each conversation session SHALL be persisted as an append-only log, one file per session, organized by the date the session started. A new session file SHALL be created only by an explicit user action, never automatically by closing/reopening the window or by inactivity. The references to any CLI-backed provider sessions used within a conversation SHALL be persisted alongside that conversation's log, with the same lifetime as the log, so that reopening the application resumes those sessions where they are still valid. The record SHALL include how much of the conversation each session is known to have seen, so that turns it missed remain identifiable after a restart.
 
 #### Scenario: Session spans midnight
 
@@ -18,6 +18,11 @@ Each conversation session SHALL be persisted as an append-only log, one file per
 
 - **WHEN** the application is restarted and the most recent chat session is resumed, and the next message is sent to a CLI-backed profile that had a valid session in that conversation
 - **THEN** the message resumes that CLI session rather than starting a cold one
+
+#### Scenario: Missed turns are still identified after a restart
+
+- **WHEN** the application is restarted, and a CLI session resumed from the previous run had missed turns another provider answered before the restart
+- **THEN** those turns are still supplied to the CLI on resume, rather than being treated as already seen
 
 #### Scenario: A new chat does not inherit CLI sessions
 

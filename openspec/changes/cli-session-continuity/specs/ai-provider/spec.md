@@ -21,19 +21,24 @@ Where a subscription-auth provider's underlying CLI supports resuming a prior se
 
 ## ADDED Requirements
 
-### Requirement: Fresh CLI sessions are seeded from the conversation transcript
+### Requirement: CLI sessions are given the conversation transcript they lack
 
-Whenever a CLI-backed subscription provider starts a request without a usable resumed session — the first message with that provider, a fallback after a failed resume, or a message escalated from another provider in the same chat session — the request SHALL include a compact rendering of the recent conversation history already recorded in the chat session, so that the CLI's reply can take earlier turns into account. When the CLI session is successfully resumed, the application SHALL NOT resend that history, since the CLI already holds it. When there is no prior history, nothing SHALL be added.
+Whenever a CLI-backed subscription provider starts a request without a usable resumed session — the first message with that provider, a fallback after a failed resume, or a message escalated from another provider in the same chat session — the request SHALL include a compact rendering of the recent conversation history already recorded in the chat session, so that the CLI's reply can take earlier turns into account. When the CLI session is successfully resumed, the application SHALL NOT resend history the session already holds, but SHALL send along any turns of the conversation the session has not seen (for example, turns another provider answered in between). When there is nothing to add, nothing SHALL be added.
 
 #### Scenario: Escalation from a local provider carries earlier turns
 
 - **WHEN** earlier turns of the chat session were answered by a different provider and a later message is escalated to a CLI-backed profile with no existing session
 - **THEN** the CLI request includes the recent earlier turns as context
 
-#### Scenario: A resumed session is not sent history again
+#### Scenario: A resumed session that has seen every earlier turn is not sent history again
 
-- **WHEN** a CLI session is successfully resumed for the next message
+- **WHEN** a CLI session is successfully resumed for the next message and every earlier turn of the conversation was handled by that session
 - **THEN** the request contains only the new message, not a re-rendered history
+
+#### Scenario: A resumed session is caught up on turns answered elsewhere
+
+- **WHEN** a CLI session is successfully resumed, but one or more turns since it last ran were answered by a different provider
+- **THEN** the request includes those unseen turns along with the new message, and does not repeat the turns the session already holds
 
 #### Scenario: A brand-new conversation adds no history
 

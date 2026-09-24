@@ -127,8 +127,9 @@ message to the next so the CLI doesn't have to be re-sent the whole
 conversation each time. Your chat transcript is the source of truth; the
 CLI's session is a cache of it:
 
-- **Resumed session:** only your new message is sent — the CLI already
-  remembers the rest.
+- **Resumed session:** your new message is sent, plus any turns the CLI
+  never saw — in `mix` mode another provider may have answered some in
+  between. If it saw everything, only the new message is sent.
 - **No session to resume** (the first message, a session the CLI has
   since dropped, or a message handed over from another provider in
   `mix` mode): the request also carries a short summary of the recent
