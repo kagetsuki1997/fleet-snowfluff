@@ -522,7 +522,7 @@ Runtime Session
 > （見第 13 節）：**
 >
 > - **Stage 3**：`ContextManager` 基礎版——`build_context` / `record_execution`
->   （實作狀態：已定義但尚未接進聊天流程，見 §13 Stage 4 的延後說明），
+>   （實作狀態：已定義但尚未接進聊天流程，排入 Stage 4.5，見 §13），
 >   讓 Agent Loop 有東西可以組裝；不含 compaction、memory retrieval、sub-agent
 >   projection。單一 Execution 就用得到，不需要等 delegation 或 memory 先存在。
 > - **Stage 5**：加上 §10.1 的 Sub-agent Context Projection（`SubAgentContextSpec`、
@@ -2611,6 +2611,13 @@ Agent capability parity + CLI session continuity
 ├── OpenAI / Anthropic API-key tool calling
 └── (Runtime Adapter / SessionManager / OpenClaw：延後，見 §13 Stage 4)
 
+Stage 4.5
+Execution & Conversation Context foundation
+├── Execution record（含 external_ref）
+├── sidecar 收編為 Execution 推導
+├── ContextManager 接線
+└── ExecutionResult 最小版
+
 Stage 5
 Sub-agent / Delegation
 ├── DelegationManager
@@ -3233,11 +3240,12 @@ isolation、session recovery。Stage 2 / Stage 3 實作完成後，其中大部�
 
 **刻意延後（含理由）**
 
-- **Execution record / `ExecutionId` 持久化**：目前只有 sidecar 需要持久化，不需要
-  Execution struct；`parent_execution_id` 在 Stage 5 才有 consumer
-- **`ContextManager` 接線**：目前實作只是 `prompt::assemble_messages` 的薄包裝，接線不會
-  改變任何行為；等 Stage 5（sub-agent projection）/ Stage 7（compaction）有真實
-  consumer 再接
+- **Execution record / `ExecutionId` 持久化**與**`ContextManager` 接線**：本階段只需要
+  持久化「每個 profile 最新的 session」，用 sidecar 就夠，不需要 Execution struct；
+  `ContextManager` 目前只是 `prompt::assemble_messages` 的薄包裝，接線不會改變行為。
+  但「要 resume 的是 Conversation，不是單一 session」——Conversation 需要同時保存 context
+  與各 runtime 的 external session 參照——這是真實的 consumer，所以**排入 Stage 4.5**
+  （見下），不再延到 Stage 5 / 7
 - **`SessionManager`、Runtime Adapter 抽象、nested session isolation、Codex thread
   mapping、OpenClaw**：沒有 consumer；Codex 從未對真實 subscription 驗證過
 - **Loop-level escalation**（loop 達 `MaxIterationsReached` 時往上升級）：`mix` 模式的
@@ -3257,6 +3265,35 @@ isolation、session recovery。Stage 2 / Stage 3 實作完成後，其中大部�
 無關，也是規則檔已在使用的詞彙。再與各 profile 的 capability descriptor 比對；
 不符時的處理（本機盡力回答 / 仍 escalate 並附註 / 提示使用者到設定開啟）是另一個決策。
 
+### Stage 4.5 — Execution & Conversation Context foundation
+
+（新增。原先把 Execution record 延到 Stage 5、`ContextManager` 接線延到 Stage 5 / 7，理由是
+「沒有 consumer」。Stage 4 完成後 consumer 出現了：**要 resume 的是 Conversation，不是單一
+runtime session。** 一個 Conversation 需要同時保存共享 context 與各 runtime 的 external
+session 參照，下一個 Execution 換成外部模型時，才能 resume 該 runtime 的 session 並帶上共享
+context。Stage 4 的 `.sessions.json` sidecar（每個 profile 最新的 session id + cwd +
+`seen_turns` 游標）是這個目標模型中最便宜的一塊，不是終點——它等同於「每個 profile 最後一次
+Execution 的 `external_ref`」。）
+
+建立：
+
+- Execution record：每個 turn 一筆持久化紀錄（`ExecutionId`、`conversation_id`、route /
+  runtime / profile、`external_ref`、status、cwd、起訖時間）。`parent_execution_id` /
+  `ExecutionKind` 留到 Stage 5，以 additive 方式加上
+- 收編 sidecar：「某 profile 最新的 session」改由 Execution 紀錄推導；`seen_turns` 成為
+  context 游標
+- `ContextManager` 接線：`build_context` 改以 `Execution` 為參數，`record_execution` 寫入
+  `ExecutionResult`；取代 `chat_commands.rs` 直接呼叫 `assemble_messages`
+- `ExecutionResult` 最小版：output + 簡短 summary（不含 facts / decisions / artifacts）
+- 開啟較舊的 Conversation（目前只會 resume 最新的一個）——是否納入本階段待定
+
+刻意不做：
+
+- facts / decisions / artifacts 的抽取，以及 `ConversationContext` 的 summary 壓縮：需要先決定
+  誰負責抽取（runtime 自己輸出，或額外一次 LLM 摘要），與 compaction 是同一類問題，留到
+  Stage 7
+- sub-agent 相關欄位與 context projection：留到 Stage 5
+
 ### Stage 5 — Sub-agent / Delegation
 
 （原本在 Stage 3 內，獨立成自己的階段 —— 見第 6.13 節的完整設計。）
@@ -3270,10 +3307,11 @@ isolation、session recovery。Stage 2 / Stage 3 實作完成後，其中大部�
 - Context Engine：Sub-agent Context Projection（`SubAgentContextSpec`、
   `build_sub_agent_context`，見第 10.1 節）
 
-依賴 Stage 3（要有可委派的 Agent Loop）與 Stage 4（child 可能委派給 CLI runtime，需要
-CLI session 連續性與 working directory 行為已修正；Stage 4 刻意沒有建立的
-Execution record、`SessionManager`、Runtime Adapter 若 delegation 需要，在本階段依真實
-consumer 補上，而不是預先猜測）。
+依賴 Stage 3（要有可委派的 Agent Loop）、Stage 4（child 可能委派給 CLI runtime，需要
+CLI session 連續性與 working directory 行為已修正）與 Stage 4.5（Execution record 與
+`ContextManager` 接線已存在；本階段在其上以 additive 方式加入 `parent_execution_id` /
+`ExecutionKind` 與 context projection）。`SessionManager`、Runtime Adapter 若 delegation
+需要，在本階段依真實 consumer 補上，而不是預先猜測。
 
 ### Stage 6 — MCP + Context Awareness
 
@@ -3343,6 +3381,13 @@ Agent capability parity
 (Runtime Adapter / SessionManager 延後)
         │
         ▼
+Stage 4.5
+Execution & Conversation Context
++ Execution record (external_ref)
++ ContextManager wired
++ ExecutionResult (minimal)
+        │
+        ▼
 Stage 5
 Sub-agent / Delegation
 + DelegationManager
@@ -3409,7 +3454,7 @@ Context / execution lifecycle：
 
 - [ ] ConversationContext 作為 cross-execution canonical context
 - [ ] ExecutionContext 作為 per-execution assembled snapshot
-- [ ] ContextManager 負責 build / ingest（註：`AemeathContextManager` 已定義並匯出，但尚未接進 `chat_commands.rs`，目前只是 `assemble_messages` 的薄包裝；Stage 4 刻意不接線，等 Stage 5 / 7 有真實 consumer，見 §13 Stage 4）
+- [ ] ContextManager 負責 build / ingest（註：`AemeathContextManager` 已定義並匯出，但尚未接進 `chat_commands.rs`，目前只是 `assemble_messages` 的薄包裝；Stage 4 刻意不接線，排入 Stage 4.5，見 §13）
 - [ ] ExecutionResult 可產生 summary / facts / decisions / artifacts
 - [ ] 不直接把 external runtime session history 當作 Aemeath Conversation
 - [ ] 不同 runtime 可以只透過 Aemeath Context 共享前一個 Execution 的結果
@@ -3658,6 +3703,13 @@ Agent capability parity
 + CLI session continuity
 + API-key tool calling
 （Runtime Adapter / SessionManager / OpenClaw 延後）
+        │
+        ▼
+Stage 4.5
+Execution & Conversation Context
++ Execution record (external_ref)
++ ContextManager wired
++ ExecutionResult (minimal)
         │
         ▼
 Stage 5
