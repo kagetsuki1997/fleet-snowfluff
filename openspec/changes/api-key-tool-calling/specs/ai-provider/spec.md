@@ -63,6 +63,11 @@ The first time a (provider, auth method) pair involving a cloud provider (OpenAI
 - **WHEN** an OpenAI or Anthropic API-key profile is enabled and is the default, but its acknowledgement was cleared because the disclosure text changed
 - **THEN** chat is not sent to it, the chat window says the updated disclosure needs review, and the settings row shows that disclosure with a way to acknowledge it
 
+#### Scenario: Chat becomes available again once the disclosure is acknowledged
+
+- **WHEN** the chat window is open and blocked on a pending disclosure, and the user acknowledges it in settings
+- **THEN** the chat window allows sending again without having to be closed and reopened
+
 #### Scenario: An earlier acknowledgement does not cover the updated tool-result disclosure
 
 - **WHEN** the user acknowledged an OpenAI or Anthropic API-key disclosure before it mentioned tool results, and then opens the application after this capability ships
