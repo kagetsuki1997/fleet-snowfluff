@@ -32,6 +32,11 @@ pub struct StoredSession {
     /// the CLIs scope their sessions by it, so an id may not resolve
     /// under another.
     pub cwd: PathBuf,
+    /// How many transcript messages the session is known to hold; a
+    /// missing field (older file) reads as 0, which safely re-sends the
+    /// history rather than assuming the session has seen any of it.
+    #[serde(default)]
+    pub seen_turns: usize,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -115,7 +120,12 @@ mod tests {
     }
 
     fn stored(profile: ProfileKey, id: &str, cwd: &str) -> StoredSession {
-        StoredSession { profile, session_id: id.to_string(), cwd: PathBuf::from(cwd) }
+        StoredSession {
+            profile,
+            session_id: id.to_string(),
+            cwd: PathBuf::from(cwd),
+            seen_turns: 0,
+        }
     }
 
     #[test]
@@ -132,6 +142,28 @@ mod tests {
         let log = temp_log("round-trip");
         upsert(&log, stored(claude(), "sess-1", "/proj"));
         assert_eq!(load(&log), vec![stored(claude(), "sess-1", "/proj")]);
+    }
+
+    #[test]
+    fn the_seen_turn_count_round_trips() {
+        let log = temp_log("seen-turns");
+        upsert(&log, StoredSession { seen_turns: 6, ..stored(claude(), "sess-1", "/proj") });
+        assert_eq!(load(&log)[0].seen_turns, 6);
+    }
+
+    #[test]
+    fn a_file_written_without_a_seen_count_reads_as_zero() {
+        let log = temp_log("seen-turns-missing");
+        std::fs::write(
+            sidecar_path(&log),
+            format!(
+                r#"{{"version":{FORMAT_VERSION},"sessions":[{{"profile":{{"provider":"anthropic","auth_method":"subscription"}},"session_id":"sess-1","cwd":"/proj"}}]}}"#
+            ),
+        )
+        .unwrap();
+        let loaded = load(&log);
+        assert_eq!(loaded.len(), 1, "the file must still parse without the new field");
+        assert_eq!(loaded[0].seen_turns, 0);
     }
 
     #[test]

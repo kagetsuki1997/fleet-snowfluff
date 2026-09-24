@@ -2,6 +2,7 @@
 //! `subscription-first-chat`'s subscription-auth support.
 
 mod anthropic_stream_event;
+mod cli_context;
 mod cli_locator;
 mod cli_process;
 mod history_preamble;
@@ -17,6 +18,7 @@ pub mod openai;
 
 pub use anthropic::Anthropic;
 pub use claude_code_cli::ClaudeCodeCli;
+pub use cli_context::CliContext;
 pub use codex::Codex;
 pub use mock::Mock;
 pub use ollama::Ollama;

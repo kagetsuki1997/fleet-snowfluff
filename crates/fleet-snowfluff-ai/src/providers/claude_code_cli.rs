@@ -60,7 +60,9 @@ use tokio::{
 use crate::{
     message::{Message, ModelInfo, ProviderError, ProviderKind, Role, StreamChunk},
     provider::{AiProvider, ChatStream},
-    providers::{anthropic_stream_event, cli_locator, cli_process, history_preamble},
+    providers::{
+        anthropic_stream_event, cli_context::CliContext, cli_locator, cli_process, history_preamble,
+    },
     settings::ClaudeCodeToolAccess,
 };
 
@@ -126,30 +128,28 @@ pub struct ClaudeCodeCli {
     /// used to seed any request that isn't resuming a session -- see
     /// `history_preamble`.
     history: Vec<Message>,
+    /// How many leading `history` messages a resumed session already
+    /// holds; the rest are sent along on resume.
+    seen_turns: usize,
     /// Where the CLI is run -- always explicit, never inherited from
     /// the app's launch directory (see `cli_workdir` in the app crate).
     working_dir: PathBuf,
 }
 
 impl ClaudeCodeCli {
-    /// `resume_session_id` is the id returned by a prior instance's
+    /// `cli.resume_session_id` is the id returned by a prior instance's
     /// `session_id()`, if any -- supplied by the app crate, never
-    /// stored by this crate itself. `history` is the conversation's
-    /// recent transcript, used only when a request has no session to
-    /// resume.
-    pub fn new(
-        model: Option<String>,
-        resume_session_id: Option<String>,
-        history: Vec<Message>,
-        working_dir: PathBuf,
-        tool_access: ClaudeCodeToolAccess,
-    ) -> Self {
+    /// stored by this crate itself. The rest of `cli` (history, how much
+    /// of it a resumed session has seen, the working directory) is
+    /// described on [`CliContext`].
+    pub fn new(model: Option<String>, cli: CliContext, tool_access: ClaudeCodeToolAccess) -> Self {
         Self {
             model,
-            session_id: Arc::new(Mutex::new(resume_session_id)),
+            session_id: Arc::new(Mutex::new(cli.resume_session_id)),
             tool_access,
-            history,
-            working_dir,
+            history: cli.history,
+            seen_turns: cli.seen_turns,
+            working_dir: cli.working_dir,
         }
     }
 
@@ -178,12 +178,23 @@ fn latest_user_message(messages: &[Message]) -> String {
         .unwrap_or_default()
 }
 
-/// The prompt for one request. A resumed session already holds its own
-/// history, so it gets only the latest message; a request with no
-/// session to resume (first message, stale-resume retry, escalation) is
-/// seeded from `history`.
-fn build_prompt(messages: &[Message], history: &[Message], resuming: bool) -> String {
-    history_preamble::prompt_for_session(history, &latest_user_message(messages), resuming)
+/// The prompt for one request. A resumed session already holds
+/// `history[..seen_turns]`, so it gets the latest message plus any turns
+/// after that it never saw; a request with no session to resume (first
+/// message, stale-resume retry, escalation) is seeded from all of
+/// `history`.
+fn build_prompt(
+    messages: &[Message],
+    history: &[Message],
+    seen_turns: usize,
+    resuming: bool,
+) -> String {
+    history_preamble::prompt_for_session(
+        history,
+        seen_turns,
+        &latest_user_message(messages),
+        resuming,
+    )
 }
 
 /// What one parsed line of `claude -p --output-format stream-json`
@@ -441,7 +452,7 @@ impl AiProvider for ClaudeCodeCli {
 
         let system_prompt = system_prompt(&messages);
         let resume = self.session_id();
-        let prompt = build_prompt(&messages, &self.history, resume.is_some());
+        let prompt = build_prompt(&messages, &self.history, self.seen_turns, resume.is_some());
         let model = self.model.clone();
         let session_id_slot = self.session_id.clone();
 
@@ -472,7 +483,8 @@ impl AiProvider for ClaudeCodeCli {
                         *session_id_slot.lock().unwrap() = None;
                         // The stale session took its memory with it, so
                         // the retry is seeded from the transcript.
-                        let fresh_prompt = build_prompt(&messages, &self.history, false);
+                        let fresh_prompt =
+                            build_prompt(&messages, &self.history, self.seen_turns, false);
                         child = spawn(
                             model.as_deref(),
                             None,
@@ -613,6 +625,95 @@ mod tests {
         assert!(!disallowed.contains("Bash"));
     }
 
+    // -- cli-session-continuity: `chat()` driven against a fake `claude` --
+
+    /// A `claude` stand-in that rejects any `--resume` like a session the
+    /// CLI has since dropped, answers everything else with a fresh
+    /// session, and records the arguments of every chat invocation.
+    #[cfg(unix)]
+    fn fake_claude(dir: &std::path::Path, record: &std::path::Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("claude");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+if [ "$1" = "auth" ]; then echo '{{"loggedIn": true}}'; exit 0; fi
+printf 'CALL %s\n' "$*" >> '{record}'
+case "$*" in
+  *--resume*)
+    echo '{{"type":"result","subtype":"error_during_execution","is_error":true,"result":"Could not resume session: not found.","session_id":"stale-id"}}'
+    ;;
+  *)
+    echo '{{"type":"stream_event","event":{{"type":"content_block_delta","index":0,"delta":{{"type":"text_delta","text":"fresh reply"}}}},"session_id":"new-id"}}'
+    echo '{{"type":"result","subtype":"success","is_error":false,"result":"fresh reply","session_id":"new-id"}}'
+    ;;
+esac
+"#,
+                record = record.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_resume_is_retried_fresh_with_the_history_seeded() {
+        use futures_util::StreamExt;
+
+        let dir = std::env::temp_dir()
+            .join(format!("fleet-snowfluff-fake-claude-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = dir.join("calls.txt");
+        let _guard = cli_locator::override_for_test("claude", fake_claude(&dir, &record));
+
+        // A stored session id the fake CLI will reject as stale. It had seen
+        // both history messages, so a *successful* resume would send only "now".
+        let provider = ClaudeCodeCli::new(
+            None,
+            CliContext {
+                resume_session_id: Some("stale-id".to_string()),
+                history: real_history(),
+                seen_turns: 2,
+                working_dir: dir.clone(),
+            },
+            ClaudeCodeToolAccess::default(),
+        );
+        let mut stream =
+            provider.chat(vec![Message::system("be brief"), Message::user("now")]).await.unwrap();
+        let mut reply = String::new();
+        while let Some(chunk) = stream.next().await {
+            reply.push_str(&chunk.unwrap().delta);
+        }
+
+        assert_eq!(reply, "fresh reply", "the retry must be transparent to the consumer");
+        assert_eq!(
+            provider.session_id().as_deref(),
+            Some("new-id"),
+            "the fresh session replaces the stale id"
+        );
+
+        let calls = std::fs::read_to_string(&record).unwrap();
+        let calls: Vec<&str> = calls.split("CALL ").filter(|c| !c.trim().is_empty()).collect();
+        assert_eq!(calls.len(), 2, "one stale attempt, then one fresh retry: {calls:?}");
+        assert!(calls[0].contains("--resume stale-id"), "first attempt resumes: {}", calls[0]);
+        assert!(
+            !calls[0].contains("Earlier in this conversation"),
+            "a resumed attempt carries no history"
+        );
+        assert!(!calls[1].contains("--resume"), "the retry starts fresh: {}", calls[1]);
+        assert!(
+            calls[1].contains("Earlier in this conversation"),
+            "the retry is seeded: {}",
+            calls[1]
+        );
+        assert!(calls[1].contains("User: earlier question"));
+        assert!(calls[1].contains("Assistant: earlier answer"));
+    }
+
     // -- cli-session-continuity: which prompt each kind of request gets --
 
     /// `assemble_messages`' real shape: system prompt, a persona
@@ -663,7 +764,7 @@ mod tests {
 
     #[test]
     fn a_request_with_no_resume_is_seeded_with_the_history() {
-        let prompt = build_prompt(&assembled_messages("now"), &real_history(), false);
+        let prompt = build_prompt(&assembled_messages("now"), &real_history(), 0, false);
         assert!(prompt.contains("User: earlier question"));
         assert!(prompt.contains("Assistant: earlier answer"));
         assert!(prompt.ends_with("Current message:\nnow"));
@@ -671,24 +772,37 @@ mod tests {
     }
 
     #[test]
-    fn a_resumed_request_sends_only_the_latest_message() {
-        assert_eq!(build_prompt(&assembled_messages("now"), &real_history(), true), "now");
+    fn a_resumed_request_that_missed_nothing_sends_only_the_latest_message() {
+        // The session has seen both history messages.
+        assert_eq!(build_prompt(&assembled_messages("now"), &real_history(), 2, true), "now");
+    }
+
+    #[test]
+    fn a_resumed_request_is_caught_up_on_turns_it_never_saw() {
+        // The session has seen only the first history message; the assistant
+        // answer after it happened without this session (e.g. another provider).
+        let prompt = build_prompt(&assembled_messages("now"), &real_history(), 1, true);
+        assert!(prompt.contains("Assistant: earlier answer"));
+        assert!(!prompt.contains("User: earlier question"), "already held by the session");
+        assert!(prompt.ends_with("Current message:\nnow"));
     }
 
     #[test]
     fn a_stale_resume_retry_is_seeded_like_any_fresh_request() {
-        // `chat()`'s retry path builds its prompt with `resuming = false`;
-        // the seeded prompt must differ from the resumed one.
+        // `chat()`'s retry path builds its prompt with `resuming = false`,
+        // and must include everything the stale session took with it --
+        // including turns the session had already seen.
         let messages = assembled_messages("now");
-        let resumed = build_prompt(&messages, &real_history(), true);
-        let retry = build_prompt(&messages, &real_history(), false);
+        let resumed = build_prompt(&messages, &real_history(), 2, true);
+        let retry = build_prompt(&messages, &real_history(), 2, false);
         assert_ne!(resumed, retry);
         assert!(retry.contains("User: earlier question"));
+        assert!(retry.contains("Assistant: earlier answer"));
     }
 
     #[test]
     fn a_fresh_request_with_no_history_adds_nothing() {
-        assert_eq!(build_prompt(&assembled_messages("now"), &[], false), "now");
+        assert_eq!(build_prompt(&assembled_messages("now"), &[], 0, false), "now");
     }
 
     #[test]
@@ -844,9 +958,7 @@ mod tests {
 
         let first = ClaudeCodeCli::new(
             None,
-            None,
-            vec![],
-            std::env::temp_dir(),
+            CliContext::fresh(std::env::temp_dir()),
             ClaudeCodeToolAccess::default(),
         );
         let mut stream = first
@@ -866,9 +978,10 @@ mod tests {
 
         let second = ClaudeCodeCli::new(
             None,
-            session_id.clone(),
-            vec![],
-            std::env::temp_dir(),
+            CliContext {
+                resume_session_id: session_id.clone(),
+                ..CliContext::fresh(std::env::temp_dir())
+            },
             ClaudeCodeToolAccess::default(),
         );
         let mut stream = second
@@ -903,9 +1016,7 @@ mod tests {
         ];
         let provider = ClaudeCodeCli::new(
             None,
-            None,
-            history,
-            std::env::temp_dir(),
+            CliContext { history, ..CliContext::fresh(std::env::temp_dir()) },
             ClaudeCodeToolAccess::default(),
         );
         let mut stream = provider
@@ -945,9 +1056,7 @@ mod tests {
         let marker = format!("killprobe-{}", std::process::id());
         let provider = ClaudeCodeCli::new(
             None,
-            None,
-            vec![],
-            std::env::temp_dir(),
+            CliContext::fresh(std::env::temp_dir()),
             ClaudeCodeToolAccess::default(),
         );
         let mut stream = provider
@@ -1004,11 +1113,14 @@ mod tests {
 
     #[tokio::test]
     async fn list_models_offers_the_known_aliases_not_an_empty_list() {
-        let models =
-            ClaudeCodeCli::new(None, None, vec![], PathBuf::new(), ClaudeCodeToolAccess::default())
-                .list_models()
-                .await
-                .unwrap();
+        let models = ClaudeCodeCli::new(
+            None,
+            CliContext::fresh(PathBuf::new()),
+            ClaudeCodeToolAccess::default(),
+        )
+        .list_models()
+        .await
+        .unwrap();
         assert!(!models.is_empty(), "settings UI needs something to show in the model picker");
         let ids: Vec<&str> = models.iter().map(|m| m.id.as_str()).collect();
         assert!(ids.contains(&"sonnet"));

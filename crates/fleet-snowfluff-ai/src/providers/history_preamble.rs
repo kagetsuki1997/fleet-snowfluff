@@ -19,6 +19,10 @@ use crate::message::{Message, Role};
 pub const HISTORY_CHAR_BUDGET: usize = 6000;
 
 const HEADER: &str = "Earlier in this conversation (context only; reply to the current message):";
+/// For a resumed session that missed some turns: it remembers everything
+/// up to a point, and these are the turns since.
+const CATCH_UP_HEADER: &str = "Since we last spoke, the conversation also included (context only; \
+                               reply to the current message):";
 const CURRENT_HEADER: &str = "Current message:";
 const TRUNCATION_MARKER: &str = " [truncated]";
 
@@ -49,6 +53,10 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 /// than dropped. With no renderable history the current message is
 /// returned unchanged.
 pub fn render_with_history(history: &[Message], current: &str, char_budget: usize) -> String {
+    render(history, current, char_budget, HEADER)
+}
+
+fn render(history: &[Message], current: &str, char_budget: usize, header: &str) -> String {
     let mut selected: Vec<String> = Vec::new();
     let mut used = 0usize;
     for turn in history.iter().rev().filter_map(render_turn) {
@@ -67,18 +75,30 @@ pub fn render_with_history(history: &[Message], current: &str, char_budget: usiz
         return current.to_string();
     }
     selected.reverse();
-    format!("{HEADER}\n{}\n\n{CURRENT_HEADER}\n{current}", selected.join("\n"))
+    format!("{header}\n{}\n\n{CURRENT_HEADER}\n{current}", selected.join("\n"))
 }
 
-/// The prompt a CLI provider sends: a resumed session already holds its
-/// own history, so it gets only the latest message; anything else is
-/// seeded from the transcript.
-pub fn prompt_for_session(history: &[Message], latest: &str, resuming: bool) -> String {
-    if resuming {
-        latest.to_string()
-    } else {
-        render_with_history(history, latest, HISTORY_CHAR_BUDGET)
+/// The prompt a CLI provider sends.
+///
+/// - Not resuming: seeded from the whole transcript.
+/// - Resuming: the session already holds `history[..seen_turns]`, so only the
+///   turns after that -- ones it never saw, such as those another provider
+///   answered in `mix` mode -- are sent, and nothing but the latest message
+///   when it has missed none.
+///
+/// `seen_turns` past the end of `history` is treated as "has seen it
+/// all" rather than panicking.
+pub fn prompt_for_session(
+    history: &[Message],
+    seen_turns: usize,
+    latest: &str,
+    resuming: bool,
+) -> String {
+    if !resuming {
+        return render_with_history(history, latest, HISTORY_CHAR_BUDGET);
     }
+    let missed = &history[seen_turns.min(history.len())..];
+    render(missed, latest, HISTORY_CHAR_BUDGET, CATCH_UP_HEADER)
 }
 
 #[cfg(test)]
@@ -149,15 +169,45 @@ mod tests {
     }
 
     #[test]
-    fn a_resumed_session_gets_only_the_latest_message() {
-        let history = [turn(Role::User, "earlier")];
-        assert_eq!(prompt_for_session(&history, "latest", true), "latest");
+    fn a_resumed_session_that_missed_nothing_gets_only_the_latest_message() {
+        let history = [turn(Role::User, "earlier"), turn(Role::Assistant, "reply")];
+        assert_eq!(prompt_for_session(&history, 2, "latest", true), "latest");
+    }
+
+    #[test]
+    fn a_resumed_session_is_sent_only_the_turns_it_has_not_seen() {
+        let history = [
+            turn(Role::User, "seen question"),
+            turn(Role::Assistant, "seen answer"),
+            turn(Role::User, "missed question"),
+            turn(Role::Assistant, "missed answer"),
+        ];
+        let prompt = prompt_for_session(&history, 2, "latest", true);
+        assert!(prompt.contains("User: missed question"));
+        assert!(prompt.contains("Assistant: missed answer"));
+        assert!(!prompt.contains("seen question"), "already held by the session");
+        assert!(prompt.starts_with(CATCH_UP_HEADER));
+        assert!(prompt.ends_with("Current message:\nlatest"));
+    }
+
+    #[test]
+    fn a_seen_count_past_the_end_is_treated_as_having_seen_everything() {
+        let history = [turn(Role::User, "only turn")];
+        assert_eq!(prompt_for_session(&history, 99, "latest", true), "latest");
+    }
+
+    #[test]
+    fn a_fresh_session_ignores_the_seen_count_and_gets_everything() {
+        let history = [turn(Role::User, "earlier"), turn(Role::Assistant, "reply")];
+        let prompt = prompt_for_session(&history, 2, "latest", false);
+        assert!(prompt.contains("User: earlier"));
+        assert!(prompt.starts_with(HEADER));
     }
 
     #[test]
     fn a_fresh_session_gets_the_history_preamble() {
         let history = [turn(Role::User, "earlier"), turn(Role::Assistant, "reply")];
-        let prompt = prompt_for_session(&history, "latest", false);
+        let prompt = prompt_for_session(&history, 0, "latest", false);
         assert!(prompt.contains("User: earlier"));
         assert!(prompt.contains("Assistant: reply"));
         assert!(prompt.ends_with("Current message:\nlatest"));
@@ -165,6 +215,6 @@ mod tests {
 
     #[test]
     fn a_fresh_session_with_no_history_adds_nothing() {
-        assert_eq!(prompt_for_session(&[], "latest", false), "latest");
+        assert_eq!(prompt_for_session(&[], 0, "latest", false), "latest");
     }
 }

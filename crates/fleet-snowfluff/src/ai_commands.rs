@@ -11,8 +11,8 @@
 use std::{path::PathBuf, sync::Mutex};
 
 use fleet_snowfluff_ai::{
-    AiProvider, AiSettings, Anthropic, AuthMethod, ClaudeCodeCli, ClaudeCodeToolAccess, Codex,
-    Message, Mock, ModelInfo, Ollama, OpenAiCompatible, ProfileKey, ProviderCredentials,
+    AiProvider, AiSettings, Anthropic, AuthMethod, ClaudeCodeCli, ClaudeCodeToolAccess, CliContext,
+    Codex, Mock, ModelInfo, Ollama, OpenAiCompatible, ProfileKey, ProviderCredentials,
     ProviderError, ProviderKind, ProviderProfile, TaskRouterMode, ToolCallingProvider,
 };
 use tauri::{AppHandle, State};
@@ -343,9 +343,7 @@ impl RoutedExecution {
 pub(crate) fn route_provider(
     credentials: &ProviderCredentials,
     profile: &ProviderProfile,
-    resume_session_id: Option<String>,
-    history: Vec<Message>,
-    working_dir: PathBuf,
+    cli: CliContext,
     claude_code_tool_access: &ClaudeCodeToolAccess,
 ) -> RoutedExecution {
     match (profile.provider, profile.auth_method) {
@@ -367,18 +365,12 @@ pub(crate) fn route_provider(
                 profile.model.clone().unwrap_or_default(),
             )))
         }
-        (ProviderKind::Anthropic, AuthMethod::Subscription) => {
-            RoutedExecution::PlainChat(Box::new(ClaudeCodeCli::new(
-                profile.model.clone(),
-                resume_session_id,
-                history,
-                working_dir,
-                *claude_code_tool_access,
-            )))
+        (ProviderKind::Anthropic, AuthMethod::Subscription) => RoutedExecution::PlainChat(
+            Box::new(ClaudeCodeCli::new(profile.model.clone(), cli, *claude_code_tool_access)),
+        ),
+        (ProviderKind::OpenAi, AuthMethod::Subscription) => {
+            RoutedExecution::PlainChat(Box::new(Codex::new(profile.model.clone(), cli)))
         }
-        (ProviderKind::OpenAi, AuthMethod::Subscription) => RoutedExecution::PlainChat(Box::new(
-            Codex::new(profile.model.clone(), resume_session_id, history, working_dir),
-        )),
         (ProviderKind::Ollama, auth_method) => {
             let provider = Ollama::new(
                 profile.base_url.clone().unwrap_or_else(|| {
@@ -421,9 +413,7 @@ pub(crate) fn build_provider(
     route_provider(
         credentials,
         profile,
-        resume_session_id,
-        Vec::new(),
-        std::env::temp_dir(),
+        CliContext { resume_session_id, ..CliContext::fresh(std::env::temp_dir()) },
         claude_code_tool_access,
     )
     .into_ai_provider()
@@ -733,7 +723,7 @@ mod tests {
         ];
         for profile in combinations {
             let routed =
-                route_provider(&creds, &profile, None, vec![], PathBuf::new(), &tool_access);
+                route_provider(&creds, &profile, CliContext::fresh(PathBuf::new()), &tool_access);
             assert!(
                 matches!(routed, RoutedExecution::PlainChat(_)),
                 "{:?} should not be tool-capable",
@@ -743,7 +733,7 @@ mod tests {
 
         let ollama_local = profile(ProviderKind::Ollama, AuthMethod::Local);
         let routed =
-            route_provider(&creds, &ollama_local, None, vec![], PathBuf::new(), &tool_access);
+            route_provider(&creds, &ollama_local, CliContext::fresh(PathBuf::new()), &tool_access);
         assert!(
             matches!(routed, RoutedExecution::ToolCapable(_)),
             "(Ollama, Local) should be the only tool-capable combination"
@@ -757,9 +747,7 @@ mod tests {
         let plain = route_provider(
             &creds,
             &profile(ProviderKind::OpenAi, AuthMethod::ApiKey),
-            None,
-            vec![],
-            PathBuf::new(),
+            CliContext::fresh(PathBuf::new()),
             &tool_access,
         )
         .into_ai_provider();
@@ -768,9 +756,7 @@ mod tests {
         let tool_capable = route_provider(
             &creds,
             &profile(ProviderKind::Ollama, AuthMethod::Local),
-            None,
-            vec![],
-            PathBuf::new(),
+            CliContext::fresh(PathBuf::new()),
             &tool_access,
         )
         .into_ai_provider();

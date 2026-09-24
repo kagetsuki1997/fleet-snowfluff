@@ -80,6 +80,11 @@ pub struct ExternalSessionRef(pub String);
 pub struct CliSessionEntry {
     pub session: ExternalSessionRef,
     pub cwd: std::path::PathBuf,
+    /// How many transcript messages (user/assistant, in log order) the
+    /// CLI session is known to hold. Turns beyond this were answered
+    /// without it -- by another provider in `mix` mode -- and are sent
+    /// along when the session is next resumed.
+    pub seen_turns: usize,
 }
 
 #[cfg(test)]

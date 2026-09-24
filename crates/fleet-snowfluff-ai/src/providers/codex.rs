@@ -78,7 +78,7 @@ use tokio::{
 use crate::{
     message::{Message, ModelInfo, ProviderError, ProviderKind, Role, StreamChunk},
     provider::{AiProvider, ChatStream},
-    providers::{cli_locator, cli_process, history_preamble, mock},
+    providers::{cli_context::CliContext, cli_locator, cli_process, history_preamble, mock},
 };
 
 /// Small enough to feel responsive, large enough to visibly show
@@ -96,24 +96,28 @@ pub struct Codex {
     /// used to seed any request that isn't resuming a session -- see
     /// `history_preamble`.
     history: Vec<Message>,
+    /// How many leading `history` messages a resumed session already
+    /// holds; the rest are sent along on resume.
+    seen_turns: usize,
     /// Where the CLI is run -- always explicit, never inherited from
     /// the app's launch directory (see `cli_workdir` in the app crate).
     working_dir: PathBuf,
 }
 
 impl Codex {
-    /// `resume_session_id` is the id returned by a prior instance's
+    /// `cli.resume_session_id` is the id returned by a prior instance's
     /// `session_id()`, if any -- supplied by the app crate, never
-    /// stored by this crate itself. `history` is the conversation's
-    /// recent transcript, used only when a request has no session to
-    /// resume.
-    pub fn new(
-        model: Option<String>,
-        resume_session_id: Option<String>,
-        history: Vec<Message>,
-        working_dir: PathBuf,
-    ) -> Self {
-        Self { model, session_id: Arc::new(Mutex::new(resume_session_id)), history, working_dir }
+    /// stored by this crate itself. The rest of `cli` (history, how much
+    /// of it a resumed session has seen, the working directory) is
+    /// described on [`CliContext`].
+    pub fn new(model: Option<String>, cli: CliContext) -> Self {
+        Self {
+            model,
+            session_id: Arc::new(Mutex::new(cli.resume_session_id)),
+            history: cli.history,
+            seen_turns: cli.seen_turns,
+            working_dir: cli.working_dir,
+        }
     }
 
     /// The Codex thread id captured from this instance's most recent
@@ -141,12 +145,23 @@ fn latest_user_message(messages: &[Message]) -> String {
         .unwrap_or_default()
 }
 
-/// The prompt for one request. A resumed session already holds its own
-/// history, so it gets only the latest message; a request with no
-/// session to resume (first message, stale-resume retry, escalation) is
-/// seeded from `history`.
-fn build_prompt(messages: &[Message], history: &[Message], resuming: bool) -> String {
-    history_preamble::prompt_for_session(history, &latest_user_message(messages), resuming)
+/// The prompt for one request. A resumed session already holds
+/// `history[..seen_turns]`, so it gets the latest message plus any turns
+/// after that it never saw; a request with no session to resume (first
+/// message, stale-resume retry, escalation) is seeded from all of
+/// `history`.
+fn build_prompt(
+    messages: &[Message],
+    history: &[Message],
+    seen_turns: usize,
+    resuming: bool,
+) -> String {
+    history_preamble::prompt_for_session(
+        history,
+        seen_turns,
+        &latest_user_message(messages),
+        resuming,
+    )
 }
 
 /// A path in the OS temp directory unique enough not to collide with a
@@ -316,6 +331,12 @@ fn chat_command(
     if let Some(model) = model {
         command.args(["--model", model]);
     }
+    // `--` ends option parsing so a prompt that starts with `-` is read
+    // as the prompt, not a flag -- the same hazard `ClaudeCodeCli` hit,
+    // where it also let a variadic option swallow the prompt. Standard
+    // for a clap-based CLI, but NOT verified against a real `codex`
+    // install (none was available); revisit if Codex is ever exercised.
+    command.arg("--");
     command.arg(prompt);
     cli_process::apply_chat_spawn_settings(&mut command, working_dir);
     command
@@ -388,7 +409,7 @@ impl AiProvider for Codex {
 
         let system_prompt = system_prompt(&messages);
         let resume = self.session_id();
-        let prompt = build_prompt(&messages, &self.history, resume.is_some());
+        let prompt = build_prompt(&messages, &self.history, self.seen_turns, resume.is_some());
         let model = self.model.clone();
         let session_id_slot = self.session_id.clone();
 
@@ -422,7 +443,8 @@ impl AiProvider for Codex {
                         *session_id_slot.lock().unwrap() = None;
                         // The stale session took its memory with it, so
                         // the retry is seeded from the transcript.
-                        let fresh_prompt = build_prompt(&messages, &self.history, false);
+                        let fresh_prompt =
+                            build_prompt(&messages, &self.history, self.seen_turns, false);
                         child = spawn(
                             model.as_deref(),
                             None,
@@ -514,6 +536,87 @@ impl AiProvider for Codex {
 mod tests {
     use super::*;
 
+    // -- cli-session-continuity: `chat()` driven against a fake `codex` --
+
+    /// A `codex` stand-in that rejects any `resume` like a thread the CLI
+    /// no longer has, answers everything else with a fresh thread, and
+    /// records the arguments of every `exec` invocation.
+    #[cfg(unix)]
+    fn fake_codex(dir: &std::path::Path, record: &std::path::Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let script = dir.join("codex");
+        std::fs::write(
+            &script,
+            format!(
+                r#"#!/bin/sh
+if [ "$1" = "login" ]; then exit 0; fi
+printf 'CALL %s\n' "$*" >> '{record}'
+case "$*" in
+  *" resume "*)
+    echo '{{"type":"error","message":"Could not resume thread: not found."}}'
+    ;;
+  *)
+    echo '{{"type":"thread.started","thread_id":"new-thread"}}'
+    echo '{{"type":"item.completed","item":{{"id":"item_1","type":"agent_message","text":"fresh reply"}}}}'
+    ;;
+esac
+"#,
+                record = record.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        script
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_stale_resume_is_retried_fresh_with_the_history_seeded() {
+        use futures_util::StreamExt;
+
+        let dir =
+            std::env::temp_dir().join(format!("fleet-snowfluff-fake-codex-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        let record = dir.join("calls.txt");
+        let _guard = cli_locator::override_for_test("codex", fake_codex(&dir, &record));
+
+        let provider = Codex::new(
+            None,
+            CliContext {
+                resume_session_id: Some("stale-thread".to_string()),
+                history: real_history(),
+                seen_turns: 2,
+                working_dir: dir.clone(),
+            },
+        );
+        let mut stream =
+            provider.chat(vec![Message::system("be brief"), Message::user("now")]).await.unwrap();
+        let mut reply = String::new();
+        while let Some(chunk) = stream.next().await {
+            reply.push_str(&chunk.unwrap().delta);
+        }
+
+        assert_eq!(reply, "fresh reply", "the retry must be transparent to the consumer");
+        assert_eq!(provider.session_id().as_deref(), Some("new-thread"));
+
+        let calls = std::fs::read_to_string(&record).unwrap();
+        let calls: Vec<&str> = calls.split("CALL ").filter(|c| !c.trim().is_empty()).collect();
+        assert_eq!(calls.len(), 2, "one stale attempt, then one fresh retry: {calls:?}");
+        assert!(calls[0].contains("resume stale-thread"), "first attempt resumes: {}", calls[0]);
+        assert!(
+            !calls[0].contains("Earlier in this conversation"),
+            "a resumed attempt carries no history"
+        );
+        assert!(!calls[1].contains(" resume "), "the retry starts fresh: {}", calls[1]);
+        assert!(
+            calls[1].contains("Earlier in this conversation"),
+            "the retry is seeded: {}",
+            calls[1]
+        );
+        assert!(calls[1].contains("User: earlier question"));
+    }
+
     // -- cli-session-continuity: which prompt each kind of request gets --
 
     /// `assemble_messages`' real shape: system prompt, a persona
@@ -547,6 +650,31 @@ mod tests {
     }
 
     #[test]
+    fn the_prompt_follows_an_option_terminator() {
+        let args_of = |resume: Option<&str>, prompt: &str| -> Vec<String> {
+            chat_command(
+                "codex",
+                Some("some-model"),
+                resume,
+                std::path::Path::new("/tmp/instructions.md"),
+                prompt,
+                std::path::Path::new("/some/project"),
+            )
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+        };
+        for args in [args_of(None, "hello"), args_of(Some("thread-1"), "hello")] {
+            let n = args.len();
+            assert_eq!(&args[n - 2..], ["--", "hello"], "{args:?}");
+        }
+        // A prompt that would otherwise look like a flag.
+        let args = args_of(None, "- a list item");
+        assert_eq!(&args[args.len() - 2..], ["--", "- a list item"]);
+    }
+
+    #[test]
     fn a_resumed_chat_command_also_runs_in_the_supplied_working_directory() {
         let dir = std::path::Path::new("/some/project");
         let command = chat_command(
@@ -562,7 +690,7 @@ mod tests {
 
     #[test]
     fn a_request_with_no_resume_is_seeded_with_the_history() {
-        let prompt = build_prompt(&assembled_messages("now"), &real_history(), false);
+        let prompt = build_prompt(&assembled_messages("now"), &real_history(), 0, false);
         assert!(prompt.contains("User: earlier question"));
         assert!(prompt.contains("Assistant: earlier answer"));
         assert!(prompt.ends_with("Current message:\nnow"));
@@ -570,22 +698,37 @@ mod tests {
     }
 
     #[test]
-    fn a_resumed_request_sends_only_the_latest_message() {
-        assert_eq!(build_prompt(&assembled_messages("now"), &real_history(), true), "now");
+    fn a_resumed_request_that_missed_nothing_sends_only_the_latest_message() {
+        // The session has seen both history messages.
+        assert_eq!(build_prompt(&assembled_messages("now"), &real_history(), 2, true), "now");
+    }
+
+    #[test]
+    fn a_resumed_request_is_caught_up_on_turns_it_never_saw() {
+        // The session has seen only the first history message; the assistant
+        // answer after it happened without this session (e.g. another provider).
+        let prompt = build_prompt(&assembled_messages("now"), &real_history(), 1, true);
+        assert!(prompt.contains("Assistant: earlier answer"));
+        assert!(!prompt.contains("User: earlier question"), "already held by the session");
+        assert!(prompt.ends_with("Current message:\nnow"));
     }
 
     #[test]
     fn a_stale_resume_retry_is_seeded_like_any_fresh_request() {
+        // `chat()`'s retry path builds its prompt with `resuming = false`,
+        // and must include everything the stale session took with it --
+        // including turns the session had already seen.
         let messages = assembled_messages("now");
-        let resumed = build_prompt(&messages, &real_history(), true);
-        let retry = build_prompt(&messages, &real_history(), false);
+        let resumed = build_prompt(&messages, &real_history(), 2, true);
+        let retry = build_prompt(&messages, &real_history(), 2, false);
         assert_ne!(resumed, retry);
         assert!(retry.contains("User: earlier question"));
+        assert!(retry.contains("Assistant: earlier answer"));
     }
 
     #[test]
     fn a_fresh_request_with_no_history_adds_nothing() {
-        assert_eq!(build_prompt(&assembled_messages("now"), &[], false), "now");
+        assert_eq!(build_prompt(&assembled_messages("now"), &[], 0, false), "now");
     }
 
     #[test]
@@ -683,7 +826,8 @@ mod tests {
         // `list_models_offers_the_known_aliases_not_an_empty_list` -- see this
         // function's own doc comment for why the two providers can't share the
         // same answer here.
-        let models = Codex::new(None, None, vec![], PathBuf::new()).list_models().await.unwrap();
+        let models =
+            Codex::new(None, CliContext::fresh(PathBuf::new())).list_models().await.unwrap();
         assert!(models.is_empty());
     }
 

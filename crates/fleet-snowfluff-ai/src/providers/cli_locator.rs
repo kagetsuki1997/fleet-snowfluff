@@ -66,6 +66,27 @@ fn cache() -> &'static Mutex<HashMap<String, PathBuf>> {
     CACHE.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Test seam: makes `resolve(name)` return `path`, so a provider can be
+/// driven against a fake CLI script. It edits the process-wide cache, so
+/// it is for the fake-CLI tests only; the returned guard restores normal
+/// resolution when dropped (including on a panic). Those tests are unit
+/// tests, and the live tests that need the real CLI are `#[ignore]`d --
+/// running both kinds in one process (`--include-ignored`) is the one
+/// combination this seam does not support.
+#[cfg(all(test, unix))]
+pub(crate) fn override_for_test(name: &'static str, path: PathBuf) -> OverrideGuard {
+    cache().lock().unwrap().insert(name.to_string(), path);
+    OverrideGuard(name)
+}
+
+#[cfg(all(test, unix))]
+pub(crate) struct OverrideGuard(&'static str);
+
+#[cfg(all(test, unix))]
+impl Drop for OverrideGuard {
+    fn drop(&mut self) { cache().lock().unwrap().remove(self.0); }
+}
+
 /// Resolves `name` (e.g. `"claude"`, `"codex"`) to an absolute
 /// executable path if one can be found by any step in the module doc's
 /// search order; otherwise returns `name` itself unchanged.
