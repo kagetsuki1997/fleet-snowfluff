@@ -48,7 +48,7 @@ pub use native_tools::{
 };
 pub use persona::{FewShotExample, Language, Persona, PersonaParseError, ResponseLanguage};
 pub use provider::{AiProvider, ChatStream};
-pub use providers::{Anthropic, ClaudeCodeCli, Codex, Mock, Ollama, OpenAiCompatible};
+pub use providers::{Anthropic, ClaudeCodeCli, CliContext, Codex, Mock, Ollama, OpenAiCompatible};
 pub use settings::{
     AiSettings, AuthMethod, ClaudeCodeToolAccess, NativeToolAccess, ProfileKey, ProviderProfile,
     TaskRouterMode,

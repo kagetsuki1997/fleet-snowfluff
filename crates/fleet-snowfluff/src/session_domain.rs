@@ -28,7 +28,10 @@
 //! with no reason for `fleet-snowfluff-ai` to know about it.
 //!
 //! This is a typing-only pass: nothing here changes observable
-//! behavior, and nothing here is persisted to disk. `PendingGeneration`
+//! behavior, and nothing here is persisted to disk *by this module*
+//! (`cli-session-continuity` later persists `ExternalSessionRef`s
+//! itself, in a sidecar next to the chat log -- see
+//! `cli_session_store` -- without changing these types). `PendingGeneration`
 //! in `chat_commands.rs` is deliberately left untouched (still one
 //! global slot, no `execution_id` field) -- seeing this section's own
 //! design.md entry for why that's not the same call as re-keying
@@ -68,6 +71,21 @@ impl Default for ExecutionId {
 /// information.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalSessionRef(pub String);
+
+/// An [`ExternalSessionRef`] together with the working directory the CLI
+/// was run in when it was created. `cli_sessions` holds these (and the
+/// sidecar file persists them) because a CLI session may only be resumed
+/// from the directory it was created under -- see `cli_session_store`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CliSessionEntry {
+    pub session: ExternalSessionRef,
+    pub cwd: std::path::PathBuf,
+    /// How many transcript messages (user/assistant, in log order) the
+    /// CLI session is known to hold. Turns beyond this were answered
+    /// without it -- by another provider in `mix` mode -- and are sent
+    /// along when the session is next resumed.
+    pub seen_turns: usize,
+}
 
 #[cfg(test)]
 mod tests {

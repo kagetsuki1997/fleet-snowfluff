@@ -17,7 +17,7 @@ use std::{
 
 use fleet_snowfluff_ai::{
     detect_escalation, log::LogRole, prompt, with_task_router_rules, AemeathAgentRuntime,
-    AgentRuntime, AiProvider, AiSettings, AuthMethod, ChatStream, ClaudeCodeToolAccess,
+    AgentRuntime, AiProvider, AiSettings, AuthMethod, ChatStream, ClaudeCodeToolAccess, CliContext,
     DefaultTaskRouter, EscalationDecision, GetSystemContextTool, Language, ListDirectoryTool,
     LogEntry, Message, Persona, ProfileKey, ProviderCredentials, ProviderKind, ProviderProfile,
     ReadFileTool, ResponseLanguage, RoutingContext, RunCommandTool, Task, TaskRouter,
@@ -28,10 +28,10 @@ use tauri::{ipc::Channel, AppHandle, Manager, State};
 
 use crate::{
     ai_commands::{self, RoutedExecution},
-    chat_log_store, chat_pause, chat_window,
+    chat_log_store, chat_pause, chat_window, cli_session_store, cli_workdir,
     manager::PetManager,
     persona_store,
-    session_domain::{ConversationId, ExecutionId, ExternalSessionRef},
+    session_domain::{CliSessionEntry, ConversationId, ExecutionId, ExternalSessionRef},
     status_bubble, task_router_rules_store,
 };
 
@@ -81,10 +81,12 @@ pub struct ChatRuntimeState {
     /// profile), for CLI-backed subscription providers' warm-session
     /// model (both `ClaudeCodeCli` and `Codex` --
     /// `subscription-first-chat`'s "Session continuity for CLI-backed
-    /// subscription providers"). Runtime-only, never written to disk
-    /// (design.md's "session id is runtime-only" decision) -- an app
-    /// restart just starts fresh sessions, same as `new_chat_session`
-    /// already clears this map for a new Aemeath chat session. Keyed by
+    /// subscription providers"). The hot path only: every entry is
+    /// also written through to the conversation's sidecar file
+    /// (`cli_session_store`), which is read back lazily on a miss, so a
+    /// session survives an app restart (`cli-session-continuity`).
+    /// Each entry records the working directory it was created under
+    /// and is used only from that same directory. Keyed by
     /// `ConversationId` as well as `ProfileKey`, not `ProfileKey` alone
     /// -- Aemeath has exactly one conversation at a time today, so this
     /// makes no observable difference yet, but a `ProfileKey`-only key
@@ -92,7 +94,7 @@ pub struct ChatRuntimeState {
     /// request for the same profile the moment that's no longer true
     /// (see design.md's Decisions for why this is treated differently
     /// from `PendingGeneration`, which is deliberately left alone).
-    cli_sessions: Mutex<HashMap<(ConversationId, ProfileKey), ExternalSessionRef>>,
+    cli_sessions: Mutex<HashMap<(ConversationId, ProfileKey), CliSessionEntry>>,
     /// Tool calls the user has approved for the rest of the current
     /// conversation (task 6.4) -- never persisted, cleared on the same
     /// `new_chat_session` lifecycle as `cli_sessions`.
@@ -112,6 +114,105 @@ impl ChatRuntimeState {
 
     pub fn remember_tool(&self, conversation_id: ConversationId, key: RememberKey) {
         self.remembered_tools.lock().unwrap().insert((conversation_id, key));
+    }
+
+    /// Everything a CLI-backed provider needs about the conversation it
+    /// is continuing (`CliContext`): the session to resume (if a
+    /// still-usable one is stored), the transcript, how much of it that
+    /// session has seen, and the working directory. The one place this is
+    /// built, used by both `send_chat_message`'s direct branch and
+    /// `run_generation_fallback` (the escalation path), so the two cannot
+    /// disagree about what a CLI is told.
+    pub fn cli_context(
+        &self,
+        session_path: &Path,
+        conversation_id: &ConversationId,
+        profile_key: ProfileKey,
+        history: Vec<Message>,
+        working_dir: PathBuf,
+    ) -> CliContext {
+        let (resume_session_id, seen_turns) =
+            match self.stored_session(session_path, conversation_id, profile_key, &working_dir) {
+                Some((id, seen)) => (Some(id), seen),
+                None => (None, 0),
+            };
+        CliContext { resume_session_id, history, seen_turns, working_dir }
+    }
+
+    /// The `(session id, turns seen)` to resume for `(conversation,
+    /// profile)` when the CLI is about to run in `working_dir`, or `None`
+    /// to start a fresh (history-seeded) one. Checks the in-memory map
+    /// first and, on a miss, the conversation's sidecar, so a session
+    /// survives an app restart. A session created under a different
+    /// working directory is never returned.
+    fn stored_session(
+        &self,
+        session_path: &Path,
+        conversation_id: &ConversationId,
+        profile_key: ProfileKey,
+        working_dir: &Path,
+    ) -> Option<(String, usize)> {
+        let key = (conversation_id.clone(), profile_key);
+        let mut sessions = self.cli_sessions.lock().unwrap();
+        if let Some(entry) = sessions.get(&key) {
+            return (entry.cwd == working_dir).then(|| (entry.session.0.clone(), entry.seen_turns));
+        }
+        let stored = cli_session_store::load(session_path);
+        let found = cli_session_store::usable(&stored, profile_key, working_dir)?;
+        sessions.insert(
+            key,
+            CliSessionEntry {
+                session: ExternalSessionRef(found.session_id.clone()),
+                cwd: found.cwd.clone(),
+                seen_turns: found.seen_turns,
+            },
+        );
+        Some((found.session_id.clone(), found.seen_turns))
+    }
+
+    /// Remembers `session_id` for `(conversation, profile)` in memory and
+    /// writes it through to the conversation's sidecar, recording the
+    /// working directory it was created under.
+    ///
+    /// `seen_turns` is how many transcript messages the session now
+    /// holds, when the turn completed. `None` (the turn failed, so what
+    /// the session absorbed is unknown) keeps the count already stored
+    /// for this same session and otherwise starts from 0 -- under-
+    /// counting only re-sends history, over-counting would skip turns.
+    pub fn record_session(
+        &self,
+        session_path: &Path,
+        conversation_id: ConversationId,
+        profile_key: ProfileKey,
+        session_id: String,
+        working_dir: &Path,
+        seen_turns: Option<usize>,
+    ) {
+        let key = (conversation_id, profile_key);
+        let mut sessions = self.cli_sessions.lock().unwrap();
+        let seen_turns = seen_turns.unwrap_or_else(|| {
+            sessions
+                .get(&key)
+                .filter(|e| e.session.0 == session_id && e.cwd == working_dir)
+                .map_or(0, |e| e.seen_turns)
+        });
+        cli_session_store::upsert(
+            session_path,
+            cli_session_store::StoredSession {
+                profile: profile_key,
+                session_id: session_id.clone(),
+                cwd: working_dir.to_path_buf(),
+                seen_turns,
+            },
+        );
+        sessions.insert(
+            key,
+            CliSessionEntry {
+                session: ExternalSessionRef(session_id),
+                cwd: working_dir.to_path_buf(),
+                seen_turns,
+            },
+        );
     }
 }
 
@@ -300,6 +401,17 @@ pub async fn send_chat_message(
     let routed_to_local = settings_snapshot.task_router_mode == TaskRouterMode::Mix
         && route.profile_key == local_profile_key;
 
+    // Where a CLI-backed provider runs this turn -- resolved once, up
+    // front, so the resume lookup below and the spawn agree on it.
+    // Only a CLI-backed profile has a working directory; resolving one
+    // creates the fallback folder, which an Ollama- or API-key-only user
+    // should never get.
+    let cli_working_dir = if default_profile.uses_cli() {
+        cli_workdir::for_app(&app, settings_snapshot.project_root.as_deref())
+    } else {
+        PathBuf::new()
+    };
+
     let session_path = resolve_session_path(&app, &chat_state);
     let conversation_id = ConversationId::from_session_path(&session_path);
     let execution_id = ExecutionId::new();
@@ -340,6 +452,8 @@ pub async fn send_chat_message(
         let fallback = FallbackAttempt {
             profile: default_profile,
             messages: default_messages,
+            history: context,
+            working_dir: cli_working_dir,
             credentials: creds_snapshot.clone(),
             project_root: settings_snapshot.project_root.clone(),
             claude_code_tool_access: settings_snapshot.claude_code_tool_access,
@@ -361,12 +475,13 @@ pub async fn send_chat_message(
         })
     } else {
         let profile_key = default_profile.key();
-        let resume_session_id = chat_state
-            .cli_sessions
-            .lock()
-            .unwrap()
-            .get(&(conversation_id.clone(), profile_key))
-            .map(|r| r.0.clone());
+        let cli = chat_state.cli_context(
+            &session_path,
+            &conversation_id,
+            profile_key,
+            context,
+            cli_working_dir,
+        );
         let project_root = settings_snapshot.project_root.clone();
         let claude_code_tool_access = settings_snapshot.claude_code_tool_access;
         tokio::spawn(async move {
@@ -374,7 +489,7 @@ pub async fn send_chat_message(
                 task_app,
                 creds_snapshot,
                 default_profile,
-                resume_session_id,
+                cli,
                 claude_code_tool_access,
                 project_root,
                 execution_id,
@@ -393,6 +508,18 @@ pub async fn send_chat_message(
     Ok(())
 }
 
+/// Per-turn facts a run needs to persist its CLI session afterwards,
+/// bundled so `run_generation` / `stream_to_completion` do not each take
+/// them as loose parameters.
+struct TurnCtx {
+    session_path: PathBuf,
+    working_dir: PathBuf,
+    /// How many transcript messages preceded this turn's user message.
+    /// A completed turn leaves a CLI session holding that many plus the
+    /// user message and the reply.
+    history_len: usize,
+}
+
 /// Everything needed to retry against `default_profile` if a mix-mode
 /// local attempt escalates or fails -- bundled together so
 /// `run_generation_mix_local` has one thing to hold onto rather than
@@ -401,6 +528,13 @@ pub async fn send_chat_message(
 struct FallbackAttempt {
     profile: ProviderProfile,
     messages: Vec<Message>,
+    /// The conversation's real prior turns (not `messages`, which also
+    /// carries persona few-shot examples) -- seeds a CLI-backed
+    /// fallback target's fresh session so an escalated message isn't
+    /// answered without the turns a local provider handled earlier.
+    history: Vec<Message>,
+    /// Where a CLI-backed fallback target runs (`cli_workdir`).
+    working_dir: PathBuf,
     credentials: ProviderCredentials,
     project_root: Option<PathBuf>,
     claude_code_tool_access: ClaudeCodeToolAccess,
@@ -425,18 +559,18 @@ async fn run_generation_fallback(
     session_path: PathBuf,
 ) {
     let profile_key = fallback.profile.key();
-    let resume_session_id = app
-        .state::<ChatRuntimeState>()
-        .cli_sessions
-        .lock()
-        .unwrap()
-        .get(&(conversation_id.clone(), profile_key))
-        .map(|r| r.0.clone());
+    let cli = app.state::<ChatRuntimeState>().cli_context(
+        &session_path,
+        &conversation_id,
+        profile_key,
+        fallback.history,
+        fallback.working_dir,
+    );
     run_generation_routed(
         app,
         fallback.credentials,
         fallback.profile,
-        resume_session_id,
+        cli,
         fallback.claude_code_tool_access,
         fallback.project_root,
         execution_id,
@@ -464,7 +598,7 @@ async fn run_generation_routed(
     app: AppHandle,
     credentials: ProviderCredentials,
     profile: ProviderProfile,
-    resume_session_id: Option<String>,
+    cli: CliContext,
     claude_code_tool_access: ClaudeCodeToolAccess,
     project_root: Option<PathBuf>,
     execution_id: ExecutionId,
@@ -475,12 +609,12 @@ async fn run_generation_routed(
     session_path: PathBuf,
 ) {
     let profile_key = profile.key();
-    match ai_commands::route_provider(
-        &credentials,
-        &profile,
-        resume_session_id,
-        &claude_code_tool_access,
-    ) {
+    let turn = TurnCtx {
+        session_path: session_path.clone(),
+        working_dir: cli.working_dir.clone(),
+        history_len: cli.history.len(),
+    };
+    match ai_commands::route_provider(&credentials, &profile, cli, &claude_code_tool_access) {
         RoutedExecution::PlainChat(provider) => {
             run_generation(
                 app,
@@ -491,7 +625,7 @@ async fn run_generation_routed(
                 messages,
                 channel,
                 partial_text,
-                session_path,
+                turn,
             )
             .await;
         }
@@ -523,16 +657,24 @@ async fn run_generation_routed(
 /// than cleared.
 fn store_cli_session_id(
     app: &AppHandle,
+    turn: &TurnCtx,
     conversation_id: ConversationId,
     profile_key: ProfileKey,
     provider: &dyn AiProvider,
+    completed: bool,
 ) {
     if let Some(id) = provider.session_id() {
-        app.state::<ChatRuntimeState>()
-            .cli_sessions
-            .lock()
-            .unwrap()
-            .insert((conversation_id, profile_key), ExternalSessionRef(id));
+        // A completed turn left the session holding the history, the user
+        // message, and the reply; a failed one leaves that unknown.
+        let seen_turns = completed.then_some(turn.history_len + 2);
+        app.state::<ChatRuntimeState>().record_session(
+            &turn.session_path,
+            conversation_id,
+            profile_key,
+            id,
+            &turn.working_dir,
+            seen_turns,
+        );
     }
 }
 
@@ -555,15 +697,22 @@ async fn run_generation(
     messages: Vec<Message>,
     channel: Channel<ChatEvent>,
     partial_text: Arc<Mutex<String>>,
-    session_path: PathBuf,
+    turn: TurnCtx,
 ) {
     log::debug!("{execution_id:?} starting for {profile_key:?}");
 
     let mut stream = match provider.chat(messages).await {
         Ok(stream) => stream,
         Err(err) => {
-            store_cli_session_id(&app, conversation_id, profile_key, provider.as_ref());
-            finish_with_error(&app, &session_path, &channel, &err.to_string());
+            store_cli_session_id(
+                &app,
+                &turn,
+                conversation_id,
+                profile_key,
+                provider.as_ref(),
+                false,
+            );
+            finish_with_error(&app, &turn.session_path, &channel, &err.to_string());
             return;
         }
     };
@@ -576,7 +725,7 @@ async fn run_generation(
         profile_key,
         channel,
         partial_text,
-        session_path,
+        turn,
     )
     .await;
 }
@@ -598,7 +747,7 @@ async fn stream_to_completion(
     profile_key: ProfileKey,
     channel: Channel<ChatEvent>,
     partial_text: Arc<Mutex<String>>,
-    session_path: PathBuf,
+    turn: TurnCtx,
 ) {
     while let Some(chunk) = stream.next().await {
         match chunk {
@@ -607,17 +756,24 @@ async fn stream_to_completion(
                 channel.send(ChatEvent::Chunk { delta: chunk.delta }).ok();
             }
             Err(err) => {
-                store_cli_session_id(&app, conversation_id, profile_key, provider.as_ref());
-                finish_with_error(&app, &session_path, &channel, &err.to_string());
+                store_cli_session_id(
+                    &app,
+                    &turn,
+                    conversation_id,
+                    profile_key,
+                    provider.as_ref(),
+                    false,
+                );
+                finish_with_error(&app, &turn.session_path, &channel, &err.to_string());
                 return;
             }
         }
     }
 
-    store_cli_session_id(&app, conversation_id, profile_key, provider.as_ref());
+    store_cli_session_id(&app, &turn, conversation_id, profile_key, provider.as_ref(), true);
     let final_text = partial_text.lock().unwrap().clone();
     chat_log_store::append_entry(
-        &session_path,
+        &turn.session_path,
         &LogEntry {
             role: LogRole::Assistant,
             content: final_text.clone(),
@@ -807,9 +963,15 @@ async fn run_generation_mix_local(
                 }
                 store_cli_session_id(
                     &app,
+                    &TurnCtx {
+                        session_path: session_path.clone(),
+                        working_dir: fallback.working_dir.clone(),
+                        history_len: fallback.history.len(),
+                    },
                     conversation_id,
                     local_profile_key,
                     local_provider.as_ref(),
+                    true,
                 );
                 let final_text = partial_text.lock().unwrap().clone();
                 chat_log_store::append_entry(
@@ -843,7 +1005,11 @@ async fn run_generation_mix_local(
                     local_profile_key,
                     channel,
                     partial_text,
-                    session_path,
+                    TurnCtx {
+                        session_path,
+                        working_dir: fallback.working_dir.clone(),
+                        history_len: fallback.history.len(),
+                    },
                 )
                 .await;
                 return;
@@ -918,5 +1084,200 @@ pub fn new_chat_session(app: AppHandle, chat_state: State<ChatRuntimeState>) {
     on_chat_activity_changed(&app);
     if let Some(new_path) = chat_log_store::create_new_session(&app) {
         *chat_state.session_path.lock().unwrap() = Some(new_path);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use fleet_snowfluff_ai::{AuthMethod, ProviderKind};
+
+    use super::*;
+
+    fn claude() -> ProfileKey {
+        ProfileKey { provider: ProviderKind::Anthropic, auth_method: AuthMethod::Subscription }
+    }
+
+    /// A log path in a fresh temp dir -- `name` keeps concurrent tests apart.
+    fn log_path(name: &str, file: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("fleet-snowfluff-chat-commands-test-{}-{name}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join(file)
+    }
+
+    fn conversation(path: &Path) -> ConversationId { ConversationId::from_session_path(path) }
+
+    fn turns(n: usize) -> Vec<Message> {
+        (0..n)
+            .map(|i| {
+                if i % 2 == 0 {
+                    Message::user(format!("q{i}"))
+                } else {
+                    Message::assistant(format!("a{i}"))
+                }
+            })
+            .collect()
+    }
+
+    /// What `send_chat_message` / `run_generation_fallback` hand a CLI
+    /// provider.
+    fn ctx(state: &ChatRuntimeState, log: &Path, history: Vec<Message>, cwd: &str) -> CliContext {
+        state.cli_context(log, &conversation(log), claude(), history, PathBuf::from(cwd))
+    }
+
+    fn record(state: &ChatRuntimeState, log: &Path, id: &str, cwd: &str, seen: Option<usize>) {
+        state.record_session(log, conversation(log), claude(), id.into(), Path::new(cwd), seen);
+    }
+
+    #[test]
+    fn a_recorded_session_is_resumed_from_the_same_working_directory() {
+        let state = ChatRuntimeState::default();
+        let log = log_path("same-cwd", "a.jsonl");
+        record(&state, &log, "sess-1", "/p", Some(2));
+
+        let cli = ctx(&state, &log, turns(2), "/p");
+        assert_eq!(cli.resume_session_id.as_deref(), Some("sess-1"));
+        assert_eq!(cli.seen_turns, 2);
+    }
+
+    #[test]
+    fn a_recorded_session_is_not_resumed_from_a_different_working_directory() {
+        let state = ChatRuntimeState::default();
+        let log = log_path("other-cwd", "a.jsonl");
+        record(&state, &log, "sess-1", "/p", Some(2));
+
+        let cli = ctx(&state, &log, turns(2), "/changed");
+        assert_eq!(
+            cli.resume_session_id, None,
+            "project_root changed, so the old session is skipped"
+        );
+        assert_eq!(cli.seen_turns, 0);
+        assert_eq!(
+            cli.history.len(),
+            2,
+            "the history is still supplied, to seed the fresh session"
+        );
+    }
+
+    #[test]
+    fn recording_writes_through_to_the_sidecar() {
+        let state = ChatRuntimeState::default();
+        let log = log_path("write-through", "a.jsonl");
+        record(&state, &log, "sess-1", "/p", Some(4));
+
+        let stored = cli_session_store::load(&log);
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].session_id, "sess-1");
+        assert_eq!(stored[0].cwd, Path::new("/p"));
+        assert_eq!(stored[0].seen_turns, 4);
+    }
+
+    #[test]
+    fn a_session_and_its_seen_count_survive_an_app_restart() {
+        let log = log_path("restart", "a.jsonl");
+        record(&ChatRuntimeState::default(), &log, "sess-1", "/p", Some(6));
+
+        // A brand-new state, as after a restart: nothing in memory, only the sidecar.
+        let cli = ctx(&ChatRuntimeState::default(), &log, turns(6), "/p");
+        assert_eq!(cli.resume_session_id.as_deref(), Some("sess-1"));
+        assert_eq!(cli.seen_turns, 6);
+    }
+
+    #[test]
+    fn a_restarted_session_from_a_different_working_directory_is_skipped() {
+        let log = log_path("restart-cwd", "a.jsonl");
+        record(&ChatRuntimeState::default(), &log, "sess-1", "/p", Some(2));
+
+        let cli = ctx(&ChatRuntimeState::default(), &log, turns(2), "/other");
+        assert_eq!(cli.resume_session_id, None);
+    }
+
+    #[test]
+    fn a_new_conversation_never_sees_the_previous_conversations_session() {
+        let old_log = log_path("new-chat", "old.jsonl");
+        let state = ChatRuntimeState::default();
+        record(&state, &old_log, "old-session", "/p", Some(2));
+
+        // What "New Chat" produces: a different log path, hence a different
+        // conversation id and a different (absent) sidecar.
+        let new_log = old_log.with_file_name("new.jsonl");
+        assert_eq!(ctx(&state, &new_log, vec![], "/p").resume_session_id, None);
+    }
+
+    #[test]
+    fn a_new_session_id_replaces_the_stored_one_for_the_same_profile() {
+        let state = ChatRuntimeState::default();
+        let log = log_path("replace", "a.jsonl");
+        record(&state, &log, "stale", "/p", Some(2));
+        // The provider fell back to a fresh session and captured a new id.
+        record(&state, &log, "fresh", "/p", Some(4));
+
+        let cli = ctx(&ChatRuntimeState::default(), &log, turns(4), "/p");
+        assert_eq!(cli.resume_session_id.as_deref(), Some("fresh"));
+        assert_eq!(cli.seen_turns, 4);
+    }
+
+    // -- what a CLI is told when other providers answered turns in between --
+
+    #[test]
+    fn turns_answered_elsewhere_show_up_as_unseen_when_the_session_is_resumed() {
+        let state = ChatRuntimeState::default();
+        let log = log_path("catch-up", "a.jsonl");
+        // Claude's session holds the first two messages...
+        record(&state, &log, "sess-1", "/p", Some(2));
+        // ...then Ollama answered another exchange, so the transcript is now 4 long.
+        let cli = ctx(&state, &log, turns(4), "/p");
+
+        assert_eq!(cli.resume_session_id.as_deref(), Some("sess-1"));
+        assert_eq!(cli.seen_turns, 2, "the session has seen only the first two of four");
+        assert_eq!(cli.history.len(), 4);
+    }
+
+    #[test]
+    fn an_escalation_target_with_no_session_is_handed_the_whole_history() {
+        // `run_generation_fallback` builds its context through this same
+        // method, from `FallbackAttempt.history`: Ollama answered turns 1-2,
+        // and the CLI has never been used in this conversation.
+        let state = ChatRuntimeState::default();
+        let log = log_path("escalation", "a.jsonl");
+        let cli = ctx(&state, &log, turns(2), "/p");
+
+        assert_eq!(cli.resume_session_id, None, "nothing to resume, so the provider will seed");
+        assert_eq!(cli.history, turns(2));
+        assert_eq!(cli.working_dir, Path::new("/p"));
+    }
+
+    // -- how many turns a session is recorded as having seen --
+
+    #[test]
+    fn a_failed_turn_keeps_the_seen_count_already_stored_for_that_session() {
+        let state = ChatRuntimeState::default();
+        let log = log_path("failed-same", "a.jsonl");
+        record(&state, &log, "sess-1", "/p", Some(4));
+        // A later turn failed (e.g. a rate limit) after the session id was captured.
+        record(&state, &log, "sess-1", "/p", None);
+
+        assert_eq!(
+            ctx(&state, &log, turns(8), "/p").seen_turns,
+            4,
+            "not advanced past what is known"
+        );
+        assert_eq!(cli_session_store::load(&log)[0].seen_turns, 4);
+    }
+
+    #[test]
+    fn a_failed_turn_on_a_new_session_starts_from_zero() {
+        let state = ChatRuntimeState::default();
+        let log = log_path("failed-new", "a.jsonl");
+        record(&state, &log, "old", "/p", Some(4));
+        // The provider fell back to a fresh session, then failed mid-reply.
+        record(&state, &log, "new", "/p", None);
+
+        assert_eq!(
+            ctx(&state, &log, turns(6), "/p").seen_turns,
+            0,
+            "over-counting would skip turns"
+        );
     }
 }

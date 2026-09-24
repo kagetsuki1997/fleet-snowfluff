@@ -237,6 +237,16 @@ impl ProviderProfile {
             (ProviderKind::OpenAi, AuthMethod::Subscription)
         )
     }
+
+    /// Whether this profile runs a provider's own CLI (`claude`, `codex`)
+    /// as a subprocess -- the only kind of profile that has a working
+    /// directory or a resumable session.
+    pub fn uses_cli(&self) -> bool {
+        matches!(
+            (self.provider, self.auth_method),
+            (ProviderKind::Anthropic | ProviderKind::OpenAi, AuthMethod::Subscription)
+        )
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -809,5 +819,21 @@ mod tests {
         let settings = sanitize(&raw);
         assert!(settings.enabled_profiles.is_empty());
         assert_eq!(settings.default_profile, None);
+    }
+
+    #[test]
+    fn only_subscription_profiles_of_the_cloud_brands_use_a_cli() {
+        let profile = |provider, auth_method| ProviderProfile {
+            provider,
+            auth_method,
+            model: None,
+            base_url: None,
+        };
+        assert!(profile(ProviderKind::Anthropic, AuthMethod::Subscription).uses_cli());
+        assert!(profile(ProviderKind::OpenAi, AuthMethod::Subscription).uses_cli());
+        assert!(!profile(ProviderKind::Anthropic, AuthMethod::ApiKey).uses_cli());
+        assert!(!profile(ProviderKind::OpenAi, AuthMethod::ApiKey).uses_cli());
+        assert!(!profile(ProviderKind::Ollama, AuthMethod::Local).uses_cli());
+        assert!(!profile(ProviderKind::Mock, AuthMethod::Local).uses_cli());
     }
 }

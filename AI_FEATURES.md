@@ -119,3 +119,32 @@ above; a denied tool is simply unavailable until you turn it on.
 sandbox level (read-only) instead. This is a real, known gap, not an
 oversight: Codex's own permission model is less granular than Claude
 Code's, and Codex support in general is still experimental.
+
+### Conversation memory and sessions
+
+Both CLIs keep their own session, and Fleet Snowfluff resumes it from one
+message to the next so the CLI doesn't have to be re-sent the whole
+conversation each time. Your chat transcript is the source of truth; the
+CLI's session is a cache of it:
+
+- **Resumed session:** your new message is sent, plus any turns the CLI
+  never saw — in `mix` mode another provider may have answered some in
+  between. If it saw everything, only the new message is sent.
+- **No session to resume** (the first message, a session the CLI has
+  since dropped, or a message handed over from another provider in
+  `mix` mode): the request also carries a short summary of the recent
+  transcript, so the reply isn't produced without the earlier turns.
+- **Restarting the app** picks the same session back up. The session
+  references are stored in a small `.sessions.json` file next to that
+  conversation's chat log, and start over with a new chat.
+
+The CLI is always run in a fixed directory — your project directory if
+you've set one, otherwise a `cli-workspace` folder in Fleet Snowfluff's
+config directory — never wherever the app happened to be launched from.
+This only decides where the CLI's relative paths point; it is **not** a
+security boundary, and the per-tool allow-list above is still what
+controls what Claude Code may do. Pressing Stop ends the CLI process
+along with the reply.
+
+Codex gets the same handling but, like the rest of Codex support, hasn't
+been verified against a real subscription.
