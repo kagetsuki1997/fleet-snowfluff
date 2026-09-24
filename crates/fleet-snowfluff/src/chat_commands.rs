@@ -340,6 +340,7 @@ pub async fn send_chat_message(
         let fallback = FallbackAttempt {
             profile: default_profile,
             messages: default_messages,
+            history: context,
             credentials: creds_snapshot.clone(),
             project_root: settings_snapshot.project_root.clone(),
             claude_code_tool_access: settings_snapshot.claude_code_tool_access,
@@ -375,6 +376,7 @@ pub async fn send_chat_message(
                 creds_snapshot,
                 default_profile,
                 resume_session_id,
+                context,
                 claude_code_tool_access,
                 project_root,
                 execution_id,
@@ -401,6 +403,11 @@ pub async fn send_chat_message(
 struct FallbackAttempt {
     profile: ProviderProfile,
     messages: Vec<Message>,
+    /// The conversation's real prior turns (not `messages`, which also
+    /// carries persona few-shot examples) -- seeds a CLI-backed
+    /// fallback target's fresh session so an escalated message isn't
+    /// answered without the turns a local provider handled earlier.
+    history: Vec<Message>,
     credentials: ProviderCredentials,
     project_root: Option<PathBuf>,
     claude_code_tool_access: ClaudeCodeToolAccess,
@@ -437,6 +444,7 @@ async fn run_generation_fallback(
         fallback.credentials,
         fallback.profile,
         resume_session_id,
+        fallback.history,
         fallback.claude_code_tool_access,
         fallback.project_root,
         execution_id,
@@ -465,6 +473,7 @@ async fn run_generation_routed(
     credentials: ProviderCredentials,
     profile: ProviderProfile,
     resume_session_id: Option<String>,
+    history: Vec<Message>,
     claude_code_tool_access: ClaudeCodeToolAccess,
     project_root: Option<PathBuf>,
     execution_id: ExecutionId,
@@ -479,6 +488,7 @@ async fn run_generation_routed(
         &credentials,
         &profile,
         resume_session_id,
+        history,
         &claude_code_tool_access,
     ) {
         RoutedExecution::PlainChat(provider) => {

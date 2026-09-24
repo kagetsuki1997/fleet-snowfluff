@@ -59,7 +59,7 @@ use tokio::{
 use crate::{
     message::{Message, ModelInfo, ProviderError, ProviderKind, Role, StreamChunk},
     provider::{AiProvider, ChatStream},
-    providers::{anthropic_stream_event, cli_locator, cli_process},
+    providers::{anthropic_stream_event, cli_locator, cli_process, history_preamble},
     settings::ClaudeCodeToolAccess,
 };
 
@@ -120,18 +120,26 @@ pub struct ClaudeCodeCli {
     pub model: Option<String>,
     session_id: Arc<Mutex<Option<String>>>,
     tool_access: ClaudeCodeToolAccess,
+    /// The conversation's real recent history (never the persona
+    /// few-shot examples that `chat()`'s message list also carries),
+    /// used to seed any request that isn't resuming a session -- see
+    /// `history_preamble`.
+    history: Vec<Message>,
 }
 
 impl ClaudeCodeCli {
     /// `resume_session_id` is the id returned by a prior instance's
     /// `session_id()`, if any -- supplied by the app crate, never
-    /// stored by this crate itself.
+    /// stored by this crate itself. `history` is the conversation's
+    /// recent transcript, used only when a request has no session to
+    /// resume.
     pub fn new(
         model: Option<String>,
         resume_session_id: Option<String>,
+        history: Vec<Message>,
         tool_access: ClaudeCodeToolAccess,
     ) -> Self {
-        Self { model, session_id: Arc::new(Mutex::new(resume_session_id)), tool_access }
+        Self { model, session_id: Arc::new(Mutex::new(resume_session_id)), tool_access, history }
     }
 
     /// The Claude-CLI session id captured from this instance's most
@@ -157,6 +165,14 @@ fn latest_user_message(messages: &[Message]) -> String {
         .find(|m| m.role == Role::User)
         .map(|m| m.content.clone())
         .unwrap_or_default()
+}
+
+/// The prompt for one request. A resumed session already holds its own
+/// history, so it gets only the latest message; a request with no
+/// session to resume (first message, stale-resume retry, escalation) is
+/// seeded from `history`.
+fn build_prompt(messages: &[Message], history: &[Message], resuming: bool) -> String {
+    history_preamble::prompt_for_session(history, &latest_user_message(messages), resuming)
 }
 
 /// What one parsed line of `claude -p --output-format stream-json`
@@ -383,8 +399,8 @@ impl AiProvider for ClaudeCodeCli {
         check_logged_in().await?;
 
         let system_prompt = system_prompt(&messages);
-        let prompt = latest_user_message(&messages);
         let resume = self.session_id();
+        let prompt = build_prompt(&messages, &self.history, resume.is_some());
         let model = self.model.clone();
         let session_id_slot = self.session_id.clone();
 
@@ -407,11 +423,14 @@ impl AiProvider for ClaudeCodeCli {
                         let _ = child.kill().await;
                         let _ = child.wait().await;
                         *session_id_slot.lock().unwrap() = None;
+                        // The stale session took its memory with it, so
+                        // the retry is seeded from the transcript.
+                        let fresh_prompt = build_prompt(&messages, &self.history, false);
                         child = spawn(
                             model.as_deref(),
                             None,
                             &system_prompt,
-                            &prompt,
+                            &fresh_prompt,
                             &self.tool_access,
                         )
                         .await
@@ -546,6 +565,54 @@ mod tests {
         assert!(!disallowed.contains("Bash"));
     }
 
+    // -- cli-session-continuity: which prompt each kind of request gets --
+
+    /// `assemble_messages`' real shape: system prompt, a persona
+    /// few-shot pair, then the new user message. The few-shot pair must
+    /// never leak into a history preamble.
+    fn assembled_messages(latest: &str) -> Vec<Message> {
+        vec![
+            Message::system("be brief"),
+            Message::user("few-shot user"),
+            Message::assistant("few-shot pet"),
+            Message::user(latest),
+        ]
+    }
+
+    fn real_history() -> Vec<Message> {
+        vec![Message::user("earlier question"), Message::assistant("earlier answer")]
+    }
+
+    #[test]
+    fn a_request_with_no_resume_is_seeded_with_the_history() {
+        let prompt = build_prompt(&assembled_messages("now"), &real_history(), false);
+        assert!(prompt.contains("User: earlier question"));
+        assert!(prompt.contains("Assistant: earlier answer"));
+        assert!(prompt.ends_with("Current message:\nnow"));
+        assert!(!prompt.contains("few-shot"), "persona few-shot examples are not history");
+    }
+
+    #[test]
+    fn a_resumed_request_sends_only_the_latest_message() {
+        assert_eq!(build_prompt(&assembled_messages("now"), &real_history(), true), "now");
+    }
+
+    #[test]
+    fn a_stale_resume_retry_is_seeded_like_any_fresh_request() {
+        // `chat()`'s retry path builds its prompt with `resuming = false`;
+        // the seeded prompt must differ from the resumed one.
+        let messages = assembled_messages("now");
+        let resumed = build_prompt(&messages, &real_history(), true);
+        let retry = build_prompt(&messages, &real_history(), false);
+        assert_ne!(resumed, retry);
+        assert!(retry.contains("User: earlier question"));
+    }
+
+    #[test]
+    fn a_fresh_request_with_no_history_adds_nothing() {
+        assert_eq!(build_prompt(&assembled_messages("now"), &[], false), "now");
+    }
+
     #[test]
     fn build_args_includes_model_resume_and_the_trailing_prompt() {
         let args = build_args(
@@ -677,7 +744,7 @@ mod tests {
     async fn claude_code_cli_live_two_turn_session_resume() {
         use futures_util::StreamExt;
 
-        let first = ClaudeCodeCli::new(None, None, ClaudeCodeToolAccess::default());
+        let first = ClaudeCodeCli::new(None, None, vec![], ClaudeCodeToolAccess::default());
         let mut stream = first
             .chat(vec![
                 Message::system("You are a cheerful desktop pet. Reply in one short sentence."),
@@ -693,7 +760,8 @@ mod tests {
         let session_id = first.session_id();
         assert!(session_id.is_some(), "expected a session id to be captured from the live stream");
 
-        let second = ClaudeCodeCli::new(None, session_id.clone(), ClaudeCodeToolAccess::default());
+        let second =
+            ClaudeCodeCli::new(None, session_id.clone(), vec![], ClaudeCodeToolAccess::default());
         let mut stream = second
             .chat(vec![
                 Message::system("You are a cheerful desktop pet. Reply in one short sentence."),
@@ -743,7 +811,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_models_offers_the_known_aliases_not_an_empty_list() {
-        let models = ClaudeCodeCli::new(None, None, ClaudeCodeToolAccess::default())
+        let models = ClaudeCodeCli::new(None, None, vec![], ClaudeCodeToolAccess::default())
             .list_models()
             .await
             .unwrap();
