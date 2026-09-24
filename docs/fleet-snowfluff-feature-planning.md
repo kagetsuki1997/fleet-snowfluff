@@ -521,7 +521,8 @@ Runtime Session
 > **實作時機：Context Engine 不整個放在單一 Stage，而是依能力分三段落地
 > （見第 13 節）：**
 >
-> - **Stage 3**：`ContextManager` 基礎版——`build_context` / `record_execution`，
+> - **Stage 3**：`ContextManager` 基礎版——`build_context` / `record_execution`
+>   （實作狀態：已定義但尚未接進聊天流程，見 §13 Stage 4 的延後說明），
 >   讓 Agent Loop 有東西可以組裝；不含 compaction、memory retrieval、sub-agent
 >   projection。單一 Execution 就用得到，不需要等 delegation 或 memory 先存在。
 > - **Stage 5**：加上 §10.1 的 Sub-agent Context Projection（`SubAgentContextSpec`、
@@ -1360,8 +1361,9 @@ profile——Aemeath 的設定 UI 本來就只有一個 Ollama slot（見 `setti
 
 `TaskRequirements` 仍然保留為 domain type（見 Stage 3 roadmap），但這個
 mix-mode 的判斷路徑不消費它——它是本機模型自己的語意判斷，不是套用預先算好
-的 capability flags。`TaskRequirements` 留給 Stage 4 Capability Escalation
-用得到的時候再實際填值。
+的 capability flags。`TaskRequirements` 目前仍未被消費；Stage 4 也沒有填值
+（見 §13 Stage 4 的「已知限制」——若日後做 capability-aware routing，作法是 marker 尾端
+附 capability flags，而不是預先計算）。
 
 #### Rules 檔案：`personas/task-router-rules.md`
 
@@ -2370,8 +2372,8 @@ tool failure
 
 > **這一節的內容屬於 Stage 5（獨立階段），不是 Stage 3。** 放在這裡是因為它在
 > 概念上延續本節（Aemeath Agent Runtime / Execution）的討論，但實作順序上排在
-> Stage 3（單一 Agent Loop 先穩定）與 Stage 4（external runtime session 生命
-> 週期先存在）之後——見第 13 節 Implementation Roadmap 的 Stage 5。
+> Stage 3（單一 Agent Loop 先穩定）與 Stage 4（CLI session 連續性與 API-key
+> tool calling）之後——見第 13 節 Implementation Roadmap 的 Stage 5。
 
 原本 v8 的 `Conversation → Execution → Runtime Session` 已經足夠支援 Sub-agent；
 不需要新增一個與 Execution 平行的 `SubAgent` domain。核心改動是：
@@ -2603,13 +2605,11 @@ Aemeath Agent Runtime
 └── Execution lifecycle
 
 Stage 4
-External Agent Runtime
-├── Claude Code
-├── Codex
-├── OpenClaw
-├── Runtime Adapter
-├── External Session lifecycle
-└── Capability Escalation
+Agent capability parity + CLI session continuity
+├── CLI history preamble / session persistence
+├── CLI working directory / kill_on_drop
+├── OpenAI / Anthropic API-key tool calling
+└── (Runtime Adapter / SessionManager / OpenClaw：延後，見 §13 Stage 4)
 
 Stage 5
 Sub-agent / Delegation
@@ -3161,7 +3161,7 @@ domain 從這裡移到 Stage 3，讓文件跟實際狀態一致。
   compaction、memory retrieval、sub-agent context projection，那些留到 Stage 5 /
   Stage 7）
 - `ToolCallingProvider`：**v1 只實作 Ollama**，OpenAiCompatible / Anthropic
-  的 tool-calling 是 fast-follow，不在這個 proposal 裡（三者的串流 tool-call
+  的 tool-calling 是 fast-follow（現排在 Stage 4 的 `api-key-tool-calling`），不在這個 proposal 裡（三者的串流 tool-call
   wire format 各不相同，是各自獨立的實作工作，見 §6.7 之後的討論）
 - Claude Code / Codex 的 native tool by-case 允許清單（`--allowedTools` /
   `--disallowedTools`，取代現有整批擋掉的 `DISALLOWED_TOOLS`；見 §6.9 的
@@ -3183,27 +3183,79 @@ domain 從這裡移到 Stage 3，讓文件跟實際狀態一致。
 tools 用自己的 allow-list 機制控制，不透過 Aemeath Tool Registry。**
 
 **Sub-agent / Delegation 不在本階段** —— 移到 Stage 5，獨立成一個階段。原因：
-delegation 需要先有 external runtime session 生命週期（Stage 4）才能讓 child
-execution 安全地委派給 Claude Code / Codex / OpenClaw；在單一 execution loop
+delegation 需要先修正 CLI runtime 的 session 連續性（Stage 4）才能讓 child
+execution 安全地委派給 Claude Code / Codex；在單一 execution loop
 都還沒穩定前就建 `DelegationManager`，容易產生猜測性介面。
 
-### Stage 4 — Capability Escalation + External Runtime Sessions
+### Stage 4 — Agent capability parity + CLI session continuity
 
-（原 Stage 6，移到這裡：Sub-agent/Delegation 需要它先存在，見 Stage 5。）
+（原稿為「Capability Escalation + External Runtime Sessions」，含 SessionManager、
+Runtime Adapter、Codex / Claude Code session mapping、OpenClaw、nested session
+isolation、session recovery。Stage 2 / Stage 3 實作完成後，其中大部分已經以另一種形式
+存在：CLI-backed provider 與 session resume（Stage 2）、`mix` 模式的 escalation marker
+（Stage 3，`<<ESCALATE>>` 由本機模型依 `personas/task-router-rules.md` 判斷）。
+本節依實際程式碼重新收斂範圍；原本的抽象層在沒有真實 consumer 之前不建立。）
 
-建立：
+**本階段的目的**：讓 escalation 的目的地真的能做事，並修正 CLI runtime 的連續性缺口。
 
-- Task capability detection
-- Local / MCP / Advanced backend routing
-- External Runtime Adapter
-- SessionManager
-- Codex session / Thread mapping
-- Claude Code session mapping
-- OpenClaw optional backend
-- nested session isolation
-- Execution → ExternalSessionRef
-- session recovery
-- external runtime capability policy
+- 目前 OpenAI / Anthropic API-key profile 是純聊天，只有 Ollama 能用 native tools，
+  所以 `mix` 模式 escalate 到雲端 `default_profile` 時拿不到工具。
+- CLI-backed provider（`ClaudeCodeCli` / `Codex`）只送 system prompt + 最新一則訊息，
+  完全依賴 `--resume`：escalation、stale-resume 重試、app 重啟後都會丟掉歷史。
+- 兩個 CLI 都沒有設定 working directory（繼承 app 的啟動目錄），也沒有
+  `kill_on_drop`（Stop 只會 drop child handle，不會結束 process）。
+
+拆成兩個 OpenSpec change，依序進行：
+
+**`cli-session-continuity`**（修正現有 bug，範圍小）
+
+- Aemeath 的 transcript 是 canonical，CLI session 是 cache：resume 成功時只送最新訊息；
+  沒有可用 resume（第一則訊息、stale-resume fallback、escalation）時，附上由 transcript
+  渲染的 history preamble。History 在 provider 建構時傳入，不從 `chat()` 的 message
+  list 推導（該 list 混有 persona few-shot examples，無法區分）
+- CLI session reference 持久化為 chat log 旁的 sidecar
+  `<ts>_<id>.sessions.json`（`{ profile, session_id, cwd }`），app 重啟後可 resume；
+  只有 cwd 與目前相同時才使用
+- CLI working directory = `project_root`，未設定則用固定的 app 專屬目錄；cwd **不是**
+  安全邊界，存取控制仍是 `ClaudeCodeToolAccess`
+- `kill_on_drop(true)`（只加在 chat spawn，不加在 `trigger_login`）
+- Codex 只套用機械性修正，仍標示 experimental
+
+**`api-key-tool-calling`**（較大的功能）
+
+- `Message` 增加 `tool_call_id`；OpenAI-compatible 與 Anthropic 各自實作
+  `ToolCallingProvider`（兩種 streaming tool-call wire format 各自獨立）
+- 只有 endpoint 為 provider 預設值（`base_url` 未設或等於預設）的 API-key profile 才是
+  tool-capable；custom endpoint 維持純聊天，避免破壞現有使用者
+- Tool result（檔案內容、指令輸出）現在會送到雲端 provider：更新 disclosure 文字，並讓
+  既有的 API-key 確認一次性重新顯示。Permission tier 不變（與 Claude Code 的 `Read`
+  預設 auto 一致）
+
+**刻意延後（含理由）**
+
+- **Execution record / `ExecutionId` 持久化**：目前只有 sidecar 需要持久化，不需要
+  Execution struct；`parent_execution_id` 在 Stage 5 才有 consumer
+- **`ContextManager` 接線**：目前實作只是 `prompt::assemble_messages` 的薄包裝，接線不會
+  改變任何行為；等 Stage 5（sub-agent projection）/ Stage 7（compaction）有真實
+  consumer 再接
+- **`SessionManager`、Runtime Adapter 抽象、nested session isolation、Codex thread
+  mapping、OpenClaw**：沒有 consumer；Codex 從未對真實 subscription 驗證過
+- **Loop-level escalation**（loop 達 `MaxIterationsReached` 時往上升級）：`mix` 模式的
+  本機 attempt 是純文字（不跑 tool loop），escalation 已由 marker 處理；沒有「跑 loop
+  且上面還有一層」的情境
+- **Capability-aware routing**：見下方已知限制
+- **Claude Code task mode**：`--append-system-prompt`（取代 persona 的
+  `--system-prompt`）、`tool_use` progress events、殺整個 process group。寫入類工具
+  預設為 deny，這些只在使用者開啟後才有意義，應另立 change 做完整設計
+
+**已知限制（記錄，不在本階段修）**：`ESCALATE` 一律送到 `default_profile`，不管它能不能
+做這件事——規則檔把 `needs_code_edit` / `needs_shell` 判為 escalate，但 native tools 沒有
+寫檔工具，Claude Code / Codex 預設也是唯讀。目的地做不到時會老實回覆做不到。若日後需要，
+最小的作法是保留 `<<ESCALATE>>` 不變，允許尾端附上 capability flags
+（`<<ESCALATE>> needs: shell, code_edit`）：既有偵測只比對開頭所以向後相容，flags
+無法解析視為 unknown（等同普通 escalate）；用 flags 而非 tool 名稱，因為 flags 與 runtime
+無關，也是規則檔已在使用的詞彙。再與各 profile 的 capability descriptor 比對；
+不符時的處理（本機盡力回答 / 仍 escalate 並附註 / 提示使用者到設定開啟）是另一個決策。
 
 ### Stage 5 — Sub-agent / Delegation
 
@@ -3218,8 +3270,10 @@ execution 安全地委派給 Claude Code / Codex / OpenClaw；在單一 executio
 - Context Engine：Sub-agent Context Projection（`SubAgentContextSpec`、
   `build_sub_agent_context`，見第 10.1 節）
 
-依賴 Stage 3（要有可委派的 Agent Loop）與 Stage 4（child 可能委派給 external
-runtime，需要 SessionManager / Runtime Adapter 已存在）。
+依賴 Stage 3（要有可委派的 Agent Loop）與 Stage 4（child 可能委派給 CLI runtime，需要
+CLI session 連續性與 working directory 行為已修正；Stage 4 刻意沒有建立的
+Execution record、`SessionManager`、Runtime Adapter 若 delegation 需要，在本階段依真實
+consumer 補上，而不是預先猜測）。
 
 ### Stage 6 — MCP + Context Awareness
 
@@ -3283,12 +3337,10 @@ Task Router domain
         │
         ▼
 Stage 4
-External Agent Runtime
-+ Claude Code
-+ Codex
-+ OpenClaw
-+ Session lifecycle
-+ Capability escalation
+Agent capability parity
++ CLI session continuity
++ API-key tool calling
+(Runtime Adapter / SessionManager 延後)
         │
         ▼
 Stage 5
@@ -3357,7 +3409,7 @@ Context / execution lifecycle：
 
 - [ ] ConversationContext 作為 cross-execution canonical context
 - [ ] ExecutionContext 作為 per-execution assembled snapshot
-- [ ] ContextManager 負責 build / ingest
+- [ ] ContextManager 負責 build / ingest（註：`AemeathContextManager` 已定義並匯出，但尚未接進 `chat_commands.rs`，目前只是 `assemble_messages` 的薄包裝；Stage 4 刻意不接線，等 Stage 5 / 7 有真實 consumer，見 §13 Stage 4）
 - [ ] ExecutionResult 可產生 summary / facts / decisions / artifacts
 - [ ] 不直接把 external runtime session history 當作 Aemeath Conversation
 - [ ] 不同 runtime 可以只透過 Aemeath Context 共享前一個 Execution 的結果
@@ -3375,7 +3427,7 @@ Context / execution lifecycle：
 - [ ] tool 失敗後 Agent 可以重新決策
 - [ ] 可以記錄 Agent run 的 tool trace
 - [ ] Qwen / Ollama 可使用 Aemeath Native Tools
-- [ ] OpenAI API Key / Anthropic API Key 使用相同 Aemeath Agent Runtime
+- [ ] OpenAI API Key / Anthropic API Key 使用相同 Aemeath Agent Runtime（註：Stage 3 只有 Ollama；已移到 Stage 4 的 `api-key-tool-calling`）
 - [ ] Claude Code / Codex 不被錯誤包進 Aemeath Agent Loop
 - [ ] MCP 不被 Stage 3 Native Tool abstraction 綁死
 - [ ] Execution 正確管理 Agent run lifecycle
@@ -3602,12 +3654,10 @@ Task Router domain
         │
         ▼
 Stage 4
-Capability Escalation
-+ Claude Code
-+ Codex
-+ OpenClaw
-+ Runtime Adapters
-+ External Session lifecycle
+Agent capability parity
++ CLI session continuity
++ API-key tool calling
+（Runtime Adapter / SessionManager / OpenClaw 延後）
         │
         ▼
 Stage 5
