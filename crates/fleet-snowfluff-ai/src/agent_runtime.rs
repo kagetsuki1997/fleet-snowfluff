@@ -208,26 +208,30 @@ impl AgentRuntime for AemeathAgentRuntime {
             let mut pending_confirm: Vec<(PendingToolCall, Arc<dyn Tool>)> = Vec::new();
             for call in calls {
                 let Some(tool) = registry.find(&call.name) else {
-                    messages.push(Message::tool(format!("Error: unknown tool \"{}\"", call.name)));
+                    messages.push(Message::tool_result(
+                        call.id.clone(),
+                        format!("Error: unknown tool \"{}\"", call.name),
+                    ));
                     continue;
                 };
                 if !call.arguments.is_object() {
-                    messages.push(Message::tool(format!(
-                        "Error: arguments for \"{}\" must be a JSON object",
-                        call.name
-                    )));
+                    messages.push(Message::tool_result(
+                        call.id.clone(),
+                        format!("Error: arguments for \"{}\" must be a JSON object", call.name),
+                    ));
                     continue;
                 }
                 match tool.required_permission(&call.arguments, ctx) {
                     PermissionTier::Auto => {
+                        let id = call.id.clone();
                         let result = execute(&tool, call.arguments, ctx).await;
-                        messages.push(Message::tool(tool_result_content(result)));
+                        messages.push(Message::tool_result(id, tool_result_content(result)));
                     }
                     PermissionTier::Deny => {
-                        messages.push(Message::tool(format!(
-                            "Error: \"{}\" was not permitted to run",
-                            call.name
-                        )));
+                        messages.push(Message::tool_result(
+                            call.id.clone(),
+                            format!("Error: \"{}\" was not permitted to run", call.name),
+                        ));
                     }
                     PermissionTier::Confirm => pending_confirm.push((call, tool)),
                 }
@@ -239,13 +243,14 @@ impl AgentRuntime for AemeathAgentRuntime {
                 let approved = permission.decide(&batch).await;
                 for (call, tool) in pending_confirm {
                     if approved.contains(&call.id) {
+                        let id = call.id.clone();
                         let result = execute(&tool, call.arguments, ctx).await;
-                        messages.push(Message::tool(tool_result_content(result)));
+                        messages.push(Message::tool_result(id, tool_result_content(result)));
                     } else {
-                        messages.push(Message::tool(format!(
-                            "Error: \"{}\" was not permitted to run",
-                            call.name
-                        )));
+                        messages.push(Message::tool_result(
+                            call.id.clone(),
+                            format!("Error: \"{}\" was not permitted to run", call.name),
+                        ));
                     }
                 }
             }
@@ -347,11 +352,14 @@ mod tests {
     /// model round-trip.
     struct ScriptedProvider {
         responses: Mutex<std::collections::VecDeque<Vec<ToolCallStreamItem>>>,
+        /// The message list handed to each `chat_with_tools` call, in
+        /// order -- what the model actually receives on each round trip.
+        received: Mutex<Vec<Vec<Message>>>,
     }
 
     impl ScriptedProvider {
         fn new(responses: Vec<Vec<ToolCallStreamItem>>) -> Self {
-            Self { responses: Mutex::new(responses.into()) }
+            Self { responses: Mutex::new(responses.into()), received: Mutex::new(Vec::new()) }
         }
 
         /// Never runs out -- every call gets the same tool-call
@@ -362,7 +370,7 @@ mod tests {
             for _ in 0..100 {
                 queue.push_back(response.clone());
             }
-            Self { responses: Mutex::new(queue) }
+            Self { responses: Mutex::new(queue), received: Mutex::new(Vec::new()) }
         }
     }
 
@@ -381,9 +389,10 @@ mod tests {
     impl ToolCallingProvider for ScriptedProvider {
         async fn chat_with_tools(
             &self,
-            _messages: Vec<Message>,
+            messages: Vec<Message>,
             _tools: Vec<ToolDefinition>,
         ) -> Result<ToolCallStream, ProviderError> {
+            self.received.lock().unwrap().push(messages);
             let response = self
                 .responses
                 .lock()
@@ -433,6 +442,61 @@ mod tests {
         assert_eq!(result, "done");
         assert_eq!(*alpha.calls.lock().unwrap(), 1);
         assert_eq!(*beta.calls.lock().unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn every_tool_result_carries_the_id_of_the_call_it_answers() {
+        // One turn exercising every result path: executed, unknown tool,
+        // malformed arguments, denied by tier, and denied at confirmation.
+        let call = |id: &str, name: &str, arguments: Value| ToolCallStreamItem::ToolCall {
+            id: id.to_string(),
+            name: name.to_string(),
+            arguments,
+        };
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                call("c_ok", "alpha", json!({})),
+                call("c_unknown", "no_such_tool", json!({})),
+                call("c_badargs", "alpha", json!("not an object")),
+                call("c_denied", "gamma", json!({})),
+                call("c_confirm_no", "delta", json!({})),
+            ],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let registry = ToolRegistry::new(vec![
+            Arc::new(CountingTool::new("alpha", PermissionTier::Auto)),
+            Arc::new(CountingTool::new("gamma", PermissionTier::Deny)),
+            Arc::new(CountingTool::new("delta", PermissionTier::Confirm)),
+        ]);
+
+        AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysDeny,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        let received = provider.received.lock().unwrap();
+        let second_turn = &received[1];
+        let results: Vec<(&str, &str)> = second_turn
+            .iter()
+            .filter(|m| m.role == crate::message::Role::Tool)
+            .map(|m| {
+                (
+                    m.tool_call_id.as_deref().expect("every tool result has an id"),
+                    m.content.as_str(),
+                )
+            })
+            .collect();
+        let ids: Vec<&str> = results.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, ["c_ok", "c_unknown", "c_badargs", "c_denied", "c_confirm_no"]);
+        assert!(results[0].1.contains("alpha ran"), "the executed call's own output");
+        assert!(results[1].1.contains("unknown tool"));
     }
 
     #[tokio::test]

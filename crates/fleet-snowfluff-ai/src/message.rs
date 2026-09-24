@@ -46,19 +46,42 @@ pub struct Message {
     /// still every message outside `AemeathAgentRuntime`'s own loop.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tool_calls: Vec<ToolCallRecord>,
+    /// Set only on a `Tool` result turn: the id of the tool call it
+    /// answers. OpenAI (`tool_call_id`) and Anthropic (`tool_use_id`)
+    /// require this pairing to be explicit; Ollama pairs results with
+    /// calls by order and ignores it. Omitted from the wire format
+    /// entirely when absent, so every other message serializes exactly
+    /// as it did before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tool_call_id: Option<String>,
 }
 
 impl Message {
     pub fn system(content: impl Into<String>) -> Self {
-        Self { role: Role::System, content: content.into(), tool_calls: Vec::new() }
+        Self {
+            role: Role::System,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
     }
 
     pub fn user(content: impl Into<String>) -> Self {
-        Self { role: Role::User, content: content.into(), tool_calls: Vec::new() }
+        Self {
+            role: Role::User,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
     }
 
     pub fn assistant(content: impl Into<String>) -> Self {
-        Self { role: Role::Assistant, content: content.into(), tool_calls: Vec::new() }
+        Self {
+            role: Role::Assistant,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
     }
 
     /// An assistant turn that requested tool calls instead of (or
@@ -69,14 +92,31 @@ impl Message {
         content: impl Into<String>,
         tool_calls: Vec<ToolCallRecord>,
     ) -> Self {
-        Self { role: Role::Assistant, content: content.into(), tool_calls }
+        Self { role: Role::Assistant, content: content.into(), tool_calls, tool_call_id: None }
     }
 
     /// A tool's result, reported back to the model on its own turn --
     /// Ollama's own wire format for this is `{"role": "tool", "content":
     /// "..."}`, which this maps onto directly.
     pub fn tool(content: impl Into<String>) -> Self {
-        Self { role: Role::Tool, content: content.into(), tool_calls: Vec::new() }
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: None,
+        }
+    }
+
+    /// A tool's result, tied to the call it answers -- what the agent
+    /// loop pushes for every call, so providers whose APIs require the
+    /// pairing (OpenAI, Anthropic) have the id to send.
+    pub fn tool_result(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            role: Role::Tool,
+            content: content.into(),
+            tool_calls: Vec::new(),
+            tool_call_id: Some(tool_call_id.into()),
+        }
     }
 }
 
@@ -180,6 +220,33 @@ mod tests {
         // files) never expect this field.
         let json = serde_json::to_string(&Message::user("hi")).unwrap();
         assert!(!json.contains("tool_calls"));
+    }
+
+    #[test]
+    fn messages_without_a_tool_call_id_never_serialize_the_field() {
+        // The wire format of every existing message must be untouched.
+        for msg in
+            [Message::system("s"), Message::user("u"), Message::assistant("a"), Message::tool("t")]
+        {
+            assert!(!serde_json::to_string(&msg).unwrap().contains("tool_call_id"), "{msg:?}");
+        }
+    }
+
+    #[test]
+    fn a_tool_result_carries_and_round_trips_the_id_of_its_call() {
+        let msg = Message::tool_result("call_1", "42");
+        assert_eq!(msg.role, Role::Tool);
+        assert_eq!(msg.tool_call_id.as_deref(), Some("call_1"));
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(json.contains("\"tool_call_id\":\"call_1\""));
+        let back: Message = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, msg);
+    }
+
+    #[test]
+    fn a_message_missing_tool_call_id_deserializes_with_none() {
+        let msg: Message = serde_json::from_str(r#"{"role":"tool","content":"x"}"#).unwrap();
+        assert_eq!(msg.tool_call_id, None);
     }
 
     #[test]

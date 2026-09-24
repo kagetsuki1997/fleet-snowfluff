@@ -8,7 +8,10 @@
 //! holes (design.md's "`Tool` trait has an args-aware
 //! `required_permission`").
 
-use std::path::{Path, PathBuf};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 use async_trait::async_trait;
 use serde_json::{json, Value};
@@ -17,6 +20,50 @@ use crate::{
     agent_tool::{PermissionTier, Tool, ToolContext, ToolError, ToolResult},
     tool_provider::ToolDefinition,
 };
+
+/// The most of a file `read_file` returns. Once tool results go to a
+/// cloud API, an unbounded file is unbounded cost, a context-overflow
+/// risk, and more data leaving the machine than the model needed --
+/// `run_command` already caps its output for the same reasons.
+const MAX_READ_BYTES: usize = 20 * 1024;
+
+fn truncation_marker() -> String {
+    format!("\n[content truncated: only the first {MAX_READ_BYTES} bytes are shown]")
+}
+
+/// Reads at most [`MAX_READ_BYTES`] of `path` as text. Reads one byte
+/// past the cap (never the whole file, so a huge file is not pulled
+/// into memory) to know whether anything was cut, then cuts on a
+/// character boundary so truncation never yields invalid UTF-8. A file
+/// that is not text at all is still an error, as before.
+fn read_capped(path: &Path) -> std::io::Result<String> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?.take(MAX_READ_BYTES as u64 + 1).read_to_end(&mut bytes)?;
+    let truncated = bytes.len() > MAX_READ_BYTES;
+    if truncated {
+        bytes.truncate(MAX_READ_BYTES);
+    }
+    let text = match String::from_utf8(bytes) {
+        Ok(text) => text,
+        Err(err) => {
+            // `error_len() == None` means the bytes ended mid-character,
+            // which is exactly what a byte-limit cut produces; anything
+            // else is a genuinely invalid sequence -- not text.
+            let utf8 = err.utf8_error();
+            if !(truncated && utf8.error_len().is_none()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "stream did not contain valid UTF-8",
+                ));
+            }
+            let valid = utf8.valid_up_to();
+            let mut bytes = err.into_bytes();
+            bytes.truncate(valid);
+            String::from_utf8(bytes).expect("a valid prefix is valid UTF-8")
+        }
+    };
+    Ok(if truncated { format!("{text}{}", truncation_marker()) } else { text })
+}
 
 /// Resolves the path argument the model provided against
 /// `project_root`: an absolute path is used as-is (the model may
@@ -98,7 +145,7 @@ impl Tool for ReadFileTool {
             .and_then(Value::as_str)
             .ok_or_else(|| ToolError("missing \"path\" argument".to_string()))?;
         let candidate = resolve_candidate_path(path_arg, ctx.project_root.as_deref());
-        match std::fs::read_to_string(&candidate) {
+        match read_capped(&candidate) {
             Ok(content) => Ok(ToolResult::ok(content)),
             Err(err) => {
                 Ok(ToolResult::error(format!("could not read {}: {err}", candidate.display())))
@@ -177,6 +224,85 @@ mod tests {
             project_root: root,
             conversation_id: ConversationId::from_session_path(std::path::Path::new("/tmp/x")),
         }
+    }
+
+    // -- read_file's output cap --
+
+    fn read(root: &Path, name: &str) -> ToolResult {
+        let ctx = ctx_with_root(Some(root.to_path_buf()));
+        futures_executor_block(ReadFileTool.execute(json!({ "path": name }), &ctx)).unwrap()
+    }
+
+    /// Runs a future to completion without pulling in a runtime crate
+    /// just for these tests.
+    fn futures_executor_block<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(f)
+    }
+
+    #[test]
+    fn a_file_within_the_cap_is_returned_unchanged() {
+        let root = temp_dir("read-small");
+        std::fs::write(root.join("a.txt"), "hello world").unwrap();
+        let result = read(&root, "a.txt");
+        assert!(!result.is_error);
+        assert_eq!(result.content, "hello world");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_file_exactly_at_the_cap_is_not_marked_truncated() {
+        let root = temp_dir("read-exact");
+        std::fs::write(root.join("a.txt"), "x".repeat(MAX_READ_BYTES)).unwrap();
+        let result = read(&root, "a.txt");
+        assert_eq!(result.content.len(), MAX_READ_BYTES);
+        assert!(!result.content.contains("truncated"));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_file_over_the_cap_is_cut_with_a_visible_marker() {
+        let root = temp_dir("read-large");
+        std::fs::write(root.join("big.txt"), "x".repeat(MAX_READ_BYTES * 5)).unwrap();
+        let result = read(&root, "big.txt");
+        assert!(!result.is_error);
+        assert!(result.content.starts_with("xxxx"));
+        assert!(result.content.ends_with(&truncation_marker()));
+        assert_eq!(result.content.len(), MAX_READ_BYTES + truncation_marker().len());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_multi_byte_character_straddling_the_cap_does_not_produce_invalid_text() {
+        let root = temp_dir("read-multibyte");
+        // 3 bytes each; MAX_READ_BYTES is not a multiple of 3, so the cut lands
+        // mid-character.
+        assert_ne!(MAX_READ_BYTES % 3, 0);
+        std::fs::write(root.join("cjk.txt"), "雪".repeat(MAX_READ_BYTES)).unwrap();
+        let result = read(&root, "cjk.txt");
+        assert!(!result.is_error, "{}", result.content);
+        assert!(result.content.ends_with(&truncation_marker()));
+        assert!(!result.content.contains('\u{FFFD}'), "no replacement characters");
+        let body = result.content.strip_suffix(&truncation_marker()).unwrap();
+        assert!(body.chars().all(|c| c == '雪'));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_file_that_is_not_text_is_still_an_error() {
+        let root = temp_dir("read-binary");
+        std::fs::write(root.join("blob.bin"), [0xff, 0xfe, 0x00, 0x80]).unwrap();
+        let result = read(&root, "blob.bin");
+        assert!(result.is_error);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn a_missing_file_is_still_a_readable_error() {
+        let root = temp_dir("read-missing");
+        let result = read(&root, "nope.txt");
+        assert!(result.is_error);
+        assert!(result.content.contains("could not read"));
+        std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
