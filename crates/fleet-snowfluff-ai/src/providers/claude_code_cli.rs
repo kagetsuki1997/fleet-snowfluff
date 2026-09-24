@@ -333,6 +333,13 @@ fn build_args(
         args.push("--resume".to_string());
         args.push(id.to_string());
     }
+    // `--allowedTools`/`--disallowedTools` are variadic in the CLI: with
+    // nothing between them and the prompt (no `--model`, no `--resume`)
+    // the prompt is swallowed as one more tool name and the CLI exits
+    // with "Input must be provided" -- an empty reply, from the caller's
+    // side. `--` ends option parsing, which also keeps a prompt that
+    // happens to start with `-` from being read as a flag.
+    args.push("--".to_string());
     args.push(prompt.to_string());
     args
 }
@@ -698,6 +705,26 @@ mod tests {
         assert_eq!(args.last().map(String::as_str), Some("hello there"));
     }
 
+    #[test]
+    fn the_prompt_follows_an_option_terminator_so_variadic_tool_flags_cannot_swallow_it() {
+        // No model, no resume: the tool lists are the last options before
+        // the prompt -- exactly the case the CLI's variadic parsing broke.
+        let args =
+            build_args(None, None, "persona", "hello there", &ClaudeCodeToolAccess::default());
+        let n = args.len();
+        assert_eq!(&args[n - 2..], ["--", "hello there"]);
+        let disallowed = args.iter().position(|a| a == "--disallowedTools").unwrap();
+        assert!(disallowed < n - 2, "tool flags come before the terminator");
+    }
+
+    #[test]
+    fn a_prompt_starting_with_a_dash_is_passed_after_the_terminator() {
+        let args =
+            build_args(None, None, "persona", "- a list item", &ClaudeCodeToolAccess::default());
+        let n = args.len();
+        assert_eq!(&args[n - 2..], ["--", "- a list item"]);
+    }
+
     // -- Literal fixtures captured live this session from
     // `claude -p --output-format stream-json --include-partial-messages`
     // -- real ground truth, not a guess (unlike the result-error
@@ -815,8 +842,13 @@ mod tests {
     async fn claude_code_cli_live_two_turn_session_resume() {
         use futures_util::StreamExt;
 
-        let first =
-            ClaudeCodeCli::new(None, None, vec![], PathBuf::new(), ClaudeCodeToolAccess::default());
+        let first = ClaudeCodeCli::new(
+            None,
+            None,
+            vec![],
+            std::env::temp_dir(),
+            ClaudeCodeToolAccess::default(),
+        );
         let mut stream = first
             .chat(vec![
                 Message::system("You are a cheerful desktop pet. Reply in one short sentence."),
@@ -836,7 +868,7 @@ mod tests {
             None,
             session_id.clone(),
             vec![],
-            PathBuf::new(),
+            std::env::temp_dir(),
             ClaudeCodeToolAccess::default(),
         );
         let mut stream = second
@@ -856,6 +888,90 @@ mod tests {
             session_id,
             "resuming should keep the same session id, not mint a new one"
         );
+    }
+
+    /// `cli-session-continuity`: a session with nothing to resume must
+    /// still know the conversation, via the history preamble.
+    #[tokio::test]
+    #[ignore = "requires a logged-in `claude` CLI and makes a real subscription call"]
+    async fn claude_code_cli_live_fresh_session_is_seeded_with_history() {
+        use futures_util::StreamExt;
+
+        let history = vec![
+            Message::user("My favourite fruit is durian."),
+            Message::assistant("Noted, durian it is!"),
+        ];
+        let provider = ClaudeCodeCli::new(
+            None,
+            None,
+            history,
+            std::env::temp_dir(),
+            ClaudeCodeToolAccess::default(),
+        );
+        let mut stream = provider
+            .chat(vec![
+                Message::system("Reply in one short sentence."),
+                Message::user("Which fruit did I say was my favourite? Answer with one word."),
+            ])
+            .await
+            .unwrap();
+        let mut reply = String::new();
+        while let Some(chunk) = stream.next().await {
+            reply.push_str(&chunk.unwrap().delta);
+        }
+        assert!(
+            reply.to_lowercase().contains("durian"),
+            "a fresh session should have been seeded with the history, got: {reply}"
+        );
+    }
+
+    /// `cli-session-continuity`: cancelling a generation drops the
+    /// stream, which must terminate the real `claude` process. The
+    /// prompt carries a unique marker so the process can be found by
+    /// its command line.
+    #[tokio::test]
+    #[ignore = "requires a logged-in `claude` CLI and makes a real subscription call"]
+    async fn claude_code_cli_live_dropping_the_stream_terminates_the_process() {
+        use futures_util::StreamExt;
+
+        fn running(marker: &str) -> bool {
+            std::process::Command::new("pgrep")
+                .args(["-f", marker])
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+
+        let marker = format!("killprobe-{}", std::process::id());
+        let provider = ClaudeCodeCli::new(
+            None,
+            None,
+            vec![],
+            std::env::temp_dir(),
+            ClaudeCodeToolAccess::default(),
+        );
+        let mut stream = provider
+            .chat(vec![
+                Message::system("You are a storyteller."),
+                Message::user(format!("{marker} Write a very long story, at least 3000 words.")),
+            ])
+            .await
+            .unwrap();
+        // Wait for real output, so the process is definitely mid-generation.
+        stream.next().await.expect("a first chunk").unwrap();
+        assert!(running(&marker), "the claude process should be running mid-generation");
+
+        drop(stream);
+
+        let mut gone = false;
+        for _ in 0..75 {
+            if !running(&marker) {
+                gone = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(40)).await;
+        }
+        assert!(gone, "the claude process was still running 3s after its stream was dropped");
     }
 
     // -- `claude auth status` parsing --
