@@ -262,6 +262,26 @@ pub struct ChatStateSnapshot {
     not_ready_reason: Option<&'static str>,
 }
 
+/// Whether a chat message can be sent right now and, if not, the reason
+/// code the frontend localizes. The third reason is new with
+/// `api-key-tool-calling`: an *enabled* profile whose disclosure is not
+/// acknowledged (the API-key disclosure text changed, so earlier
+/// acknowledgements were cleared once) must not be used until the user
+/// has seen the updated text -- otherwise the disclosure could be skipped
+/// simply by carrying on chatting, and tool results would reach the
+/// provider without it.
+fn chat_readiness(settings: &AiSettings) -> (bool, Option<&'static str>) {
+    if !settings.ai_enabled {
+        (false, Some("disabled"))
+    } else if settings.default_profile.is_none() {
+        (false, Some("no_provider"))
+    } else if !ai_commands::disclosure_ok(settings, settings.default_profile) {
+        (false, Some("disclosure_pending"))
+    } else {
+        (true, None)
+    }
+}
+
 fn resolve_session_path(app: &AppHandle, chat_state: &ChatRuntimeState) -> PathBuf {
     let mut guard = chat_state.session_path.lock().unwrap();
     if let Some(path) = guard.as_ref() {
@@ -288,13 +308,7 @@ pub fn get_chat_state(
     };
 
     let settings = ai_settings.lock().unwrap();
-    let (ai_ready, not_ready_reason) = if !settings.ai_enabled {
-        (false, Some("disabled"))
-    } else if settings.default_profile.is_none() {
-        (false, Some("no_provider"))
-    } else {
-        (true, None)
-    };
+    let (ai_ready, not_ready_reason) = chat_readiness(&settings);
 
     ChatStateSnapshot { entries, is_pending, partial_text, ai_ready, not_ready_reason }
 }
@@ -359,6 +373,12 @@ pub async fn send_chat_message(
         channel.send(ChatEvent::Error { message: "no_provider".to_string() }).ok();
         return Ok(());
     };
+    // Backstop for `chat_readiness` (the input is normally already
+    // disabled): never send to a profile whose disclosure is pending.
+    if !ai_commands::disclosure_ok(&settings_snapshot, Some(default_profile.key())) {
+        channel.send(ChatEvent::Error { message: "disclosure_pending".to_string() }).ok();
+        return Ok(());
+    }
 
     let local_profile_key =
         ProfileKey { provider: ProviderKind::Ollama, auth_method: AuthMethod::Local };
@@ -1279,5 +1299,64 @@ mod tests {
             0,
             "over-counting would skip turns"
         );
+    }
+
+    // -- chat readiness, incl. a pending disclosure (api-key-tool-calling) --
+
+    fn settings_with_default(profile: ProviderProfile, acknowledged: bool) -> AiSettings {
+        let key = profile.key();
+        AiSettings {
+            ai_enabled: true,
+            enabled_profiles: vec![profile],
+            default_profile: Some(key),
+            acknowledged_disclosures: if acknowledged { vec![key] } else { vec![] },
+            ..AiSettings::default()
+        }
+    }
+
+    fn api_key_profile() -> ProviderProfile {
+        ProviderProfile {
+            provider: ProviderKind::OpenAi,
+            auth_method: AuthMethod::ApiKey,
+            model: None,
+            base_url: None,
+        }
+    }
+
+    #[test]
+    fn chat_is_not_ready_while_ai_is_disabled() {
+        let settings = AiSettings { ai_enabled: false, ..AiSettings::default() };
+        assert_eq!(chat_readiness(&settings), (false, Some("disabled")));
+    }
+
+    #[test]
+    fn chat_is_not_ready_without_a_default_provider() {
+        let settings = AiSettings { ai_enabled: true, ..AiSettings::default() };
+        assert_eq!(chat_readiness(&settings), (false, Some("no_provider")));
+    }
+
+    #[test]
+    fn an_enabled_default_profile_with_a_pending_disclosure_blocks_chat() {
+        // The state a one-time re-acknowledgement creates: enabled, default, not
+        // acknowledged.
+        let settings = settings_with_default(api_key_profile(), false);
+        assert_eq!(chat_readiness(&settings), (false, Some("disclosure_pending")));
+    }
+
+    #[test]
+    fn chat_is_ready_once_the_disclosure_is_acknowledged() {
+        let settings = settings_with_default(api_key_profile(), true);
+        assert_eq!(chat_readiness(&settings), (true, None));
+    }
+
+    #[test]
+    fn a_local_default_profile_never_needs_a_disclosure() {
+        let ollama = ProviderProfile {
+            provider: ProviderKind::Ollama,
+            auth_method: AuthMethod::Local,
+            model: None,
+            base_url: None,
+        };
+        assert_eq!(chat_readiness(&settings_with_default(ollama, false)), (true, None));
     }
 }

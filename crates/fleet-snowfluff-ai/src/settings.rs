@@ -275,6 +275,39 @@ impl ProviderProfile {
     }
 }
 
+impl Default for AiSettings {
+    fn default() -> Self {
+        Self {
+            ai_enabled: false,
+            enabled_profiles: Vec::new(),
+            default_profile: None,
+            acknowledged_disclosures: Vec::new(),
+            task_router_mode: TaskRouterMode::default(),
+            project_root: None,
+            claude_code_tool_access: ClaudeCodeToolAccess::default(),
+            disclosure_version: CURRENT_DISCLOSURE_VERSION,
+        }
+    }
+}
+
+/// Runs once per config, when it was written under an older disclosure
+/// text: drops the OpenAI and Anthropic *API-key* acknowledgements so the
+/// updated disclosure (which now says tool results go to the provider,
+/// and that tool use can make several billed requests) is shown again,
+/// then records the current version so it never runs a second time.
+/// Subscription, Ollama and Mock acknowledgements are untouched -- their
+/// disclosures did not change. Idempotent by construction.
+fn migrate_disclosures(mut settings: AiSettings) -> AiSettings {
+    if settings.disclosure_version < CURRENT_DISCLOSURE_VERSION {
+        settings.acknowledged_disclosures.retain(|key| {
+            !(matches!(key.provider, ProviderKind::OpenAi | ProviderKind::Anthropic)
+                && key.auth_method == AuthMethod::ApiKey)
+        });
+        settings.disclosure_version = CURRENT_DISCLOSURE_VERSION;
+    }
+    settings
+}
+
 /// Unset, blank, or the provider's own URL (ignoring case and a trailing
 /// slash) all mean "the default endpoint".
 fn is_default_endpoint(base_url: Option<&str>, default: &str) -> bool {
@@ -284,7 +317,16 @@ fn is_default_endpoint(base_url: Option<&str>, default: &str) -> bool {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+/// Which revision of the cloud-provider disclosure text
+/// `AiSettings::acknowledged_disclosures` was given against. Bumped when
+/// a disclosure changes materially enough that an earlier acknowledgement
+/// should not carry over -- `1` is the revision that added "tool results
+/// are sent to the provider, and tool use can make several billed
+/// requests" to the two API-key disclosures (`api-key-tool-calling`).
+/// See [`migrate_disclosures`].
+pub const CURRENT_DISCLOSURE_VERSION: u32 = 1;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiSettings {
     /// Master switch (`ai-provider`'s "AI features disabled by
     /// default"): even a fully configured provider does nothing while
@@ -327,6 +369,15 @@ pub struct AiSettings {
     /// that matters here.
     #[serde(default)]
     pub acknowledged_disclosures: Vec<ProfileKey>,
+    /// The [`CURRENT_DISCLOSURE_VERSION`] the acknowledgements above
+    /// were recorded under. A config file without this field predates
+    /// versioning, so it reads as `0` -- which is what triggers the
+    /// one-time re-acknowledgement. A *fresh* `AiSettings::default()`
+    /// starts at the current version instead (see the `Default` impl):
+    /// a new user has nothing stale to re-ask about, and must not have
+    /// their first acknowledgement wiped by the next load.
+    #[serde(default)]
+    pub disclosure_version: u32,
     /// Pulled forward from `agent-core-and-task-router`'s own task 2.1
     /// -- `task_router.rs`'s `DefaultTaskRouter` (task 1.3) needs this
     /// field to exist to compile/be tested at all, so it's added here
@@ -404,6 +455,7 @@ fn migrate_legacy_active_provider(obj: &serde_json::Map<String, Value>) -> AiSet
             task_router_mode: TaskRouterMode::default(),
             project_root: None,
             claude_code_tool_access: ClaudeCodeToolAccess::default(),
+            disclosure_version: 0,
         };
     };
 
@@ -437,6 +489,8 @@ fn migrate_legacy_active_provider(obj: &serde_json::Map<String, Value>) -> AiSet
         task_router_mode: TaskRouterMode::default(),
         project_root: None,
         claude_code_tool_access: ClaudeCodeToolAccess::default(),
+        // A Stage 1 acknowledgement predates every disclosure revision.
+        disclosure_version: 0,
     }
 }
 
@@ -456,7 +510,7 @@ pub fn sanitize(raw: &Value) -> AiSettings {
     // so its *absence* -- not emptiness -- is what distinguishes "never
     // touched this format" from "has this format with nothing enabled."
     if obj.contains_key("active_provider") && !obj.contains_key("enabled_profiles") {
-        return migrate_legacy_active_provider(obj);
+        return migrate_disclosures(migrate_legacy_active_provider(obj));
     }
 
     let ai_enabled = obj.get("ai_enabled").and_then(Value::as_bool).unwrap_or(false);
@@ -502,7 +556,13 @@ pub fn sanitize(raw: &Value) -> AiSettings {
         .and_then(|v| serde_json::from_value::<ClaudeCodeToolAccess>(v.clone()).ok())
         .unwrap_or_default();
 
-    AiSettings {
+    // Missing, or not a number: a file from before versioning.
+    let disclosure_version = obj
+        .get("disclosure_version")
+        .and_then(Value::as_u64)
+        .map_or(0, |v| u32::try_from(v).unwrap_or(u32::MAX));
+
+    migrate_disclosures(AiSettings {
         ai_enabled,
         enabled_profiles,
         default_profile,
@@ -510,7 +570,8 @@ pub fn sanitize(raw: &Value) -> AiSettings {
         task_router_mode,
         project_root,
         claude_code_tool_access,
-    }
+        disclosure_version,
+    })
 }
 
 /// Loads settings from raw file contents. Missing/unreadable/corrupt
@@ -779,6 +840,7 @@ mod tests {
             task_router_mode: TaskRouterMode::Mix,
             project_root: Some(PathBuf::from("/home/user/my-project")),
             claude_code_tool_access: ClaudeCodeToolAccess::default(),
+            disclosure_version: CURRENT_DISCLOSURE_VERSION,
         };
 
         let json_str = to_json_string(&settings);
@@ -809,7 +871,12 @@ mod tests {
         assert_eq!(migrated.provider, ProviderKind::Anthropic);
         assert_eq!(migrated.auth_method, AuthMethod::ApiKey);
         assert_eq!(migrated.model.as_deref(), Some("claude-sonnet-5"));
-        assert!(settings.disclosure_acknowledged(migrated.key()));
+        // A Stage 1 acknowledgement was given against the original API-key
+        // disclosure, which did not mention tool results going to the
+        // provider -- so it does not carry over (`api-key-tool-calling`);
+        // the updated disclosure is shown once more.
+        assert!(!settings.disclosure_acknowledged(migrated.key()));
+        assert_eq!(settings.disclosure_version, CURRENT_DISCLOSURE_VERSION);
         assert_eq!(settings.default_profile, Some(migrated.key()));
     }
 
@@ -948,5 +1015,137 @@ mod tests {
         ] {
             assert!(!profile(provider, auth).supports_tool_calling(), "{provider:?}/{auth:?}");
         }
+    }
+
+    // -- one-time re-acknowledgement of the API-key disclosures
+    // (api-key-tool-calling) --
+
+    fn key(provider: ProviderKind, auth_method: AuthMethod) -> ProfileKey {
+        ProfileKey { provider, auth_method }
+    }
+
+    fn ack_json(keys: &[ProfileKey]) -> Value { serde_json::to_value(keys).unwrap() }
+
+    /// A config file of the kind written before disclosures were versioned:
+    /// every pair acknowledged, and no `disclosure_version` field at all.
+    fn unversioned_file_with_everything_acknowledged() -> Value {
+        json!({
+            "ai_enabled": true,
+            "enabled_profiles": [],
+            "acknowledged_disclosures": ack_json(&[
+                key(ProviderKind::OpenAi, AuthMethod::ApiKey),
+                key(ProviderKind::Anthropic, AuthMethod::ApiKey),
+                key(ProviderKind::OpenAi, AuthMethod::Subscription),
+                key(ProviderKind::Anthropic, AuthMethod::Subscription),
+            ]),
+        })
+    }
+
+    #[test]
+    fn a_fresh_install_starts_at_the_current_disclosure_version() {
+        assert_eq!(AiSettings::default().disclosure_version, CURRENT_DISCLOSURE_VERSION);
+    }
+
+    #[test]
+    fn an_unversioned_config_loses_only_its_api_key_acknowledgements() {
+        let loaded = sanitize(&unversioned_file_with_everything_acknowledged());
+
+        assert!(!loaded
+            .acknowledged_disclosures
+            .contains(&key(ProviderKind::OpenAi, AuthMethod::ApiKey)));
+        assert!(!loaded
+            .acknowledged_disclosures
+            .contains(&key(ProviderKind::Anthropic, AuthMethod::ApiKey)));
+        // Their disclosures did not change, so these stand.
+        assert!(loaded
+            .acknowledged_disclosures
+            .contains(&key(ProviderKind::OpenAi, AuthMethod::Subscription)));
+        assert!(loaded
+            .acknowledged_disclosures
+            .contains(&key(ProviderKind::Anthropic, AuthMethod::Subscription)));
+        assert_eq!(loaded.disclosure_version, CURRENT_DISCLOSURE_VERSION);
+    }
+
+    #[test]
+    fn local_provider_acknowledgements_are_left_alone() {
+        let mut file = unversioned_file_with_everything_acknowledged();
+        file["acknowledged_disclosures"] = ack_json(&[
+            key(ProviderKind::Ollama, AuthMethod::Local),
+            key(ProviderKind::Mock, AuthMethod::Local),
+        ]);
+        let loaded = sanitize(&file);
+        assert_eq!(loaded.acknowledged_disclosures.len(), 2);
+    }
+
+    #[test]
+    fn a_config_already_at_the_current_version_is_not_touched() {
+        let mut file = unversioned_file_with_everything_acknowledged();
+        file["disclosure_version"] = json!(CURRENT_DISCLOSURE_VERSION);
+        let loaded = sanitize(&file);
+        assert!(loaded
+            .acknowledged_disclosures
+            .contains(&key(ProviderKind::OpenAi, AuthMethod::ApiKey)));
+        assert_eq!(loaded.acknowledged_disclosures.len(), 4);
+    }
+
+    #[test]
+    fn the_migration_runs_once_and_is_idempotent() {
+        let once = sanitize(&unversioned_file_with_everything_acknowledged());
+        // Save and load again, as the next launch would.
+        let twice = load_from_str(&to_json_string(&once));
+        assert_eq!(once, twice);
+        assert_eq!(twice.disclosure_version, CURRENT_DISCLOSURE_VERSION);
+    }
+
+    #[test]
+    fn an_acknowledgement_given_after_the_migration_survives_the_next_load() {
+        // The scenario this design must get right: re-acknowledge, save,
+        // restart. The stored version is current, so nothing is cleared.
+        let mut settings = sanitize(&unversioned_file_with_everything_acknowledged());
+        settings.acknowledged_disclosures.push(key(ProviderKind::OpenAi, AuthMethod::ApiKey));
+
+        let reloaded = load_from_str(&to_json_string(&settings));
+        assert!(reloaded
+            .acknowledged_disclosures
+            .contains(&key(ProviderKind::OpenAi, AuthMethod::ApiKey)));
+    }
+
+    #[test]
+    fn a_brand_new_users_first_acknowledgement_is_not_wiped_by_the_next_load() {
+        // `AiSettings::default()` is current, so an acknowledgement saved
+        // from a fresh install must round-trip. (If default were version 0
+        // the migration would silently delete it on the next launch.)
+        let mut fresh = AiSettings::default();
+        fresh.acknowledged_disclosures.push(key(ProviderKind::Anthropic, AuthMethod::ApiKey));
+
+        let reloaded = load_from_str(&to_json_string(&fresh));
+        assert!(reloaded
+            .acknowledged_disclosures
+            .contains(&key(ProviderKind::Anthropic, AuthMethod::ApiKey)));
+    }
+
+    #[test]
+    fn a_non_numeric_version_reads_as_unversioned() {
+        let mut file = unversioned_file_with_everything_acknowledged();
+        file["disclosure_version"] = json!("one");
+        let loaded = sanitize(&file);
+        assert!(!loaded
+            .acknowledged_disclosures
+            .contains(&key(ProviderKind::OpenAi, AuthMethod::ApiKey)));
+    }
+
+    #[test]
+    fn a_stage_one_config_with_an_acknowledged_api_key_provider_is_re_prompted_too() {
+        let loaded = sanitize(&json!({
+            "ai_enabled": true,
+            "active_provider": "open_ai",
+            "open_ai": { "disclosure_acknowledged": true },
+        }));
+        assert!(
+            loaded.acknowledged_disclosures.is_empty(),
+            "{:?}",
+            loaded.acknowledged_disclosures
+        );
+        assert_eq!(loaded.disclosure_version, CURRENT_DISCLOSURE_VERSION);
     }
 }

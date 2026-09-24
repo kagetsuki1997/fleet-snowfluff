@@ -180,7 +180,7 @@ interface LogEntry {
   timestamp: string;
 }
 
-type NotReadyReason = "disabled" | "no_provider";
+type NotReadyReason = "disabled" | "no_provider" | "disclosure_pending";
 
 interface ChatStateSnapshot {
   entries: LogEntry[];
@@ -839,6 +839,30 @@ async function refreshProfileStatus(
     el.textContent = t(`ai.status.${status.state}`);
     el.className = `ai-profile-status ai-profile-status--${status.state}`;
     if ("detail" in status) el.title = status.detail;
+
+    // An *enabled* profile whose acknowledgement was cleared (its
+    // disclosure text changed): show the updated disclosure right here,
+    // with the one action that resolves it. Chat is blocked for this
+    // profile until then (`chat_readiness`), so it must not be a bare
+    // status label with no way forward.
+    if (status.state === "disclosure_pending") {
+      const disclosureEl = panel.querySelector<HTMLElement>(`.ai-disclosure[data-slot="${key}"]`);
+      if (disclosureEl && !disclosureEl.querySelector(".ai-disclosure-accept")) {
+        disclosureEl.innerHTML = `
+          <p class="hint">${t(`ai.disclosure.${slot.provider}.${slot.auth_method}`)}</p>
+          <button type="button" class="ai-disclosure-accept">${t("ai.disclosure.accept")}</button>
+        `;
+        disclosureEl
+          .querySelector<HTMLButtonElement>(".ai-disclosure-accept")!
+          .addEventListener("click", async () => {
+            await invoke("acknowledge_profile_disclosure", {
+              provider: slot.provider,
+              authMethod: slot.auth_method,
+            });
+            await renderAi();
+          });
+      }
+    }
 
     // Only offer the login-trigger button for the one state it actually
     // applies to (`subscription-first-chat`'s "CLI installed but not

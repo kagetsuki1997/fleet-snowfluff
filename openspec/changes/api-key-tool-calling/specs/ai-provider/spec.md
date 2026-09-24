@@ -36,7 +36,7 @@ A provider implementation MAY additionally support tool calling: accepting a set
 
 ### Requirement: Cloud provider data disclosure
 
-The first time a (provider, auth method) pair involving a cloud provider (OpenAI or Anthropic, via either API key or subscription) is enabled, the settings UI SHALL show a one-time disclosure describing what will happen for that specific auth method — naming the provider and, for subscription auth, that the CLI's already-logged-in account will be used to send messages, not a newly entered API key — and that pair SHALL NOT become usable until the disclosure is acknowledged. For an API-key pair, the disclosure SHALL also state that when the assistant uses tools, their results (such as file contents, command output, and search results) are sent to the provider along with the conversation, and that using tools can result in several requests, each billed to the API key, for a single message. This acknowledgment SHALL be persisted per (provider, auth method) pair, so enabling a different auth method for a provider whose other auth method was already acknowledged SHALL show its own disclosure. When the disclosure text for an API-key pair changes materially, an acknowledgement given for the earlier text SHALL NOT carry over: the updated disclosure SHALL be shown once more. Selecting Ollama or Mock SHALL require no such disclosure.
+The first time a (provider, auth method) pair involving a cloud provider (OpenAI or Anthropic, via either API key or subscription) is enabled, the settings UI SHALL show a one-time disclosure describing what will happen for that specific auth method — naming the provider and, for subscription auth, that the CLI's already-logged-in account will be used to send messages, not a newly entered API key — and that pair SHALL NOT become usable until the disclosure is acknowledged. For an API-key pair, the disclosure SHALL also state that when the assistant uses tools, their results (such as file contents, command output, and search results) are sent to the provider along with the conversation, and that using tools can result in several requests, each billed to the API key, for a single message. This acknowledgment SHALL be persisted per (provider, auth method) pair, so enabling a different auth method for a provider whose other auth method was already acknowledged SHALL show its own disclosure. When the disclosure text for an API-key pair changes materially, an acknowledgement given for the earlier text SHALL NOT carry over: the updated disclosure SHALL be shown once more, and until it is acknowledged the profile SHALL NOT be used for chat (an already-enabled profile in that state SHALL show the disclosure with a way to acknowledge it, rather than only a status label). Selecting Ollama or Mock SHALL require no such disclosure.
 
 #### Scenario: First cloud selection
 
@@ -57,6 +57,11 @@ The first time a (provider, auth method) pair involving a cloud provider (OpenAI
 
 - **WHEN** the user selects Ollama as a provider
 - **THEN** no data-disclosure prompt is shown
+
+#### Scenario: A profile awaiting re-acknowledgement is not used for chat
+
+- **WHEN** an OpenAI or Anthropic API-key profile is enabled and is the default, but its acknowledgement was cleared because the disclosure text changed
+- **THEN** chat is not sent to it, the chat window says the updated disclosure needs review, and the settings row shows that disclosure with a way to acknowledge it
 
 #### Scenario: An earlier acknowledgement does not cover the updated tool-result disclosure
 

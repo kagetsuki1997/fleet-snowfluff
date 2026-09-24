@@ -107,7 +107,7 @@ pub fn set_claude_code_tool_access(
 /// `AiSettings::disclosure_acknowledged`'s own doc comment). `None`
 /// (clearing the default) and any `Local`-auth profile (Ollama, Mock)
 /// never need one.
-fn disclosure_ok(settings: &AiSettings, key: Option<ProfileKey>) -> bool {
+pub(crate) fn disclosure_ok(settings: &AiSettings, key: Option<ProfileKey>) -> bool {
     let Some(key) = key else { return true };
     match key.auth_method {
         AuthMethod::Local => true,
@@ -574,6 +574,7 @@ mod tests {
             task_router_mode: Default::default(),
             project_root: None,
             claude_code_tool_access: Default::default(),
+            disclosure_version: fleet_snowfluff_ai::settings::CURRENT_DISCLOSURE_VERSION,
         }
     }
 
@@ -589,6 +590,7 @@ mod tests {
             task_router_mode: Default::default(),
             project_root: None,
             claude_code_tool_access: Default::default(),
+            disclosure_version: fleet_snowfluff_ai::settings::CURRENT_DISCLOSURE_VERSION,
         }
     }
 
