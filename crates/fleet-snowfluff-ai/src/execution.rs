@@ -45,18 +45,24 @@ impl Default for ExecutionId {
 }
 
 /// Which of the chat flow's execution paths produced this attempt.
-/// `MixLocal` is always the local Ollama attempt in `mix` mode, which
-/// has no resumable-session concept of its own (`ToolCalling` is
-/// likewise never CLI-backed -- `ProviderProfile::supports_tool_calling`
-/// is never true for a CLI-backed profile); only `Direct` and
-/// `Fallback` can ever carry an external session reference.
+/// Deliberately *not* four values with a separate `ToolCalling` member:
+/// whether a turn used tools is not a parallel route, it is a fact about
+/// what happened within a `Direct` or `Fallback` attempt (confirmed
+/// against the call graph -- `run_generation_with_tools` has exactly one
+/// call site, inside `run_generation_routed`'s own dispatch, which is
+/// only ever reached from `Direct` or `Fallback`; `MixLocal` bypasses
+/// routing entirely and never calls it) -- so it is already fully
+/// recoverable from whether `ExecutionEnd::trace` is non-empty, with no
+/// need to duplicate it here. `MixLocal` is always the local Ollama
+/// attempt in `mix` mode, which has no resumable-session concept of its
+/// own; only `Direct` and `Fallback` can ever carry an external session
+/// reference.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionPath {
     Direct,
     MixLocal,
     Fallback,
-    ToolCalling,
 }
 
 /// How an execution ended. `Escalated` is reserved for a `MixLocal`
@@ -258,7 +264,7 @@ mod tests {
         let start = ExecutionEvent::Start(ExecutionStart {
             id,
             conversation_id: conv(),
-            route: ExecutionPath::ToolCalling,
+            route: ExecutionPath::Direct,
             profile: profile(),
             working_dir: PathBuf::from("/proj"),
             started_at: "t0".to_string(),

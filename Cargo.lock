@@ -1392,6 +1392,7 @@ dependencies = [
  "chrono",
  "futures-core",
  "futures-util",
+ "rand 0.9.5",
  "reqwest",
  "serde",
  "serde-saphyr",

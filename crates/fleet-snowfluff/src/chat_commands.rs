@@ -18,17 +18,18 @@ use std::{
 use fleet_snowfluff_ai::{
     detect_escalation, log::LogRole, prompt, with_task_router_rules, AemeathAgentRuntime,
     AgentRuntime, AiProvider, AiSettings, AuthMethod, ChatStream, ClaudeCodeToolAccess, CliContext,
-    DefaultTaskRouter, EscalationDecision, GetSystemContextTool, Language, ListDirectoryTool,
-    LogEntry, Message, Persona, ProfileKey, ProviderCredentials, ProviderKind, ProviderProfile,
-    ReadFileTool, ResponseLanguage, RoutingContext, RunCommandTool, Task, TaskRouter,
-    TaskRouterMode, ToolCallingProvider, ToolContext, ToolRegistry, WebSearchTool,
+    DefaultTaskRouter, EscalationDecision, ExecutionPath, GetSystemContextTool, Language,
+    ListDirectoryTool, LogEntry, Message, Persona, ProfileKey, ProviderCredentials, ProviderKind,
+    ProviderProfile, ReadFileTool, ResponseLanguage, RoutingContext, RunCommandTool, Task,
+    TaskRouter, TaskRouterMode, ToolCallingProvider, ToolContext, ToolRegistry, WebSearchTool,
 };
 use futures_util::StreamExt;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
 
 use crate::{
     ai_commands::{self, RoutedExecution},
-    chat_log_store, chat_pause, chat_window, cli_session_store, cli_workdir,
+    chat_log_store, chat_pause, chat_window, cli_workdir, execution_log_store,
+    execution_recorder::ExecutionRecorder,
     manager::PetManager,
     persona_store,
     session_domain::{CliSessionEntry, ConversationId, ExecutionId, ExternalSessionRef},
@@ -82,8 +83,11 @@ pub struct ChatRuntimeState {
     /// model (both `ClaudeCodeCli` and `Codex` --
     /// `subscription-first-chat`'s "Session continuity for CLI-backed
     /// subscription providers"). The hot path only: every entry is
-    /// also written through to the conversation's sidecar file
-    /// (`cli_session_store`), which is read back lazily on a miss, so a
+    /// also written through to the conversation's execution log
+    /// (`execution_log_store`, `execution-log-and-context` -- this used
+    /// to be a dedicated sidecar file, `cli_session_store`, before the
+    /// execution log replaced it as the one persisted record of what
+    /// happened each turn), which is read back lazily on a miss, so a
     /// session survives an app restart (`cli-session-continuity`).
     /// Each entry records the working directory it was created under
     /// and is used only from that same directory. Keyed by
@@ -142,7 +146,7 @@ impl ChatRuntimeState {
     /// The `(session id, turns seen)` to resume for `(conversation,
     /// profile)` when the CLI is about to run in `working_dir`, or `None`
     /// to start a fresh (history-seeded) one. Checks the in-memory map
-    /// first and, on a miss, the conversation's sidecar, so a session
+    /// first and, on a miss, the conversation's execution log, so a session
     /// survives an app restart. A session created under a different
     /// working directory is never returned.
     fn stored_session(
@@ -157,62 +161,64 @@ impl ChatRuntimeState {
         if let Some(entry) = sessions.get(&key) {
             return (entry.cwd == working_dir).then(|| (entry.session.0.clone(), entry.seen_turns));
         }
-        let stored = cli_session_store::load(session_path);
-        let found = cli_session_store::usable(&stored, profile_key, working_dir)?;
+        let (session_id, seen_turns) =
+            execution_log_store::latest_usable_session(session_path, profile_key, working_dir)?;
         sessions.insert(
             key,
             CliSessionEntry {
-                session: ExternalSessionRef(found.session_id.clone()),
-                cwd: found.cwd.clone(),
-                seen_turns: found.seen_turns,
+                session: ExternalSessionRef(session_id.clone()),
+                cwd: working_dir.to_path_buf(),
+                seen_turns,
             },
         );
-        Some((found.session_id.clone(), found.seen_turns))
+        Some((session_id, seen_turns))
     }
 
-    /// Remembers `session_id` for `(conversation, profile)` in memory and
-    /// writes it through to the conversation's sidecar, recording the
-    /// working directory it was created under.
+    /// Replaces the old free function `store_cli_session_id` (which used
+    /// to call the since-removed `record_session`): updates the
+    /// in-memory session cache *and* marks `turn`'s `ExecutionRecorder`
+    /// with this turn's outcome, in one place, so the two can never
+    /// disagree about what happened. `provider` is read once for its
+    /// `session_id()`, exactly as the old function did; `completed`
+    /// distinguishes a normal finish from an error.
     ///
-    /// `seen_turns` is how many transcript messages the session now
-    /// holds, when the turn completed. `None` (the turn failed, so what
-    /// the session absorbed is unknown) keeps the count already stored
-    /// for this same session and otherwise starts from 0 -- under-
-    /// counting only re-sends history, over-counting would skip turns.
-    pub fn record_session(
+    /// `seen_turns` is computed here, not passed in: a completed turn's
+    /// session now holds `turn.history_len` plus the user message and
+    /// the reply; an errored turn's own effect on what the session
+    /// absorbed is unknown, so `turn.prior_seen_turns` (the cursor that
+    /// session already had when this turn began) is reused verbatim --
+    /// under-counting only re-sends history on the next resume,
+    /// over-counting would skip turns the CLI never actually saw.
+    pub fn record_turn_outcome(
         &self,
-        session_path: &Path,
+        turn: &mut TurnCtx,
         conversation_id: ConversationId,
         profile_key: ProfileKey,
-        session_id: String,
-        working_dir: &Path,
-        seen_turns: Option<usize>,
+        provider: &dyn AiProvider,
+        completed: bool,
     ) {
-        let key = (conversation_id, profile_key);
-        let mut sessions = self.cli_sessions.lock().unwrap();
-        let seen_turns = seen_turns.unwrap_or_else(|| {
-            sessions
-                .get(&key)
-                .filter(|e| e.session.0 == session_id && e.cwd == working_dir)
-                .map_or(0, |e| e.seen_turns)
-        });
-        cli_session_store::upsert(
-            session_path,
-            cli_session_store::StoredSession {
-                profile: profile_key,
-                session_id: session_id.clone(),
-                cwd: working_dir.to_path_buf(),
-                seen_turns,
-            },
-        );
-        sessions.insert(
-            key,
+        let Some(id) = provider.session_id() else {
+            if completed {
+                turn.recorder.mark_completed(None, None, Vec::new());
+            } else {
+                turn.recorder.mark_errored(None, None, Vec::new());
+            }
+            return;
+        };
+        let seen_turns = if completed { turn.history_len + 2 } else { turn.prior_seen_turns };
+        self.cli_sessions.lock().unwrap().insert(
+            (conversation_id, profile_key),
             CliSessionEntry {
-                session: ExternalSessionRef(session_id),
-                cwd: working_dir.to_path_buf(),
+                session: ExternalSessionRef(id.clone()),
+                cwd: turn.working_dir.clone(),
                 seen_turns,
             },
         );
+        if completed {
+            turn.recorder.mark_completed(Some(id), Some(seen_turns), Vec::new());
+        } else {
+            turn.recorder.mark_errored(Some(id), Some(seen_turns), Vec::new());
+        }
     }
 }
 
@@ -510,6 +516,7 @@ pub async fn send_chat_message(
                 creds_snapshot,
                 default_profile,
                 cli,
+                ExecutionPath::Direct,
                 claude_code_tool_access,
                 project_root,
                 execution_id,
@@ -528,16 +535,30 @@ pub async fn send_chat_message(
     Ok(())
 }
 
-/// Per-turn facts a run needs to persist its CLI session afterwards,
-/// bundled so `run_generation` / `stream_to_completion` do not each take
-/// them as loose parameters.
-struct TurnCtx {
+/// Per-turn facts a run needs to persist its CLI session and its
+/// `Execution` record, bundled so `run_generation` / `stream_to_completion`
+/// do not each take them as loose parameters.
+pub struct TurnCtx {
     session_path: PathBuf,
     working_dir: PathBuf,
     /// How many transcript messages preceded this turn's user message.
     /// A completed turn leaves a CLI session holding that many plus the
     /// user message and the reply.
     history_len: usize,
+    /// The resumed session's own catch-up cursor at the start of this
+    /// turn, if one was found -- 0 if none was (including for a
+    /// `MixLocal` attempt, which never has one). Reused verbatim if this
+    /// same turn also errors after capturing a session id, since an
+    /// errored turn's own effect on what the session absorbed is
+    /// unknown (`ChatRuntimeState::record_turn_outcome`).
+    prior_seen_turns: usize,
+    /// Owns this turn's `Execution` record for its whole lifetime:
+    /// constructed (writing the `start` event) before the provider is
+    /// ever called, marked with its outcome right before this function
+    /// returns, and -- if neither happens, e.g. the task is aborted --
+    /// recorded as `Cancelled` by its own `Drop`
+    /// (`execution-log-and-context`, design.md's Decision 5).
+    recorder: ExecutionRecorder,
 }
 
 /// Everything needed to retry against `default_profile` if a mix-mode
@@ -591,6 +612,7 @@ async fn run_generation_fallback(
         fallback.credentials,
         fallback.profile,
         cli,
+        ExecutionPath::Fallback,
         fallback.claude_code_tool_access,
         fallback.project_root,
         execution_id,
@@ -619,6 +641,7 @@ async fn run_generation_routed(
     credentials: ProviderCredentials,
     profile: ProviderProfile,
     cli: CliContext,
+    route: ExecutionPath,
     claude_code_tool_access: ClaudeCodeToolAccess,
     project_root: Option<PathBuf>,
     execution_id: ExecutionId,
@@ -629,10 +652,19 @@ async fn run_generation_routed(
     session_path: PathBuf,
 ) {
     let profile_key = profile.key();
+    let recorder = ExecutionRecorder::start(
+        session_path.clone(),
+        conversation_id.clone(),
+        route,
+        profile_key,
+        cli.working_dir.clone(),
+    );
     let turn = TurnCtx {
         session_path: session_path.clone(),
         working_dir: cli.working_dir.clone(),
         history_len: cli.history.len(),
+        prior_seen_turns: cli.seen_turns,
+        recorder,
     };
     match ai_commands::route_provider(&credentials, &profile, cli, &claude_code_tool_access) {
         RoutedExecution::PlainChat(provider) => {
@@ -660,41 +692,10 @@ async fn run_generation_routed(
                 messages,
                 channel,
                 partial_text,
-                session_path,
+                turn,
             )
             .await;
         }
-    }
-}
-
-/// Persists `provider`'s captured session/thread id (if any) for
-/// `(conversation_id, profile_key)`, so the *next* `send_chat_message`
-/// for the same conversation and profile can resume it. A no-op for
-/// every provider without a resumable session concept
-/// (`AiProvider::session_id`'s default `None`), and a no-op if this
-/// call captured nothing (e.g. it failed before a CLI session was ever
-/// established) -- a prior mapping, if any, is left untouched rather
-/// than cleared.
-fn store_cli_session_id(
-    app: &AppHandle,
-    turn: &TurnCtx,
-    conversation_id: ConversationId,
-    profile_key: ProfileKey,
-    provider: &dyn AiProvider,
-    completed: bool,
-) {
-    if let Some(id) = provider.session_id() {
-        // A completed turn left the session holding the history, the user
-        // message, and the reply; a failed one leaves that unknown.
-        let seen_turns = completed.then_some(turn.history_len + 2);
-        app.state::<ChatRuntimeState>().record_session(
-            &turn.session_path,
-            conversation_id,
-            profile_key,
-            id,
-            &turn.working_dir,
-            seen_turns,
-        );
     }
 }
 
@@ -717,16 +718,15 @@ async fn run_generation(
     messages: Vec<Message>,
     channel: Channel<ChatEvent>,
     partial_text: Arc<Mutex<String>>,
-    turn: TurnCtx,
+    mut turn: TurnCtx,
 ) {
     log::debug!("{execution_id:?} starting for {profile_key:?}");
 
     let mut stream = match provider.chat(messages).await {
         Ok(stream) => stream,
         Err(err) => {
-            store_cli_session_id(
-                &app,
-                &turn,
+            app.state::<ChatRuntimeState>().record_turn_outcome(
+                &mut turn,
                 conversation_id,
                 profile_key,
                 provider.as_ref(),
@@ -767,7 +767,7 @@ async fn stream_to_completion(
     profile_key: ProfileKey,
     channel: Channel<ChatEvent>,
     partial_text: Arc<Mutex<String>>,
-    turn: TurnCtx,
+    mut turn: TurnCtx,
 ) {
     while let Some(chunk) = stream.next().await {
         match chunk {
@@ -776,9 +776,8 @@ async fn stream_to_completion(
                 channel.send(ChatEvent::Chunk { delta: chunk.delta }).ok();
             }
             Err(err) => {
-                store_cli_session_id(
-                    &app,
-                    &turn,
+                app.state::<ChatRuntimeState>().record_turn_outcome(
+                    &mut turn,
                     conversation_id,
                     profile_key,
                     provider.as_ref(),
@@ -790,7 +789,13 @@ async fn stream_to_completion(
         }
     }
 
-    store_cli_session_id(&app, &turn, conversation_id, profile_key, provider.as_ref(), true);
+    app.state::<ChatRuntimeState>().record_turn_outcome(
+        &mut turn,
+        conversation_id,
+        profile_key,
+        provider.as_ref(),
+        true,
+    );
     let final_text = partial_text.lock().unwrap().clone();
     chat_log_store::append_entry(
         &turn.session_path,
@@ -814,8 +819,10 @@ async fn stream_to_completion(
 /// own narration and final answer do. `partial_text` (accumulated by
 /// the same callback) is used as the definitive final content once the
 /// loop finishes, exactly like `stream_to_completion` does for a plain
-/// stream, rather than `AgentRuntime::run`'s own `Ok(String)` return
-/// value alone (which is only the *last* iteration's text).
+/// stream, rather than `AgentRuntime::run`'s own `Ok(AgentOutcome)`
+/// return value's `text` field alone (which is only the *last*
+/// iteration's text) -- its `trace` field, however, *is* used, to mark
+/// this turn's `Execution` record (`execution-log-and-context`).
 #[allow(clippy::too_many_arguments)]
 async fn run_generation_with_tools(
     app: AppHandle,
@@ -827,16 +834,19 @@ async fn run_generation_with_tools(
     messages: Vec<Message>,
     channel: Channel<ChatEvent>,
     partial_text: Arc<Mutex<String>>,
-    session_path: PathBuf,
+    mut turn: TurnCtx,
 ) {
     log::debug!("{execution_id:?} starting tool-calling generation for {profile_key:?}");
 
-    // No `store_cli_session_id` call here: `route_provider` only resolves
-    // `ToolCapable` for Ollama and the OpenAI/Anthropic API-key profiles,
-    // and none of them has a resumable-session concept
+    // No `ChatRuntimeState::record_turn_outcome` call here (unlike
+    // `run_generation`/`stream_to_completion`): `route_provider` only
+    // resolves `ToolCapable` for Ollama and the OpenAI/Anthropic API-key
+    // profiles, and none of them has a resumable-session concept
     // (`AiProvider::session_id`'s default `None`, never overridden --
     // only the CLI-backed subscription providers keep one, and those are
-    // never `ToolCapable`). Revisit if a `ToolCapable` provider ever does.
+    // never `ToolCapable`). `turn.recorder` is still marked directly
+    // below, with the loop's own tool trace -- every turn gets an
+    // `Execution` record uniformly, CLI session or not.
     let ctx = ToolContext { project_root, conversation_id: conversation_id.clone() };
     let registry = ToolRegistry::new(vec![
         Arc::new(WebSearchTool::default()),
@@ -863,10 +873,11 @@ async fn run_generation_with_tools(
     };
 
     match result {
-        Ok(_) => {
+        Ok(outcome) => {
+            turn.recorder.mark_completed(None, None, outcome.trace);
             let final_text = partial_text.lock().unwrap().clone();
             chat_log_store::append_entry(
-                &session_path,
+                &turn.session_path,
                 &LogEntry {
                     role: LogRole::Assistant,
                     content: final_text.clone(),
@@ -877,7 +888,10 @@ async fn run_generation_with_tools(
             clear_pending(&app);
             mark_unread_unless_focused(&app, UnreadKind::Reply);
         }
-        Err(err) => finish_with_error(&app, &session_path, &channel, &err.to_string()),
+        Err(err) => {
+            turn.recorder.mark_errored(None, None, Vec::new());
+            finish_with_error(&app, &turn.session_path, &channel, &err.to_string());
+        }
     }
 }
 
@@ -918,6 +932,18 @@ async fn run_generation_mix_local(
     let local_profile_key = local_profile.key();
     log::debug!("{execution_id:?} starting mix-mode local attempt for {local_profile_key:?}");
 
+    // This attempt's own `Execution` record -- recorded even though its
+    // content, win or lose, is either discarded (escalated/errored) or
+    // folded into a later `stream_to_completion` call that marks it
+    // itself (`Simple`); see each branch below for which applies.
+    let mut recorder = ExecutionRecorder::start(
+        session_path.clone(),
+        conversation_id.clone(),
+        ExecutionPath::MixLocal,
+        local_profile_key,
+        fallback.working_dir.clone(),
+    );
+
     // No `cli_sessions` lookup here: Ollama has no resumable-session
     // concept (`AiProvider::session_id`'s default `None`, never
     // overridden), so a mix-mode local attempt is always a fresh call.
@@ -937,7 +963,13 @@ async fn run_generation_mix_local(
             // Infra-level failure before the local attempt even
             // started (e.g. `RuntimeUnavailable` -- Ollama enabled in
             // settings but not actually reachable). Nothing was shown
-            // or logged for this attempt; fall back directly.
+            // or logged for this attempt; fall back directly. `Errored`,
+            // not `Escalated` -- this is an infra failure, not the local
+            // model's own content decision (see
+            // `fleet_snowfluff_ai::ExecutionStatus::Escalated`'s doc
+            // comment for why the two are kept distinct).
+            recorder.mark_errored(None, None, Vec::new());
+            drop(recorder);
             run_generation_fallback(
                 app,
                 fallback,
@@ -958,7 +990,10 @@ async fn run_generation_mix_local(
             Some(Ok(chunk)) => chunk,
             Some(Err(_)) => {
                 // Mid-stream infra failure. Whatever's in `buffer` was
-                // never shown or logged -- fall back directly.
+                // never shown or logged -- fall back directly. `Errored`,
+                // same reasoning as the initial-call failure above.
+                recorder.mark_errored(None, None, Vec::new());
+                drop(recorder);
                 run_generation_fallback(
                     app,
                     fallback,
@@ -981,18 +1016,27 @@ async fn run_generation_mix_local(
                     partial_text.lock().unwrap().push_str(&buffer);
                     channel.send(ChatEvent::Chunk { delta: buffer }).ok();
                 }
-                store_cli_session_id(
-                    &app,
-                    &TurnCtx {
-                        session_path: session_path.clone(),
-                        working_dir: fallback.working_dir.clone(),
-                        history_len: fallback.history.len(),
-                    },
+                // Ollama has no resumable session, so this is always
+                // `mark_completed(None, None, ..)` in substance -- going
+                // through `record_turn_outcome` anyway keeps this in
+                // step with every other completion path, rather than
+                // hand-rolling the same "no session id" case differently
+                // here.
+                let mut turn = TurnCtx {
+                    session_path: session_path.clone(),
+                    working_dir: fallback.working_dir.clone(),
+                    history_len: fallback.history.len(),
+                    prior_seen_turns: 0,
+                    recorder,
+                };
+                app.state::<ChatRuntimeState>().record_turn_outcome(
+                    &mut turn,
                     conversation_id,
                     local_profile_key,
                     local_provider.as_ref(),
                     true,
                 );
+                drop(turn);
                 let final_text = partial_text.lock().unwrap().clone();
                 chat_log_store::append_entry(
                     &session_path,
@@ -1017,6 +1061,13 @@ async fn run_generation_mix_local(
                     partial_text.lock().unwrap().push_str(&buffer);
                     channel.send(ChatEvent::Chunk { delta: buffer }).ok();
                 }
+                // `recorder` is handed through unmarked, not marked
+                // `Completed` here: reaching the `Simple` decision only
+                // means the attempt isn't escalating, not that it has
+                // finished -- `stream_to_completion` marks it itself
+                // (`Completed` on success, `Errored` if the *rest* of
+                // the stream still fails), exactly as it already does
+                // for every other caller.
                 stream_to_completion(
                     app,
                     local_provider,
@@ -1029,6 +1080,8 @@ async fn run_generation_mix_local(
                         session_path,
                         working_dir: fallback.working_dir.clone(),
                         history_len: fallback.history.len(),
+                        prior_seen_turns: 0,
+                        recorder,
                     },
                 )
                 .await;
@@ -1039,9 +1092,14 @@ async fn run_generation_mix_local(
                 // the local stream/provider (dropping a `ChatStream`
                 // built over an HTTP response ends that request on its
                 // own -- no explicit cancellation needed) and retry
-                // fresh against `default_profile`.
+                // fresh against `default_profile`. `Escalated`, not
+                // `Errored`: this is the local model's own content
+                // decision (the `<<ESCALATE>>` marker), not an infra
+                // failure.
                 drop(stream);
                 drop(local_provider);
+                recorder.mark_escalated();
+                drop(recorder);
                 run_generation_fallback(
                     app,
                     fallback,
@@ -1146,15 +1204,108 @@ mod tests {
         state.cli_context(log, &conversation(log), claude(), history, PathBuf::from(cwd))
     }
 
-    fn record(state: &ChatRuntimeState, log: &Path, id: &str, cwd: &str, seen: Option<usize>) {
-        state.record_session(log, conversation(log), claude(), id.into(), Path::new(cwd), seen);
+    /// A trivial `AiProvider` double whose only real behavior is
+    /// `session_id()` -- everything `record_turn_outcome` reads a
+    /// provider for. `chat`/`list_models` are never called by these
+    /// tests.
+    struct FixedSessionProvider(Option<String>);
+
+    #[async_trait::async_trait]
+    impl AiProvider for FixedSessionProvider {
+        fn kind(&self) -> fleet_snowfluff_ai::ProviderKind {
+            fleet_snowfluff_ai::ProviderKind::Mock
+        }
+
+        async fn chat(
+            &self,
+            _messages: Vec<Message>,
+        ) -> Result<ChatStream, fleet_snowfluff_ai::ProviderError> {
+            unimplemented!("not exercised by these tests")
+        }
+
+        async fn list_models(
+            &self,
+        ) -> Result<Vec<fleet_snowfluff_ai::ModelInfo>, fleet_snowfluff_ai::ProviderError> {
+            unimplemented!("not exercised by these tests")
+        }
+
+        fn session_id(&self) -> Option<String> { self.0.clone() }
+    }
+
+    /// Records a turn that *completed*, via the same `record_turn_outcome`
+    /// path a real `run_generation`/`stream_to_completion` call uses. The
+    /// resulting `seen_turns` is `history_len + 2` (the history plus this
+    /// turn's own user message and reply), matching
+    /// `record_turn_outcome`'s own formula -- so a test wanting a specific
+    /// `seen_turns` picks `history_len` accordingly (`seen_turns - 2`).
+    fn record_completed(
+        state: &ChatRuntimeState,
+        log: &Path,
+        id: &str,
+        cwd: &str,
+        history_len: usize,
+    ) {
+        let mut turn = TurnCtx {
+            session_path: log.to_path_buf(),
+            working_dir: PathBuf::from(cwd),
+            history_len,
+            prior_seen_turns: 0,
+            recorder: ExecutionRecorder::start(
+                log.to_path_buf(),
+                conversation(log),
+                ExecutionPath::Direct,
+                claude(),
+                PathBuf::from(cwd),
+            ),
+        };
+        state.record_turn_outcome(
+            &mut turn,
+            conversation(log),
+            claude(),
+            &FixedSessionProvider(Some(id.to_string())),
+            true,
+        );
+    }
+
+    /// Records a turn that *errored* after capturing `id` -- `seen_turns`
+    /// is `prior_seen_turns` verbatim (what the session already held
+    /// before this turn began; the real code reads this from
+    /// `CliContext::seen_turns` at turn start), never re-derived from
+    /// `history_len`.
+    fn record_errored(
+        state: &ChatRuntimeState,
+        log: &Path,
+        id: &str,
+        cwd: &str,
+        prior_seen_turns: usize,
+    ) {
+        let mut turn = TurnCtx {
+            session_path: log.to_path_buf(),
+            working_dir: PathBuf::from(cwd),
+            history_len: 0,
+            prior_seen_turns,
+            recorder: ExecutionRecorder::start(
+                log.to_path_buf(),
+                conversation(log),
+                ExecutionPath::Direct,
+                claude(),
+                PathBuf::from(cwd),
+            ),
+        };
+        state.record_turn_outcome(
+            &mut turn,
+            conversation(log),
+            claude(),
+            &FixedSessionProvider(Some(id.to_string())),
+            false,
+        );
     }
 
     #[test]
     fn a_recorded_session_is_resumed_from_the_same_working_directory() {
         let state = ChatRuntimeState::default();
         let log = log_path("same-cwd", "a.jsonl");
-        record(&state, &log, "sess-1", "/p", Some(2));
+        record_completed(&state, &log, "sess-1", "/p", 0);
 
         let cli = ctx(&state, &log, turns(2), "/p");
         assert_eq!(cli.resume_session_id.as_deref(), Some("sess-1"));
@@ -1165,7 +1316,7 @@ mod tests {
     fn a_recorded_session_is_not_resumed_from_a_different_working_directory() {
         let state = ChatRuntimeState::default();
         let log = log_path("other-cwd", "a.jsonl");
-        record(&state, &log, "sess-1", "/p", Some(2));
+        record_completed(&state, &log, "sess-1", "/p", 0);
 
         let cli = ctx(&state, &log, turns(2), "/changed");
         assert_eq!(
@@ -1181,24 +1332,22 @@ mod tests {
     }
 
     #[test]
-    fn recording_writes_through_to_the_sidecar() {
+    fn recording_writes_through_to_the_execution_log() {
         let state = ChatRuntimeState::default();
         let log = log_path("write-through", "a.jsonl");
-        record(&state, &log, "sess-1", "/p", Some(4));
+        record_completed(&state, &log, "sess-1", "/p", 2);
 
-        let stored = cli_session_store::load(&log);
-        assert_eq!(stored.len(), 1);
-        assert_eq!(stored[0].session_id, "sess-1");
-        assert_eq!(stored[0].cwd, Path::new("/p"));
-        assert_eq!(stored[0].seen_turns, 4);
+        let found = execution_log_store::latest_usable_session(&log, claude(), Path::new("/p"));
+        assert_eq!(found, Some(("sess-1".to_string(), 4)));
     }
 
     #[test]
     fn a_session_and_its_seen_count_survive_an_app_restart() {
         let log = log_path("restart", "a.jsonl");
-        record(&ChatRuntimeState::default(), &log, "sess-1", "/p", Some(6));
+        record_completed(&ChatRuntimeState::default(), &log, "sess-1", "/p", 4);
 
-        // A brand-new state, as after a restart: nothing in memory, only the sidecar.
+        // A brand-new state, as after a restart: nothing in memory, only the execution
+        // log.
         let cli = ctx(&ChatRuntimeState::default(), &log, turns(6), "/p");
         assert_eq!(cli.resume_session_id.as_deref(), Some("sess-1"));
         assert_eq!(cli.seen_turns, 6);
@@ -1207,7 +1356,7 @@ mod tests {
     #[test]
     fn a_restarted_session_from_a_different_working_directory_is_skipped() {
         let log = log_path("restart-cwd", "a.jsonl");
-        record(&ChatRuntimeState::default(), &log, "sess-1", "/p", Some(2));
+        record_completed(&ChatRuntimeState::default(), &log, "sess-1", "/p", 0);
 
         let cli = ctx(&ChatRuntimeState::default(), &log, turns(2), "/other");
         assert_eq!(cli.resume_session_id, None);
@@ -1217,10 +1366,10 @@ mod tests {
     fn a_new_conversation_never_sees_the_previous_conversations_session() {
         let old_log = log_path("new-chat", "old.jsonl");
         let state = ChatRuntimeState::default();
-        record(&state, &old_log, "old-session", "/p", Some(2));
+        record_completed(&state, &old_log, "old-session", "/p", 0);
 
         // What "New Chat" produces: a different log path, hence a different
-        // conversation id and a different (absent) sidecar.
+        // conversation id and a different (absent) execution log.
         let new_log = old_log.with_file_name("new.jsonl");
         assert_eq!(ctx(&state, &new_log, vec![], "/p").resume_session_id, None);
     }
@@ -1229,9 +1378,9 @@ mod tests {
     fn a_new_session_id_replaces_the_stored_one_for_the_same_profile() {
         let state = ChatRuntimeState::default();
         let log = log_path("replace", "a.jsonl");
-        record(&state, &log, "stale", "/p", Some(2));
+        record_completed(&state, &log, "stale", "/p", 0);
         // The provider fell back to a fresh session and captured a new id.
-        record(&state, &log, "fresh", "/p", Some(4));
+        record_completed(&state, &log, "fresh", "/p", 2);
 
         let cli = ctx(&ChatRuntimeState::default(), &log, turns(4), "/p");
         assert_eq!(cli.resume_session_id.as_deref(), Some("fresh"));
@@ -1245,7 +1394,7 @@ mod tests {
         let state = ChatRuntimeState::default();
         let log = log_path("catch-up", "a.jsonl");
         // Claude's session holds the first two messages...
-        record(&state, &log, "sess-1", "/p", Some(2));
+        record_completed(&state, &log, "sess-1", "/p", 0);
         // ...then Ollama answered another exchange, so the transcript is now 4 long.
         let cli = ctx(&state, &log, turns(4), "/p");
 
@@ -1274,25 +1423,31 @@ mod tests {
     fn a_failed_turn_keeps_the_seen_count_already_stored_for_that_session() {
         let state = ChatRuntimeState::default();
         let log = log_path("failed-same", "a.jsonl");
-        record(&state, &log, "sess-1", "/p", Some(4));
-        // A later turn failed (e.g. a rate limit) after the session id was captured.
-        record(&state, &log, "sess-1", "/p", None);
+        record_completed(&state, &log, "sess-1", "/p", 2);
+        // A later turn failed (e.g. a rate limit) after the session id was
+        // captured -- it had already seen 4 turns when this one began.
+        record_errored(&state, &log, "sess-1", "/p", 4);
 
         assert_eq!(
             ctx(&state, &log, turns(8), "/p").seen_turns,
             4,
             "not advanced past what is known"
         );
-        assert_eq!(cli_session_store::load(&log)[0].seen_turns, 4);
+        assert_eq!(
+            execution_log_store::latest_usable_session(&log, claude(), Path::new("/p")),
+            Some(("sess-1".to_string(), 4))
+        );
     }
 
     #[test]
     fn a_failed_turn_on_a_new_session_starts_from_zero() {
         let state = ChatRuntimeState::default();
         let log = log_path("failed-new", "a.jsonl");
-        record(&state, &log, "old", "/p", Some(4));
+        record_completed(&state, &log, "old", "/p", 2);
         // The provider fell back to a fresh session, then failed mid-reply.
-        record(&state, &log, "new", "/p", None);
+        // A genuinely fresh session's own prior cursor is 0, never borrowed
+        // from the unrelated "old" session it replaced.
+        record_errored(&state, &log, "new", "/p", 0);
 
         assert_eq!(
             ctx(&state, &log, turns(6), "/p").seen_turns,

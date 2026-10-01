@@ -50,8 +50,9 @@ pub struct ExternalSessionRef(pub String);
 
 /// An [`ExternalSessionRef`] together with the working directory the CLI
 /// was run in when it was created. `cli_sessions` holds these (and the
-/// sidecar file persists them) because a CLI session may only be resumed
-/// from the directory it was created under -- see `cli_session_store`.
+/// conversation's execution log persists them -- see `execution_log_store`)
+/// because a CLI session may only be resumed from the directory it was
+/// created under.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliSessionEntry {
     pub session: ExternalSessionRef,

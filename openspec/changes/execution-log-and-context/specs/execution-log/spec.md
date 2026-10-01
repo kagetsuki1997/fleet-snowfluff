@@ -6,7 +6,7 @@ Defines the persisted record of what actually happened during each turn of a con
 
 ### Requirement: One Execution record per attempt, uniformly
 
-The application SHALL record one Execution for every attempt to produce a reply, including an attempt that is discarded and never reaches the user-visible chat transcript (a `mix`-mode local attempt that escalates or fails). This SHALL hold regardless of whether the attempt used tools, a CLI-backed runtime, or neither. An Execution record SHALL identify the conversation it belongs to, the provider profile that handled it, and the route taken (a direct attempt, a `mix`-mode local attempt, a fallback after escalation or failure, or a tool-calling attempt).
+The application SHALL record one Execution for every attempt to produce a reply, including an attempt that is discarded and never reaches the user-visible chat transcript (a `mix`-mode local attempt that escalates or fails). This SHALL hold regardless of whether the attempt used tools, a CLI-backed runtime, or neither. An Execution record SHALL identify the conversation it belongs to, the provider profile that handled it, and the route taken (a direct attempt, a `mix`-mode local attempt, or a fallback after escalation or failure); whether the attempt used tools is recorded separately as part of its tool-call trace, not as a distinct route.
 
 #### Scenario: A plain chat turn is still recorded
 
