@@ -337,6 +337,15 @@ body {
   padding: 0.4rem 0.6rem;
   text-align: left;
   background: var(--pico-secondary-background);
+  /* Pico's own `button` selector locally redefines the --pico-color
+     custom property to --pico-primary-inverse (light text meant for
+     Pico's colored default button background); this button's own
+     background is the app's muted secondary color instead, so that
+     text reads as near-white on light pink -- unreadable. `inherit`
+     takes the parent `.chat-conversation-row`'s actual text color
+     instead of resolving the shadowed variable, same fix as
+     `.tab-button`'s own documented one above. */
+  color: inherit;
 }
 
 .chat-conversation-delete {
@@ -344,6 +353,7 @@ body {
   margin: 0;
   width: auto;
   padding: 0.4rem 0.6rem;
+  color: inherit;
 }
 
 .chat-conversation-open:disabled,

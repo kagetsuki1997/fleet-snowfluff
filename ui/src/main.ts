@@ -3,7 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openExternalLink } from "@tauri-apps/plugin-shell";
-import { open as openFolderPicker } from "@tauri-apps/plugin-dialog";
+import { confirm as confirmDialog, open as openFolderPicker } from "@tauri-apps/plugin-dialog";
 import "@picocss/pico/css/pico.min.css";
 import "./style.css";
 
@@ -1130,9 +1130,16 @@ async function renderChatWindow(): Promise<void> {
     if (deleteButton?.dataset.path) {
       const path = deleteButton.dataset.path;
       // The backend command does not re-confirm -- this is the one and
-      // only confirm step (design.md's Decision 8).
-      if (!window.confirm(t("chat.delete_conversation_confirm"))) return;
-      void invoke<boolean>("delete_conversation", { path }).then(() => refreshConversationsList());
+      // only confirm step (design.md's Decision 8). `window.confirm`
+      // is a silent no-op in Tauri's webview (no native dialog host),
+      // so this goes through the dialog plugin instead, same as the
+      // folder picker above.
+      void confirmDialog(t("chat.delete_conversation_confirm")).then((confirmed) => {
+        if (!confirmed) return;
+        void invoke<boolean>("delete_conversation", { path }).then(() =>
+          refreshConversationsList(),
+        );
+      });
       return;
     }
 
