@@ -132,6 +132,29 @@ impl ChatRuntimeState {
         self.remembered_tools.lock().unwrap().insert((conversation_id, key));
     }
 
+    /// Cancels any pending generation and clears the per-conversation
+    /// state (`cli_sessions`, `remembered_tools`, unread) that must not
+    /// carry over to a different conversation -- shared by
+    /// `new_chat_session` and `open_conversation`, which differ only in
+    /// what `session_path` is pointed at afterward (design.md's Decision
+    /// 8). Returns whether a generation was actually cancelled, mostly
+    /// so this is directly testable without an `AppHandle` (the
+    /// `on_chat_activity_changed` notification that also belongs to this
+    /// reset is the caller's job, at the Tauri-command layer).
+    fn reset_for_new_conversation(&self) -> bool {
+        let cancelled = match self.pending.lock().unwrap().take() {
+            Some(pending) => {
+                pending.handle.abort();
+                true
+            }
+            None => false,
+        };
+        self.clear_unread();
+        self.cli_sessions.lock().unwrap().clear();
+        self.remembered_tools.lock().unwrap().clear();
+        cancelled
+    }
+
     /// Everything a CLI-backed provider needs about the conversation it
     /// is continuing (`CliContext`): the session to resume (if a
     /// still-usable one is stored), the transcript, how much of it that
@@ -278,6 +301,11 @@ pub struct ChatStateSnapshot {
     /// `"disabled"` or `"no_provider"`, for the frontend to localize;
     /// `None` when `ai_ready` is `true`.
     not_ready_reason: Option<&'static str>,
+    /// The conversation currently open -- lets the picker (6.4) mark/
+    /// grey out the open conversation using data it already has to
+    /// fetch anyway, with no separate "is this the open one" query
+    /// command (design.md's Decision 8).
+    session_path: PathBuf,
 }
 
 /// Whether a chat message can be sent right now and, if not, the reason
@@ -328,7 +356,43 @@ pub fn get_chat_state(
     let settings = ai_settings.lock().unwrap();
     let (ai_ready, not_ready_reason) = chat_readiness(&settings);
 
-    ChatStateSnapshot { entries, is_pending, partial_text, ai_ready, not_ready_reason }
+    ChatStateSnapshot {
+        entries,
+        is_pending,
+        partial_text,
+        ai_ready,
+        not_ready_reason,
+        session_path,
+    }
+}
+
+/// Every past conversation, newest-first (`execution-log-and-context`'s
+/// "List and open past conversations").
+#[tauri::command]
+pub fn list_conversations(app: AppHandle) -> Vec<chat_log_store::ConversationSummary> {
+    chat_log_store::list_conversations(&app)
+}
+
+/// Thin Tauri-command-layer wrapper around
+/// `ChatRuntimeState::reset_for_new_conversation` that also fires the
+/// `AppHandle`-dependent activity notification -- kept separate so the
+/// state-reset logic itself stays testable without an `AppHandle`.
+fn reset_chat_runtime_state(app: &AppHandle, chat_state: &ChatRuntimeState) {
+    chat_state.reset_for_new_conversation();
+    on_chat_activity_changed(app);
+}
+
+/// Opens an existing conversation (`execution-log-and-context`'s "List
+/// and open past conversations"): cancels any pending generation and
+/// clears the same per-conversation state `new_chat_session` does, then
+/// points `chat_state.session_path` at `path` instead of a freshly
+/// created one. Opening the conversation that is already open is a
+/// harmless no-op (same cancel-and-clear happens either way, matching
+/// what clicking "New Chat" on the current conversation would also do).
+#[tauri::command]
+pub fn open_conversation(app: AppHandle, chat_state: State<ChatRuntimeState>, path: PathBuf) {
+    reset_chat_runtime_state(&app, &chat_state);
+    *chat_state.session_path.lock().unwrap() = Some(path);
 }
 
 fn map_ui_language(ui: fleet_snowfluff_core::UiLanguage) -> Language {
@@ -1145,13 +1209,7 @@ pub fn stop_generation(app: AppHandle, chat_state: State<ChatRuntimeState>) {
 /// generation").
 #[tauri::command]
 pub fn new_chat_session(app: AppHandle, chat_state: State<ChatRuntimeState>) {
-    if let Some(pending) = chat_state.pending.lock().unwrap().take() {
-        pending.handle.abort();
-    }
-    chat_state.clear_unread();
-    chat_state.cli_sessions.lock().unwrap().clear();
-    chat_state.remembered_tools.lock().unwrap().clear();
-    on_chat_activity_changed(&app);
+    reset_chat_runtime_state(&app, &chat_state);
     if let Some(new_path) = chat_log_store::create_new_session(&app) {
         *chat_state.session_path.lock().unwrap() = Some(new_path);
     }
@@ -1505,5 +1563,42 @@ mod tests {
             base_url: None,
         };
         assert_eq!(chat_readiness(&settings_with_default(ollama, false)), (true, None));
+    }
+
+    // `open_conversation`/`new_chat_session` themselves take an
+    // `AppHandle`, which cannot be constructed in a unit test (no
+    // existing test in this module exercises a Tauri command directly,
+    // for the same reason) -- `ChatRuntimeState::reset_for_new_conversation`
+    // is where the actually-testable behavior lives, so these two tests
+    // exercise that directly, matching task 6.3's "cancels it first" /
+    // "resulting session_path matches" requirements one level down.
+
+    #[tokio::test]
+    async fn resetting_for_a_new_conversation_cancels_a_pending_generation() {
+        let state = ChatRuntimeState::default();
+        let handle = tokio::spawn(futures_util::future::pending::<()>());
+        *state.pending.lock().unwrap() =
+            Some(PendingGeneration { handle, partial_text: Arc::new(Mutex::new(String::new())) });
+
+        let cancelled = state.reset_for_new_conversation();
+
+        assert!(cancelled, "a pending generation must be reported as cancelled");
+        assert!(state.pending.lock().unwrap().is_none());
+    }
+
+    #[test]
+    fn resetting_with_nothing_pending_reports_no_cancellation() {
+        let state = ChatRuntimeState::default();
+        assert!(!state.reset_for_new_conversation());
+    }
+
+    #[test]
+    fn opening_a_conversation_points_session_path_at_what_was_requested() {
+        let state = ChatRuntimeState::default();
+        state.reset_for_new_conversation();
+        let requested = PathBuf::from("some-other-conversation.jsonl");
+        *state.session_path.lock().unwrap() = Some(requested.clone());
+
+        assert_eq!(state.session_path.lock().unwrap().as_ref(), Some(&requested));
     }
 }

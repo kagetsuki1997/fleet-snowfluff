@@ -98,6 +98,8 @@ pub fn run() {
             chat_commands::send_chat_message,
             chat_commands::stop_generation,
             chat_commands::new_chat_session,
+            chat_commands::list_conversations,
+            chat_commands::open_conversation,
             tool_confirmation::get_pending_tool_confirmations,
             tool_confirmation::resolve_tool_confirmations,
         ])
