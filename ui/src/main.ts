@@ -1100,11 +1100,16 @@ async function renderChatWindow(): Promise<void> {
     const title = conversation.title.trim() || t("chat.conversation_untitled");
     const when = new Date(conversation.last_activity).toLocaleString();
     const currentClass = isCurrent ? " chat-conversation-current" : "";
+    const path = escapeHtml(conversation.session_path);
+    const disabled = isCurrent ? "disabled" : "";
     return `
-      <button type="button" class="chat-conversation-row${currentClass}" data-path="${escapeHtml(conversation.session_path)}" ${isCurrent ? "disabled" : ""}>
-        <span class="chat-conversation-title">${escapeHtml(title)}</span>
-        <span class="chat-conversation-time">${escapeHtml(when)}</span>
-      </button>
+      <div class="chat-conversation-row${currentClass}">
+        <button type="button" class="chat-conversation-open" data-path="${path}" ${disabled}>
+          <span class="chat-conversation-title">${escapeHtml(title)}</span>
+          <span class="chat-conversation-time">${escapeHtml(when)}</span>
+        </button>
+        <button type="button" class="chat-conversation-delete" data-path="${path}" ${disabled} aria-label="${t("chat.delete_conversation_button")}">✕</button>
+      </div>
     `;
   }
 
@@ -1119,8 +1124,20 @@ async function renderChatWindow(): Promise<void> {
   });
 
   conversationsListEl.addEventListener("click", (e) => {
-    const row = (e.target as HTMLElement).closest<HTMLButtonElement>(".chat-conversation-row");
-    const path = row?.dataset.path;
+    const target = e.target as HTMLElement;
+
+    const deleteButton = target.closest<HTMLButtonElement>(".chat-conversation-delete");
+    if (deleteButton?.dataset.path) {
+      const path = deleteButton.dataset.path;
+      // The backend command does not re-confirm -- this is the one and
+      // only confirm step (design.md's Decision 8).
+      if (!window.confirm(t("chat.delete_conversation_confirm"))) return;
+      void invoke<boolean>("delete_conversation", { path }).then(() => refreshConversationsList());
+      return;
+    }
+
+    const openButton = target.closest<HTMLButtonElement>(".chat-conversation-open");
+    const path = openButton?.dataset.path;
     if (!path) return;
     void invoke("open_conversation", { path }).then(() => {
       conversationsListEl.hidden = true;

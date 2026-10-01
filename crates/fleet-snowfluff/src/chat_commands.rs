@@ -395,6 +395,34 @@ pub fn open_conversation(app: AppHandle, chat_state: State<ChatRuntimeState>, pa
     *chat_state.session_path.lock().unwrap() = Some(path);
 }
 
+/// The testable core of `delete_conversation` -- takes the currently-open
+/// path directly rather than `State<ChatRuntimeState>`, which cannot be
+/// constructed in a unit test here (same reason `reset_for_new_conversation`
+/// is a `ChatRuntimeState` method rather than a free function taking
+/// `&AppHandle`). Refuses (returns `false`) when `path` is the open
+/// conversation; otherwise best-effort removes the transcript and its
+/// execution-log sibling (`.ok()` on each, matching every other
+/// file-removal/write in this codebase) and never touches an external
+/// CLI runtime's own session store -- Aemeath has never owned that
+/// lifecycle (`cli-session-continuity`'s own standing principle).
+fn delete_conversation_files(current_session_path: Option<&Path>, path: &Path) -> bool {
+    if current_session_path == Some(path) {
+        return false;
+    }
+    std::fs::remove_file(path).ok();
+    std::fs::remove_file(execution_log_store::log_path(path)).ok();
+    true
+}
+
+/// Deletes a conversation (`execution-log-and-context`'s "Delete a
+/// conversation"). The UI's own confirm step (6.4/7.2) is a separate,
+/// earlier gate -- this command does not re-confirm.
+#[tauri::command]
+pub fn delete_conversation(chat_state: State<ChatRuntimeState>, path: PathBuf) -> bool {
+    let current = chat_state.session_path.lock().unwrap();
+    delete_conversation_files(current.as_deref(), &path)
+}
+
 fn map_ui_language(ui: fleet_snowfluff_core::UiLanguage) -> Language {
     use fleet_snowfluff_core::UiLanguage;
     match ui {
@@ -1600,5 +1628,51 @@ mod tests {
         *state.session_path.lock().unwrap() = Some(requested.clone());
 
         assert_eq!(state.session_path.lock().unwrap().as_ref(), Some(&requested));
+    }
+
+    fn hi_entry() -> LogEntry {
+        LogEntry { role: LogRole::User, content: "hi".to_string(), timestamp: now_rfc3339() }
+    }
+
+    #[test]
+    fn deleting_a_non_open_conversation_removes_both_files() {
+        let transcript = log_path("delete-non-open", "session.jsonl");
+        chat_log_store::append_entry(&transcript, &hi_entry());
+        let executions = execution_log_store::log_path(&transcript);
+        std::fs::write(&executions, "{}\n").unwrap();
+
+        let deleted =
+            delete_conversation_files(Some(Path::new("some-other-open.jsonl")), &transcript);
+
+        assert!(deleted);
+        assert!(!transcript.exists());
+        assert!(!executions.exists());
+    }
+
+    #[test]
+    fn deleting_the_open_conversation_is_refused_and_leaves_both_files() {
+        let transcript = log_path("delete-open", "session.jsonl");
+        chat_log_store::append_entry(&transcript, &hi_entry());
+        let executions = execution_log_store::log_path(&transcript);
+        std::fs::write(&executions, "{}\n").unwrap();
+
+        let deleted = delete_conversation_files(Some(transcript.as_path()), &transcript);
+
+        assert!(!deleted);
+        assert!(transcript.exists());
+        assert!(executions.exists());
+    }
+
+    #[test]
+    fn deleting_a_conversation_with_only_a_transcript_does_not_error() {
+        let transcript = log_path("delete-transcript-only", "session.jsonl");
+        chat_log_store::append_entry(&transcript, &hi_entry());
+        // No .executions.jsonl ever written -- a conversation that never
+        // had a tool-calling turn.
+
+        let deleted = delete_conversation_files(None, &transcript);
+
+        assert!(deleted);
+        assert!(!transcript.exists());
     }
 }

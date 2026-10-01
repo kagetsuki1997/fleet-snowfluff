@@ -318,22 +318,37 @@ body {
 
 .chat-conversation-row {
   display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+}
+
+.chat-conversation-row.chat-conversation-current {
+  border: 1px solid var(--pico-primary);
+}
+
+.chat-conversation-open {
+  display: flex;
+  flex: 1;
+  min-width: 0;
   justify-content: space-between;
   align-items: baseline;
   gap: 0.5rem;
   margin: 0;
   padding: 0.4rem 0.6rem;
-  width: 100%;
   text-align: left;
   background: var(--pico-secondary-background);
 }
 
-.chat-conversation-row:disabled {
-  opacity: 0.6;
+.chat-conversation-delete {
+  flex-shrink: 0;
+  margin: 0;
+  width: auto;
+  padding: 0.4rem 0.6rem;
 }
 
-.chat-conversation-current {
-  border: 1px solid var(--pico-primary);
+.chat-conversation-open:disabled,
+.chat-conversation-delete:disabled {
+  opacity: 0.6;
 }
 
 .chat-conversation-title {
