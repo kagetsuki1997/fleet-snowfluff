@@ -30,7 +30,8 @@ pub mod task_router;
 pub mod tool_provider;
 
 pub use agent_runtime::{
-    AemeathAgentRuntime, AgentError, AgentRuntime, PendingToolCall, PermissionDecider, ToolRegistry,
+    AemeathAgentRuntime, AgentError, AgentOutcome, AgentRuntime, PendingToolCall,
+    PermissionDecider, ToolInvocation, ToolOutcome, ToolRegistry,
 };
 pub use agent_tool::{PermissionTier, Tool, ToolContext, ToolError, ToolResult};
 pub use context_manager::{AemeathContextManager, ContextManager, SessionLog};
