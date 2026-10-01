@@ -172,8 +172,10 @@ CLI's session is a cache of it:
   `mix` mode): the request also carries a short summary of the recent
   transcript, so the reply isn't produced without the earlier turns.
 - **Restarting the app** picks the same session back up. The session
-  references are stored in a small `.sessions.json` file next to that
-  conversation's chat log, and start over with a new chat.
+  reference is derived from that conversation's append-only execution
+  log (`<timestamp>_<id>.executions.jsonl`, next to its chat log), which
+  also records every attempt made each turn — not just the latest
+  session, the way an earlier, now-removed `.sessions.json` sidecar did.
 
 The CLI is always run in a fixed directory — your project directory if
 you've set one, otherwise a `cli-workspace` folder in Fleet Snowfluff's
@@ -185,3 +187,16 @@ along with the reply.
 
 Codex gets the same handling but, like the rest of Codex support, hasn't
 been verified against a real subscription.
+
+This carries over even across providers: if a turn called tools (Ollama
+tool calling, or an API-key profile's own tool calling), the very next
+turn's context includes a short note about what those tools did — whether
+or not the profile answering that next turn has any tool-calling ability
+of its own.
+
+You can browse, reopen, and delete past conversations from the chat
+window's conversation list. Deleting removes that conversation's chat log
+and execution log; it never touches Claude Code's or Codex's own session
+store, so an external CLI session a deleted conversation once referenced
+isn't cleaned up by this — it's simply never reachable from Fleet
+Snowfluff again. The conversation currently open can't be deleted.
