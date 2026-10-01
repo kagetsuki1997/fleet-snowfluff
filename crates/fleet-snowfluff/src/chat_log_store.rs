@@ -159,7 +159,7 @@ fn is_conversation_file(path: &Path) -> bool {
 /// moment the first message is appended, so this is reachable for at
 /// most a brief window, not a normal steady state). A corrupt first
 /// line never crashes this -- `read_session`/`parse_log` already skip
-/// an unparseable line, so "first" here means the first *valid* one.
+/// an unparsable line, so "first" here means the first *valid* one.
 fn summarize_conversation(path: &Path) -> ConversationSummary {
     let entries = read_session(path);
     let title = entries.first().map(|entry| truncate_chars(&entry.content, TITLE_MAX_CHARS));

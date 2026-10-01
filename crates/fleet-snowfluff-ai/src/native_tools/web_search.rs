@@ -507,7 +507,7 @@ mod tests {
     }
 
     #[test]
-    fn an_unparseable_body_yields_no_results_not_an_error() {
+    fn an_unparsable_body_yields_no_results_not_an_error() {
         assert!(parse_ddgs_results("not json").is_empty());
         assert!(parse_searxng_results("not json").is_empty());
         assert!(parse_duckduckgo_results("<html>blocked</html>").is_empty());
