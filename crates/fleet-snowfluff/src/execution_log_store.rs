@@ -87,6 +87,19 @@ pub fn latest_usable_session(
         .next_back()
 }
 
+/// Implements `fleet_snowfluff_ai::ExecutionLog` by delegating straight
+/// to `read`/`append` above -- same adapter shape as `chat_log_store`'s
+/// `ChatLogStore` for `SessionLog`, and for the same reason
+/// (`ContextManager` lives in the ai crate and must not depend on this
+/// one).
+pub struct ExecutionLogStore;
+
+impl fleet_snowfluff_ai::ExecutionLog for ExecutionLogStore {
+    fn read(&self, session_path: &Path) -> Vec<Execution> { read(session_path) }
+
+    fn append(&self, session_path: &Path, event: &ExecutionEvent) { append(session_path, event) }
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;

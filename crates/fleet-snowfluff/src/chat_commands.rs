@@ -16,25 +16,37 @@ use std::{
 };
 
 use fleet_snowfluff_ai::{
-    detect_escalation, log::LogRole, prompt, with_task_router_rules, AemeathAgentRuntime,
-    AgentRuntime, AiProvider, AiSettings, AuthMethod, ChatStream, ClaudeCodeToolAccess, CliContext,
-    DefaultTaskRouter, EscalationDecision, ExecutionPath, GetSystemContextTool, Language,
-    ListDirectoryTool, LogEntry, Message, Persona, ProfileKey, ProviderCredentials, ProviderKind,
-    ProviderProfile, ReadFileTool, ResponseLanguage, RoutingContext, RunCommandTool, Task,
-    TaskRouter, TaskRouterMode, ToolCallingProvider, ToolContext, ToolRegistry, WebSearchTool,
+    detect_escalation, log::LogRole, with_task_router_rules, AemeathAgentRuntime,
+    AemeathContextManager, AgentRuntime, AiProvider, AiSettings, AuthMethod, ChatStream,
+    ClaudeCodeToolAccess, CliContext, ContextManager, DefaultTaskRouter, EscalationDecision,
+    ExecutionPath, GetSystemContextTool, Language, ListDirectoryTool, LogEntry, Message, Persona,
+    ProfileKey, ProviderCredentials, ProviderKind, ProviderProfile, ReadFileTool, ResponseLanguage,
+    RoutingContext, RunCommandTool, Task, TaskRouter, TaskRouterMode, ToolCallingProvider,
+    ToolContext, ToolRegistry, WebSearchTool,
 };
 use futures_util::StreamExt;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
 
 use crate::{
     ai_commands::{self, RoutedExecution},
-    chat_log_store, chat_pause, chat_window, cli_workdir, execution_log_store,
+    chat_log_store::{self, ChatLogStore},
+    chat_pause, chat_window, cli_workdir, execution_log_store,
     execution_recorder::ExecutionRecorder,
     manager::PetManager,
     persona_store,
     session_domain::{CliSessionEntry, ConversationId, ExecutionId, ExternalSessionRef},
     status_bubble, task_router_rules_store,
 };
+
+/// `ContextManager` has no other state to hold onto between calls --
+/// constructed fresh at each call site, the same way `ChatLogStore`
+/// (one of its two adapters) already is everywhere else in this file.
+fn context_manager() -> AemeathContextManager {
+    AemeathContextManager::new(
+        Box::new(ChatLogStore),
+        Box::new(execution_log_store::ExecutionLogStore),
+    )
+}
 
 pub struct PendingGeneration {
     handle: tokio::task::JoinHandle<()>,
@@ -460,7 +472,8 @@ pub async fn send_chat_message(
     // the fallback for a mix-mode local attempt that escalates or fails
     // below. Never has `task-router-rules.md` appended -- only the
     // local attempt's own message list does.
-    let default_messages = prompt::assemble_messages(&persona, language, &context, &message);
+    let default_messages =
+        context_manager().build_context(&session_path, &persona, language, &message).await;
 
     let partial_text = Arc::new(Mutex::new(String::new()));
     let task_app = app.clone();
@@ -797,14 +810,7 @@ async fn stream_to_completion(
         true,
     );
     let final_text = partial_text.lock().unwrap().clone();
-    chat_log_store::append_entry(
-        &turn.session_path,
-        &LogEntry {
-            role: LogRole::Assistant,
-            content: final_text.clone(),
-            timestamp: now_rfc3339(),
-        },
-    );
+    context_manager().record_execution(&turn.session_path, &final_text).await;
     channel.send(ChatEvent::Done { content: final_text }).ok();
     clear_pending(&app);
     mark_unread_unless_focused(&app, UnreadKind::Reply);
@@ -876,14 +882,7 @@ async fn run_generation_with_tools(
         Ok(outcome) => {
             turn.recorder.mark_completed(None, None, outcome.trace);
             let final_text = partial_text.lock().unwrap().clone();
-            chat_log_store::append_entry(
-                &turn.session_path,
-                &LogEntry {
-                    role: LogRole::Assistant,
-                    content: final_text.clone(),
-                    timestamp: now_rfc3339(),
-                },
-            );
+            context_manager().record_execution(&turn.session_path, &final_text).await;
             channel.send(ChatEvent::Done { content: final_text }).ok();
             clear_pending(&app);
             mark_unread_unless_focused(&app, UnreadKind::Reply);
@@ -1038,14 +1037,7 @@ async fn run_generation_mix_local(
                 );
                 drop(turn);
                 let final_text = partial_text.lock().unwrap().clone();
-                chat_log_store::append_entry(
-                    &session_path,
-                    &LogEntry {
-                        role: LogRole::Assistant,
-                        content: final_text.clone(),
-                        timestamp: now_rfc3339(),
-                    },
-                );
+                context_manager().record_execution(&session_path, &final_text).await;
                 channel.send(ChatEvent::Done { content: final_text }).ok();
                 clear_pending(&app);
                 mark_unread_unless_focused(&app, UnreadKind::Reply);

@@ -35,7 +35,7 @@ pub use agent_runtime::{
     PermissionDecider, ToolInvocation, ToolOutcome, ToolRegistry,
 };
 pub use agent_tool::{PermissionTier, Tool, ToolContext, ToolError, ToolResult};
-pub use context_manager::{AemeathContextManager, ContextManager, SessionLog};
+pub use context_manager::{AemeathContextManager, ContextManager, ExecutionLog, SessionLog};
 pub use conversation::ConversationId;
 pub use credentials::ProviderCredentials;
 pub use execution::{
