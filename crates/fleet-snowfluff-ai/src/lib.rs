@@ -17,6 +17,7 @@ pub mod agent_tool;
 pub mod context_manager;
 pub mod conversation;
 pub mod credentials;
+pub mod execution;
 pub mod limits;
 pub mod log;
 pub mod message;
@@ -37,6 +38,10 @@ pub use agent_tool::{PermissionTier, Tool, ToolContext, ToolError, ToolResult};
 pub use context_manager::{AemeathContextManager, ContextManager, SessionLog};
 pub use conversation::ConversationId;
 pub use credentials::ProviderCredentials;
+pub use execution::{
+    pair_events, parse_events, serialize_event, Execution, ExecutionEnd, ExecutionEvent,
+    ExecutionId, ExecutionPath, ExecutionStart, ExecutionStatus,
+};
 pub use log::{LogEntry, LogRole};
 pub use message::{
     Message, ModelInfo, ProviderError, ProviderKind, Role, StreamChunk, ToolCallRecord,

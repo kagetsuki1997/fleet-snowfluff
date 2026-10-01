@@ -10,6 +10,7 @@ pub mod cli_session_store;
 pub mod cli_workdir;
 pub mod commands;
 pub mod config_store;
+pub mod execution_log_store;
 pub mod persona_store;
 pub mod secrets_store;
 pub mod session_domain;

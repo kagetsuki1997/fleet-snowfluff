@@ -59,7 +59,8 @@ fn capped_arguments_preview(arguments: &Value) -> String {
 /// content from the call itself -- the one outcome where the call never
 /// reached `execute()`, so there is no tool-side result to protect, and
 /// the argument is the only available diagnostic for why it failed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ToolOutcome {
     /// Reached `execute()`; `ok` is `false` for a `ToolError` or a
     /// `ToolResult { is_error: true, .. }`, exactly the same distinction
@@ -80,7 +81,7 @@ pub enum ToolOutcome {
 
 /// One tool call's name and what became of it, in the order the model
 /// requested it.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ToolInvocation {
     pub name: String,
     pub outcome: ToolOutcome,

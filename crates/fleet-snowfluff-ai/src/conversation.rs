@@ -16,7 +16,7 @@ use std::path::Path;
 /// that doesn't exist yet. Kept behind this one function rather than
 /// inlined at call sites specifically so that if that changes later,
 /// it's a one-place edit, not a search-and-replace.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ConversationId(String);
 
 impl ConversationId {
