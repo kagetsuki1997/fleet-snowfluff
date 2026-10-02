@@ -18,11 +18,11 @@ use std::{
 use fleet_snowfluff_ai::{
     detect_escalation, log::LogRole, with_task_router_rules, AemeathAgentRuntime,
     AemeathContextManager, AgentRuntime, AiProvider, AiSettings, AuthMethod, ChatStream,
-    ClaudeCodeToolAccess, CliContext, ContextManager, DefaultTaskRouter, EscalationDecision,
-    ExecutionPath, GetSystemContextTool, Language, ListDirectoryTool, LogEntry, Message, Persona,
-    ProfileKey, ProviderCredentials, ProviderKind, ProviderProfile, ReadFileTool, ResponseLanguage,
-    RoutingContext, RunCommandTool, Task, TaskRouter, TaskRouterMode, ToolCallingProvider,
-    ToolContext, ToolRegistry, WebSearchTool,
+    ClaudeCodeToolAccess, CliContext, ContextManager, DefaultTaskRouter, DelegateTool,
+    EscalationDecision, ExecutionPath, GetSystemContextTool, Language, ListDirectoryTool, LogEntry,
+    Message, Persona, ProfileKey, ProviderCredentials, ProviderKind, ProviderProfile, ReadFileTool,
+    ResponseLanguage, RoutingContext, RunCommandTool, Task, TaskRouter, TaskRouterMode,
+    ToolCallingProvider, ToolContext, ToolRegistry, WebSearchTool,
 };
 use futures_util::StreamExt;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
@@ -908,6 +908,23 @@ async fn stream_to_completion(
     mark_unread_unless_focused(&app, UnreadKind::Reply);
 }
 
+/// Every native tool a `ToolCapable` profile is offered, including
+/// `delegate_task` (`sub-agent-delegation`). Factored out of
+/// `run_generation_with_tools` so it's directly testable without an
+/// `AppHandle` -- every one of these is a plain, app-handle-free
+/// `Arc::new(DefaultStruct)` construction already, so pulling the list
+/// itself out costs nothing.
+fn native_tool_registry() -> ToolRegistry {
+    ToolRegistry::new(vec![
+        Arc::new(WebSearchTool::default()),
+        Arc::new(ReadFileTool),
+        Arc::new(ListDirectoryTool),
+        Arc::new(RunCommandTool::default()),
+        Arc::new(GetSystemContextTool),
+        Arc::new(DelegateTool),
+    ])
+}
+
 /// Same contract as `run_generation`, but for a `ToolCapable` provider:
 /// runs `AemeathAgentRuntime` instead of a plain `chat()` stream. Text
 /// deltas stream live via the `on_text_delta` callback (see
@@ -946,13 +963,7 @@ async fn run_generation_with_tools(
     // below, with the loop's own tool trace -- every turn gets an
     // `Execution` record uniformly, CLI session or not.
     let ctx = ToolContext { project_root, conversation_id: conversation_id.clone() };
-    let registry = ToolRegistry::new(vec![
-        Arc::new(WebSearchTool::default()),
-        Arc::new(ReadFileTool),
-        Arc::new(ListDirectoryTool),
-        Arc::new(RunCommandTool::default()),
-        Arc::new(GetSystemContextTool),
-    ]);
+    let registry = native_tool_registry();
     let runtime = AemeathAgentRuntime::default();
     let permission = crate::tool_confirmation::PopupPermissionDecider {
         app: app.clone(),
@@ -1674,5 +1685,14 @@ mod tests {
 
         assert!(deleted);
         assert!(!transcript.exists());
+    }
+
+    #[test]
+    fn native_tool_registry_offers_delegate_task_alongside_the_five_native_tools() {
+        let registry = native_tool_registry();
+        let names: Vec<String> = registry.definitions().into_iter().map(|d| d.name).collect();
+        assert_eq!(names.len(), 6);
+        assert!(names.contains(&"delegate_task".to_string()));
+        assert!(registry.find("delegate_task").is_some());
     }
 }
