@@ -3324,9 +3324,13 @@ design.md）：
   `record_execution` 唯一新增的事是讀（供下一輪的工具活動摘要用），寫的部分還是只有
   transcript 本身
 
-### Stage 5 — Sub-agent / Delegation
+### Stage 5 — Sub-agent / Delegation（已完成）
 
-（原本在 Stage 3 內，獨立成自己的階段 —— 見第 6.13 節的完整設計。）
+（原本在 Stage 3 內，獨立成自己的階段 —— 見第 6.13 節的完整設計。已以
+`sub-agent-delegation` 這個 change 實作並 archive；下面是原始提案，與下方
+「實際做法與提案的落差」對照著看，落差比 Stage 4.5 當年還大——`/opsx:explore`
+
+- `/grill-me` 的 grill 階段把範圍一路收斂到比 §6.13 的完整願景小得多的東西。）
 
 建立：
 
@@ -3337,15 +3341,35 @@ design.md）：
 
 **不含** Context Engine 的 Sub-agent Context Projection（`SubAgentContextSpec`、
 `build_sub_agent_context`，第 10.1 節）——改到 Stage 7，見上方 §10 的
-「實作時機」說明。本階段的實際落地細節（例如最終是否真的需要一個獨立的
-`DelegationManager` struct，或是在 Agent Loop 內 ad hoc 處理就夠）留給該
-stage 自己的 change proposal 決定，這裡只記錄依賴關係與不含的範圍。
+「實作時機」說明。
 
 依賴 Stage 3（要有可委派的 Agent Loop）、Stage 4（child 可能委派給 CLI runtime，需要
 CLI session 連續性與 working directory 行為已修正）與 Stage 4.5（Execution record 與
 `ContextManager` 接線已存在；本階段在其上以 additive 方式加入 `parent_execution_id` /
 `ExecutionKind` 與 context projection）。`SessionManager`、Runtime Adapter 若 delegation
 需要，在本階段依真實 consumer 補上，而不是預先猜測。
+
+**實際做法與提案的落差**（`sub-agent-delegation` 實作時發現/決定的，記錄於該 change 的
+design.md）：
+
+- 沒有獨立的 `DelegationManager` struct——delegation 直接特判在
+  `AemeathAgentRuntime::run()` 自己的 dispatch 裡，因為 `Tool::execute()` 的
+  signature 本來就拿不到 recursion 需要的 `provider`/`registry`/`permission`
+- 沒有 `parent_execution_id`/`ExecutionKind`/任何 persisted child `Execution`——
+  depth 固定卡在 1 層，没有 tree 需要可視化，child 的結果直接併進 parent 自己的
+  tool-call trace（一筆普通的 `ToolInvocation`），`execution-log-and-context`
+  已經做好的 tool-activity note 因此自動吃得到，不用再加新東西
+- 沒有獨立的「parallel fan-out / join」機制——改成一個更通用的改動：同一輪裡
+  任何被允許自動執行的 tool call（不只 delegate_task）現在都會並發執行（有上限，
+  `MAX_CONCURRENT_TOOL_CALLS = 3`），delegation 只是搭這班車，不是另外的管線
+- guardrails 實際只落地了depth（結構性、靠 child 的 registry 排除
+  `delegate_task`，不是跑時計數器）、concurrency（上面那個上限）、permission
+  ceiling（child 重用 parent 一模一樣的 `ToolContext`/tier 判斷，天生不會更寬）；
+  budget/cost 明確沒做——沒有任何 token/cost ledger 存在過，不論 parent 或
+  child，先留著當已知落差
+- child 沒有拿到 parent 的任何 context projection（如上，改到 Stage 7），也沒有
+  不同 runtime 的能力（child 永遠重用 parent 當下的 profile）——`TaskRouter`
+  從來沒有 capability-aware 的邏輯，不只 delegation 沒有
 
 ### Stage 6 — MCP + Context Awareness
 
