@@ -47,6 +47,7 @@ pub struct ToolConfirmationResponse {
 }
 
 struct PendingBatch {
+    id: u64,
     items: Vec<PendingConfirmationItem>,
     responder: oneshot::Sender<Vec<ToolConfirmationResponse>>,
 }
@@ -129,6 +130,42 @@ fn close(app: &AppHandle) {
     }
 }
 
+/// Guarantees this call's own batch is removed from the queue once
+/// `confirm_via_popup` is done with it -- whether that's because
+/// `resolve_tool_confirmations` already popped it (the normal path;
+/// removing it again here is then a harmless no-op), or because the
+/// generation that requested it was aborted (Stop) while still
+/// awaiting a response. Without this, an aborted generation's batch
+/// was never removed -- it isn't a local variable's problem, it was
+/// already pushed into `ToolConfirmationState.pending`, global state
+/// with no lifetime tied to the task that pushed it -- and sat
+/// orphaned in the queue, resurfacing (with a responder nothing will
+/// ever read from again) the next time *any* generation needed
+/// confirmation, ahead of its own real batch. Same RAII-on-abort
+/// pattern as `ExecutionRecorder`: `tokio::task::JoinHandle::abort()`
+/// drops the task at its next await point, so this guard's `Drop` is
+/// the only code that reliably runs either way. Folds in the
+/// queue-is-empty-so-close-the-window check too, so both the normal
+/// and aborted paths get exactly one cleanup, not two slightly
+/// different ones.
+struct PendingBatchGuard {
+    app: AppHandle,
+    id: u64,
+}
+
+impl Drop for PendingBatchGuard {
+    fn drop(&mut self) {
+        let state = self.app.state::<ToolConfirmationState>();
+        let mut pending = state.pending.lock().unwrap();
+        pending.retain(|batch| batch.id != self.id);
+        let now_empty = pending.is_empty();
+        drop(pending);
+        if now_empty {
+            close(&self.app);
+        }
+    }
+}
+
 /// Opens (or focuses) the confirmation window, enqueues `items` as a
 /// new batch, and blocks until `resolve_tool_confirmations` is called
 /// for *this* batch specifically (or the window closes without one).
@@ -142,18 +179,16 @@ async fn confirm_via_popup(
     app: &AppHandle,
     items: Vec<PendingConfirmationItem>,
 ) -> Vec<ToolConfirmationResponse> {
+    let id: u64 = rand::random();
     let (tx, rx) = oneshot::channel();
-    app.state::<ToolConfirmationState>()
-        .pending
-        .lock()
-        .unwrap()
-        .push_back(PendingBatch { items, responder: tx });
+    app.state::<ToolConfirmationState>().pending.lock().unwrap().push_back(PendingBatch {
+        id,
+        items,
+        responder: tx,
+    });
     open_or_focus(app);
-    let responses = rx.await.unwrap_or_default();
-    if app.state::<ToolConfirmationState>().pending.lock().unwrap().is_empty() {
-        close(app);
-    }
-    responses
+    let _guard = PendingBatchGuard { app: app.clone(), id };
+    rx.await.unwrap_or_default()
 }
 
 /// A short, human-legible description of `args` for the confirmation
@@ -393,16 +428,16 @@ mod tests {
         let state = ToolConfirmationState::default();
         let (tx_a, rx_a) = oneshot::channel();
         let (tx_b, mut rx_b) = oneshot::channel();
-        state
-            .pending
-            .lock()
-            .unwrap()
-            .push_back(PendingBatch { items: vec![item("call_a")], responder: tx_a });
-        state
-            .pending
-            .lock()
-            .unwrap()
-            .push_back(PendingBatch { items: vec![item("call_b")], responder: tx_b });
+        state.pending.lock().unwrap().push_back(PendingBatch {
+            id: 1,
+            items: vec![item("call_a")],
+            responder: tx_a,
+        });
+        state.pending.lock().unwrap().push_back(PendingBatch {
+            id: 2,
+            items: vec![item("call_b")],
+            responder: tx_b,
+        });
 
         // The front of the queue is batch A -- not silently overwritten
         // by batch B arriving while A is still unresolved.
@@ -442,20 +477,64 @@ mod tests {
         let state = ToolConfirmationState::default();
         let (tx_a, rx_a) = oneshot::channel();
         let (tx_b, rx_b) = oneshot::channel();
-        state
-            .pending
-            .lock()
-            .unwrap()
-            .push_back(PendingBatch { items: vec![item("call_a")], responder: tx_a });
-        state
-            .pending
-            .lock()
-            .unwrap()
-            .push_back(PendingBatch { items: vec![item("call_b")], responder: tx_b });
+        state.pending.lock().unwrap().push_back(PendingBatch {
+            id: 1,
+            items: vec![item("call_a")],
+            responder: tx_a,
+        });
+        state.pending.lock().unwrap().push_back(PendingBatch {
+            id: 2,
+            items: vec![item("call_b")],
+            responder: tx_b,
+        });
 
         state.pending.lock().unwrap().clear();
 
         assert!(rx_a.await.unwrap_or_default().is_empty());
         assert!(rx_b.await.unwrap_or_default().is_empty());
+    }
+
+    /// Reproduces the bug `PendingBatchGuard` fixes: a generation
+    /// aborted (Stop) mid-`rx.await` must not leave its own batch
+    /// orphaned in the queue to resurface for a later, unrelated
+    /// generation. This mirrors `PendingBatchGuard::drop`'s own
+    /// `retain`-by-id step directly against the queue -- no `AppHandle`
+    /// is needed to exercise it, same reasoning as the other tests in
+    /// this module -- standing in for the guard being dropped by task
+    /// abortion before its `oneshot::Receiver` ever resolved.
+    #[tokio::test]
+    async fn an_abandoned_batch_is_removed_by_id_not_left_to_resurface() {
+        let state = ToolConfirmationState::default();
+        let (tx_a, _rx_a) = oneshot::channel();
+        let (tx_b, mut rx_b) = oneshot::channel();
+        state.pending.lock().unwrap().push_back(PendingBatch {
+            id: 1,
+            items: vec![item("call_a")],
+            responder: tx_a,
+        });
+        state.pending.lock().unwrap().push_back(PendingBatch {
+            id: 2,
+            items: vec![item("call_b")],
+            responder: tx_b,
+        });
+
+        // Simulates `PendingBatchGuard { id: 1, .. }` being dropped
+        // (its task aborted) before batch A was ever resolved.
+        state.pending.lock().unwrap().retain(|batch| batch.id != 1);
+
+        // Batch A is gone -- not sitting in the queue waiting to
+        // resurface ahead of some later, unrelated generation's batch.
+        let front_items =
+            state.pending.lock().unwrap().front().map(|b| b.items.clone()).unwrap_or_default();
+        assert_eq!(front_items, vec![item("call_b")]);
+        assert_eq!(state.pending.lock().unwrap().len(), 1);
+
+        // Batch B, never targeted by the abort, is untouched.
+        assert!(
+            matches!(rx_b.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "batch B's own receiver must not have resolved yet"
+        );
+        state.pending.lock().unwrap().pop_front().unwrap().responder.send(vec![]).ok();
+        rx_b.await.ok();
     }
 }
