@@ -8,7 +8,10 @@
 //! -- the user must actively respond, unlike the bubble's deliberate
 //! `focused(false)`.
 
-use std::{collections::HashSet, sync::Mutex};
+use std::{
+    collections::{HashSet, VecDeque},
+    sync::Mutex,
+};
 
 use fleet_snowfluff_ai::{PendingToolCall, PermissionDecider, Tool, ToolRegistry};
 use serde_json::Value;
@@ -48,19 +51,26 @@ struct PendingBatch {
     responder: oneshot::Sender<Vec<ToolConfirmationResponse>>,
 }
 
-/// Holds at most one in-flight confirmation batch -- `ai-chat`'s
-/// "Single in-flight generation" already guarantees only one Agent Loop
-/// (and so only one confirmation round) can be active at a time.
+/// A queue, not a single slot: `sub-agent-delegation` is the first
+/// thing to make more than one `AemeathAgentRuntime::run()` call
+/// genuinely concurrent (a parent delegating to several children at
+/// once), so more than one `confirm_via_popup` call can now be
+/// in-flight at the same time. Before that, `ai-chat`'s "Single
+/// in-flight generation" guaranteed only one Agent Loop -- and so only
+/// one confirmation round -- was ever active, which is the only reason
+/// a single slot was ever safe. Each batch is presented in the order it
+/// arrived (FIFO); the window stays open across batches rather than
+/// closing between them (see `confirm_via_popup`).
 #[derive(Default)]
 pub struct ToolConfirmationState {
-    pending: Mutex<Option<PendingBatch>>,
+    pending: Mutex<VecDeque<PendingBatch>>,
 }
 
 #[tauri::command]
 pub fn get_pending_tool_confirmations(
     state: State<ToolConfirmationState>,
 ) -> Vec<PendingConfirmationItem> {
-    state.pending.lock().unwrap().as_ref().map(|batch| batch.items.clone()).unwrap_or_default()
+    state.pending.lock().unwrap().front().map(|batch| batch.items.clone()).unwrap_or_default()
 }
 
 #[tauri::command]
@@ -68,19 +78,21 @@ pub fn resolve_tool_confirmations(
     state: State<ToolConfirmationState>,
     responses: Vec<ToolConfirmationResponse>,
 ) {
-    if let Some(batch) = state.pending.lock().unwrap().take() {
+    if let Some(batch) = state.pending.lock().unwrap().pop_front() {
         batch.responder.send(responses).ok();
     }
 }
 
 /// Opens the window fresh, wiring a `Destroyed` handler so closing it
 /// without an explicit `resolve_tool_confirmations` call (e.g. the OS
-/// close button) still unblocks the waiting Agent Loop -- dropping
-/// `pending` drops the `oneshot::Sender`, which resolves the paired
-/// `Receiver` to `Err`, treated by `confirm_via_popup` as an empty
-/// response list (deny everything in the batch). Registered once, at
-/// creation time, since the handler stays valid for the window's whole
-/// lifetime even as it's shown/focused again for later batches.
+/// close button) still unblocks every waiting Agent Loop, not only
+/// whichever batch happened to be shown -- clearing the whole queue
+/// drops every `PendingBatch`'s `oneshot::Sender`, which resolves each
+/// paired `Receiver` to `Err`, treated by `confirm_via_popup` as an
+/// empty response list (deny everything in that batch). Registered
+/// once, at creation time, since the handler stays valid for the
+/// window's whole lifetime even as it's shown/focused again for later
+/// batches.
 fn open_or_focus(app: &AppHandle) {
     if let Some(window) = app.get_webview_window(CONFIRMATION_WINDOW_LABEL) {
         window.show().ok();
@@ -103,7 +115,7 @@ fn open_or_focus(app: &AppHandle) {
             let app_handle = app.clone();
             window.on_window_event(move |event| {
                 if matches!(event, WindowEvent::Destroyed) {
-                    app_handle.state::<ToolConfirmationState>().pending.lock().unwrap().take();
+                    app_handle.state::<ToolConfirmationState>().pending.lock().unwrap().clear();
                 }
             });
         }
@@ -117,19 +129,30 @@ fn close(app: &AppHandle) {
     }
 }
 
-/// Opens (or focuses) the confirmation window with `items`, blocks
-/// until `resolve_tool_confirmations` is called or the window closes
-/// without one, then closes the window again.
+/// Opens (or focuses) the confirmation window, enqueues `items` as a
+/// new batch, and blocks until `resolve_tool_confirmations` is called
+/// for *this* batch specifically (or the window closes without one).
+/// Concurrent callers (`sub-agent-delegation`'s own concurrent children)
+/// each enqueue their own batch and each await only their own
+/// `oneshot::Receiver` -- `resolve_tool_confirmations` always resolves
+/// whichever batch is at the front of the queue, so batches are
+/// presented in the order they arrived. The window only closes once the
+/// queue is empty again; otherwise it stays open for the next batch.
 async fn confirm_via_popup(
     app: &AppHandle,
     items: Vec<PendingConfirmationItem>,
 ) -> Vec<ToolConfirmationResponse> {
     let (tx, rx) = oneshot::channel();
-    *app.state::<ToolConfirmationState>().pending.lock().unwrap() =
-        Some(PendingBatch { items, responder: tx });
+    app.state::<ToolConfirmationState>()
+        .pending
+        .lock()
+        .unwrap()
+        .push_back(PendingBatch { items, responder: tx });
     open_or_focus(app);
     let responses = rx.await.unwrap_or_default();
-    close(app);
+    if app.state::<ToolConfirmationState>().pending.lock().unwrap().is_empty() {
+        close(app);
+    }
     responses
 }
 
@@ -350,5 +373,89 @@ mod tests {
         let responses = rx.await.unwrap_or_default();
         assert_eq!(responses.len(), 1);
         assert!(responses[0].approved);
+    }
+
+    fn item(id: &str) -> PendingConfirmationItem {
+        PendingConfirmationItem {
+            id: id.to_string(),
+            tool_name: "run_command".to_string(),
+            summary: String::new(),
+            allows_remember: false,
+        }
+    }
+
+    /// Mirrors what two concurrent `confirm_via_popup` calls do to
+    /// `ToolConfirmationState` directly -- no `AppHandle` is needed to
+    /// exercise the queue itself, the same reasoning every other test
+    /// in this module already relies on.
+    #[tokio::test]
+    async fn a_second_batch_does_not_clobber_the_first() {
+        let state = ToolConfirmationState::default();
+        let (tx_a, rx_a) = oneshot::channel();
+        let (tx_b, mut rx_b) = oneshot::channel();
+        state
+            .pending
+            .lock()
+            .unwrap()
+            .push_back(PendingBatch { items: vec![item("call_a")], responder: tx_a });
+        state
+            .pending
+            .lock()
+            .unwrap()
+            .push_back(PendingBatch { items: vec![item("call_b")], responder: tx_b });
+
+        // The front of the queue is batch A -- not silently overwritten
+        // by batch B arriving while A is still unresolved.
+        let front_items =
+            state.pending.lock().unwrap().front().map(|b| b.items.clone()).unwrap_or_default();
+        assert_eq!(front_items, vec![item("call_a")]);
+
+        // Resolving the front pops batch A and sends to *its* responder.
+        let popped = state.pending.lock().unwrap().pop_front().unwrap();
+        popped
+            .responder
+            .send(vec![ToolConfirmationResponse {
+                id: "call_a".to_string(),
+                approved: true,
+                remember: false,
+            }])
+            .ok();
+        let response_a = rx_a.await.unwrap_or_default();
+        assert_eq!(response_a.len(), 1, "batch A's own responder received its own response");
+
+        // Batch B is still intact, now at the front -- it was never
+        // dropped or denied by batch A's arrival or resolution.
+        let front_items =
+            state.pending.lock().unwrap().front().map(|b| b.items.clone()).unwrap_or_default();
+        assert_eq!(front_items, vec![item("call_b")]);
+        assert!(
+            matches!(rx_b.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+            "batch B's own receiver must not have resolved yet"
+        );
+    }
+
+    #[tokio::test]
+    async fn clearing_the_queue_denies_every_outstanding_batch() {
+        // Mirrors the window's `Destroyed` handler: every batch still
+        // in the queue when the window closes is denied, not only
+        // whichever one happened to be shown.
+        let state = ToolConfirmationState::default();
+        let (tx_a, rx_a) = oneshot::channel();
+        let (tx_b, rx_b) = oneshot::channel();
+        state
+            .pending
+            .lock()
+            .unwrap()
+            .push_back(PendingBatch { items: vec![item("call_a")], responder: tx_a });
+        state
+            .pending
+            .lock()
+            .unwrap()
+            .push_back(PendingBatch { items: vec![item("call_b")], responder: tx_b });
+
+        state.pending.lock().unwrap().clear();
+
+        assert!(rx_a.await.unwrap_or_default().is_empty());
+        assert!(rx_b.await.unwrap_or_default().is_empty());
     }
 }
