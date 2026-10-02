@@ -522,9 +522,11 @@ Runtime Session
 > （見第 13 節）：**
 >
 > - **Stage 3**：`ContextManager` 基礎版——`build_context` / `record_execution`
->   （實作狀態：已定義但尚未接進聊天流程，排入 Stage 4.5，見 §13），
->   讓 Agent Loop 有東西可以組裝；不含 compaction、memory retrieval、sub-agent
->   projection。單一 Execution 就用得到，不需要等 delegation 或 memory 先存在。
+>   （實作狀態：已於 Stage 4.5（`execution-log-and-context`）接進聊天流程，
+>   `chat_commands.rs` 現在是它真正的 caller；`build_context` 另外會讀取上一輪的
+>   `Execution` trace，有工具活動時附上一段摘要），讓 Agent Loop 有東西可以組裝；
+>   不含 compaction、memory retrieval、sub-agent projection。單一 Execution 就用得到，
+>   不需要等 delegation 或 memory 先存在。
 > - **Stage 5**：加上 §10.1 的 Sub-agent Context Projection（`SubAgentContextSpec`、
 >   `build_sub_agent_context`）——這一段邏輯上就是為 delegation 存在的，Stage 5
 >   之前沒有 child execution 可以投影 context 給。
@@ -3265,7 +3267,7 @@ isolation、session recovery。Stage 2 / Stage 3 實作完成後，其中大部�
 無關，也是規則檔已在使用的詞彙。再與各 profile 的 capability descriptor 比對；
 不符時的處理（本機盡力回答 / 仍 escalate 並附註 / 提示使用者到設定開啟）是另一個決策。
 
-### Stage 4.5 — Execution & Conversation Context foundation
+### Stage 4.5 — Execution & Conversation Context foundation（已完成）
 
 （新增。原先把 Execution record 延到 Stage 5、`ContextManager` 接線延到 Stage 5 / 7，理由是
 「沒有 consumer」。Stage 4 完成後 consumer 出現了：**要 resume 的是 Conversation，不是單一
@@ -3274,6 +3276,11 @@ session 參照，下一個 Execution 換成外部模型時，才能 resume 該 r
 context。Stage 4 的 `.sessions.json` sidecar（每個 profile 最新的 session id + cwd +
 `seen_turns` 游標）是這個目標模型中最便宜的一塊，不是終點——它等同於「每個 profile 最後一次
 Execution 的 `external_ref`」。）
+
+（已以 `execution-log-and-context` 這個 change 實作並 archive；下面是原始提案，與下方
+「實際做法與提案的落差」對照著看。`.sessions.json` sidecar 已整個移除，改由
+append-only 的 `<ts>_<id>.executions.jsonl` 取代；`ContextManager`/`AemeathContextManager`
+現在是 `chat_commands.rs` 真正會呼叫的程式碼，不再是沒有 consumer 的薄包裝。）
 
 建立：
 
@@ -3293,6 +3300,22 @@ Execution 的 `external_ref`」。）
   誰負責抽取（runtime 自己輸出，或額外一次 LLM 摘要），與 compaction 是同一類問題，留到
   Stage 7
 - sub-agent 相關欄位與 context projection：留到 Stage 5
+
+**實際做法與提案的落差**（`execution-log-and-context` 實作時發現/決定的，記錄於該 change 的
+design.md）：
+
+- 「開啟較舊的 Conversation」原本待定，最後納入本階段：新增 conversation picker
+  （列出 / 開啟 / 刪除過去的對話）
+- `ExecutionResult` 最小版（output + summary）最終沒有獨立存在；`Execution`/`ExecutionEnd`
+  本身（status、`external_ref`、`seen_turns`、tool trace）已經是 `record_turn_outcome`/
+  `ExecutionRecorder` 需要的全部資訊，不需要再包一層
+- `ContextManager::build_context` 沒有改成以 `Execution` 為參數——它自己透過新的
+  `ExecutionLog` trait 讀取上一輪的 `Execution`，決定要不要在組 context 時附上一段
+  工具活動摘要；呼叫端（`chat_commands.rs`）的參數沒變
+- `record_execution` 沒有另外寫一筆 `Execution` end 紀錄——`ExecutionRecorder`（RAII guard，
+  在 `chat_commands.rs` 這層，每次決定好 route 時就建立）已經寫了 end 事件的每個欄位；
+  `record_execution` 唯一新增的事是讀（供下一輪的工具活動摘要用），寫的部分還是只有
+  transcript 本身
 
 ### Stage 5 — Sub-agent / Delegation
 
@@ -3454,10 +3477,15 @@ Context / execution lifecycle：
 
 - [ ] ConversationContext 作為 cross-execution canonical context
 - [ ] ExecutionContext 作為 per-execution assembled snapshot
-- [ ] ContextManager 負責 build / ingest（註：`AemeathContextManager` 已定義並匯出，但尚未接進 `chat_commands.rs`，目前只是 `assemble_messages` 的薄包裝；Stage 4 刻意不接線，排入 Stage 4.5，見 §13）
-- [ ] ExecutionResult 可產生 summary / facts / decisions / artifacts
-- [ ] 不直接把 external runtime session history 當作 Aemeath Conversation
-- [ ] 不同 runtime 可以只透過 Aemeath Context 共享前一個 Execution 的結果
+- [x] ContextManager 負責 build / ingest（`AemeathContextManager` 已於 Stage 4.5
+      （`execution-log-and-context`）接進 `chat_commands.rs`，`build_context`/`record_execution`
+      是真正的呼叫路徑；`build_context` 會讀取上一輪的 `Execution` trace，有工具活動時附上摘要）
+- [ ] ExecutionResult 可產生 summary / facts / decisions / artifacts（刻意留到 Stage 7，見 Stage 4.5）
+- [x] 不直接把 external runtime session history 當作 Aemeath Conversation（chat 的 transcript
+      一直是 canonical；CLI session 只是 cache，見 Stage 4 的 `cli-session-continuity`）
+- [x] 不同 runtime 可以只透過 Aemeath Context 共享前一個 Execution 的結果（Stage 4.5 的
+      tool-activity note：下一輪不管由哪個 profile 回答，context 都會帶上一段「上一輪工具做了
+      什麼」的摘要）
 
 - [ ] Aemeath Agent Runtime 可以獨立執行完整 agent loop
 - [ ] 模型可以選擇直接回答或呼叫 tool

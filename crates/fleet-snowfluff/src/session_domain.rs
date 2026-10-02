@@ -12,54 +12,30 @@
 //!   `ToolContext` needs it and must not depend on this app crate, so the type
 //!   moved to where both sides can share it, and this module keeps a `pub use`
 //!   so every existing call site here is unaffected.
-//! - **`ExecutionId`**: one turn's execution -- genuinely new. Today a turn is
-//!   only the `send_chat_message` -> `run_generation` call chain, with no id
-//!   and no per-turn recorded state. This module adds the id; it does not add
-//!   execution status, tool trace, timeout, or cancellation-per-execution --
-//!   those are Stage 3's job, once its Agent Core actually needs them and has a
-//!   real shape for them, not guessed at here.
+//! - **`ExecutionId`**: one turn's execution. **Now also defined in
+//!   `fleet-snowfluff-ai`** (`execution.rs`, re-exported below) --
+//!   `execution-log-and-context` needs `Execution`/`ExecutionEvent` records
+//!   constructible from `ContextManager`, which must not depend on this app
+//!   crate, so the id moved for the same reason `ConversationId` already did.
+//!   Originally typing-only and never persisted; now persisted as part of every
+//!   `ExecutionStart`/`ExecutionEnd` event.
 //! - **`ExternalSessionRef`**: a CLI-backed subscription provider's own
 //!   session/thread id (Claude's `session_id`, Codex's `thread_id`) -- already
 //!   exists in substance as the bare `String` values in
 //!   `ChatRuntimeState.cli_sessions`; this gives that a name too.
 //!
-//! `ExecutionId`/`ExternalSessionRef` stay in this app crate -- both are
-//! tied to `ChatRuntimeState`, a purely app-crate/Tauri-runtime concept
-//! with no reason for `fleet-snowfluff-ai` to know about it.
+//! `ExternalSessionRef` stays in this app crate -- it's tied to
+//! `ChatRuntimeState`, a purely app-crate/Tauri-runtime concept with no
+//! reason for `fleet-snowfluff-ai` to know about it. The persisted
+//! execution-log record stores a bare `String` for the same value
+//! (`ExecutionEnd::external_ref`), not this wrapper.
 //!
-//! This is a typing-only pass: nothing here changes observable
-//! behavior, and nothing here is persisted to disk *by this module*
-//! (`cli-session-continuity` later persists `ExternalSessionRef`s
-//! itself, in a sidecar next to the chat log -- see
-//! `cli_session_store` -- without changing these types). `PendingGeneration`
-//! in `chat_commands.rs` is deliberately left untouched (still one
-//! global slot, no `execution_id` field) -- seeing this section's own
-//! design.md entry for why that's not the same call as re-keying
-//! `cli_sessions` (which *is* changed, to include `ConversationId`).
+//! `PendingGeneration` in `chat_commands.rs` is deliberately left
+//! without an `execution_id` field -- see this section's own design.md
+//! entry for why that's not the same call as re-keying `cli_sessions`
+//! (which *is* changed, to include `ConversationId`).
 
-pub use fleet_snowfluff_ai::ConversationId;
-
-/// Identifies one turn's execution -- the `send_chat_message` ->
-/// `run_generation` call chain. Generated fresh per call, never
-/// persisted, never sent over IPC (nothing on the frontend needs
-/// per-execution visibility yet, so it doesn't appear in `ChatEvent`/
-/// `ChatStateSnapshot`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct ExecutionId(u64);
-
-impl ExecutionId {
-    /// A fresh, effectively-unique id for one execution. Uses the
-    /// thread-local RNG already available via the `rand` crate
-    /// (already a workspace dependency, already used the same way by
-    /// `chat_log_store::new_session_path`'s own session id) rather than
-    /// pulling in a UUID crate for a value that's never persisted or
-    /// compared across process restarts.
-    pub fn new() -> Self { Self(rand::random()) }
-}
-
-impl Default for ExecutionId {
-    fn default() -> Self { Self::new() }
-}
+pub use fleet_snowfluff_ai::{ConversationId, ExecutionId};
 
 /// A CLI-backed subscription provider's own session/thread id (Claude's
 /// `session_id`, Codex's `thread_id`) -- a bare wrapper, deliberately
@@ -74,8 +50,9 @@ pub struct ExternalSessionRef(pub String);
 
 /// An [`ExternalSessionRef`] together with the working directory the CLI
 /// was run in when it was created. `cli_sessions` holds these (and the
-/// sidecar file persists them) because a CLI session may only be resumed
-/// from the directory it was created under -- see `cli_session_store`.
+/// conversation's execution log persists them -- see `execution_log_store`)
+/// because a CLI session may only be resumed from the directory it was
+/// created under.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CliSessionEntry {
     pub session: ExternalSessionRef,
@@ -87,17 +64,6 @@ pub struct CliSessionEntry {
     pub seen_turns: usize,
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    // `ConversationId`'s own tests now live with its definition in
-    // `fleet-snowfluff-ai/src/conversation.rs`.
-
-    #[test]
-    fn execution_ids_generated_in_succession_are_distinct() {
-        let ids: Vec<ExecutionId> = (0..100).map(|_| ExecutionId::new()).collect();
-        let unique: std::collections::HashSet<_> = ids.iter().collect();
-        assert_eq!(unique.len(), ids.len(), "100 freshly generated ids should not collide");
-    }
-}
+// `ConversationId`'s and `ExecutionId`'s own tests now live with their
+// definitions in `fleet-snowfluff-ai/src/conversation.rs` and
+// `execution.rs` respectively.

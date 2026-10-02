@@ -99,6 +99,94 @@ pub fn append_entry(path: &Path, entry: &LogEntry) {
     }
 }
 
+/// One entry in the past-conversations list
+/// (`execution-log-and-context`'s "List and open past conversations").
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct ConversationSummary {
+    pub session_path: PathBuf,
+    pub title: String,
+    pub last_activity: String,
+}
+
+const TITLE_MAX_CHARS: usize = 60;
+
+/// Every conversation under `chat-logs/*/*.jsonl`, newest-first: a
+/// directory scan, not an index file kept in sync (design.md's Decision
+/// 7 -- a realistically small number of small log files makes this
+/// unmeasurably fast, and adds no new failure mode).
+pub fn list_conversations(app: &AppHandle) -> Vec<ConversationSummary> {
+    match chat_logs_dir(app) {
+        Some(dir) => list_conversations_in(&dir),
+        None => Vec::new(),
+    }
+}
+
+/// `list_conversations`'s own scan, taking the resolved directory
+/// directly -- `chat_logs_dir` needs an `AppHandle`, which a unit test
+/// doesn't have (same split `find_latest_session`'s own test already
+/// uses, factored into a real function here instead of copy-pasted into
+/// the test).
+fn list_conversations_in(dir: &Path) -> Vec<ConversationSummary> {
+    let Ok(date_entries) = std::fs::read_dir(dir) else { return Vec::new() };
+
+    let mut summaries: Vec<ConversationSummary> = date_entries
+        .flatten()
+        .filter(|date_entry| date_entry.path().is_dir())
+        .filter_map(|date_entry| std::fs::read_dir(date_entry.path()).ok())
+        .flatten()
+        .flatten()
+        .map(|file_entry| file_entry.path())
+        .filter(|path| is_conversation_file(path))
+        .map(|path| summarize_conversation(&path))
+        .collect();
+
+    summaries.sort_by(|a, b| b.last_activity.cmp(&a.last_activity));
+    summaries
+}
+
+/// `Path::extension()` only looks at the text after the *last* `.`, so
+/// a conversation's own `<ts>_<id>.executions.jsonl` sibling
+/// (`execution_log_store::log_path`) also reports an extension of
+/// `jsonl` and would otherwise be mistaken for a second conversation.
+fn is_conversation_file(path: &Path) -> bool {
+    path.extension().and_then(|e| e.to_str()) == Some("jsonl")
+        && !path.to_string_lossy().ends_with(".executions.jsonl")
+}
+
+/// `title` is the first line's content, truncated; `last_activity` is
+/// the last line's own timestamp, or the file's mtime for a
+/// conversation with no entries yet (a session file is created the
+/// moment the first message is appended, so this is reachable for at
+/// most a brief window, not a normal steady state). A corrupt first
+/// line never crashes this -- `read_session`/`parse_log` already skip
+/// an unparsable line, so "first" here means the first *valid* one.
+fn summarize_conversation(path: &Path) -> ConversationSummary {
+    let entries = read_session(path);
+    let title = entries.first().map(|entry| truncate_chars(&entry.content, TITLE_MAX_CHARS));
+    let last_activity = entries
+        .last()
+        .map(|entry| entry.timestamp.clone())
+        .or_else(|| file_mtime_rfc3339(path))
+        .unwrap_or_default();
+    ConversationSummary {
+        session_path: path.to_path_buf(),
+        title: title.unwrap_or_default(),
+        last_activity,
+    }
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    match text.char_indices().nth(max_chars) {
+        Some((byte_index, _)) => text[..byte_index].to_string(),
+        None => text.to_string(),
+    }
+}
+
+fn file_mtime_rfc3339(path: &Path) -> Option<String> {
+    let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+    Some(chrono::DateTime::<Utc>::from(modified).to_rfc3339())
+}
+
 /// Implements `fleet_snowfluff_ai::context_manager::SessionLog` by
 /// delegating straight to `read_session`/`append_entry` above --
 /// `ContextManager` lives in the ai crate and must not depend on this
@@ -206,5 +294,78 @@ mod tests {
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].content, "hi");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    fn entry_at(role: LogRole, content: &str, timestamp: &str) -> LogEntry {
+        LogEntry { role, content: content.to_string(), timestamp: timestamp.to_string() }
+    }
+
+    #[test]
+    fn list_conversations_orders_newest_first_by_last_entry_timestamp() {
+        let dir = temp_dir("list-order");
+        let older = dir.join("2026-09-16").join("20260916T090000Z_0000000000000001.jsonl");
+        let newer = dir.join("2026-09-17").join("20260917T090000Z_0000000000000002.jsonl");
+        append_entry(&older, &entry_at(LogRole::User, "older hello", "2026-09-16T09:00:00Z"));
+        append_entry(&newer, &entry_at(LogRole::User, "newer hello", "2026-09-17T09:00:00Z"));
+
+        let summaries = list_conversations_in(&dir);
+        assert_eq!(summaries.len(), 2);
+        assert_eq!(summaries[0].session_path, newer);
+        assert_eq!(summaries[1].session_path, older);
+        assert_eq!(summaries[0].title, "newer hello");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_conversation_with_no_entries_yet_still_appears_with_an_empty_title() {
+        let dir = temp_dir("list-empty");
+        let path = dir.join("2026-09-17").join("20260917T090000Z_0000000000000001.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "").unwrap();
+
+        let summaries = list_conversations_in(&dir);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].title, "");
+        assert!(!summaries[0].last_activity.is_empty(), "falls back to the file's own mtime");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_corrupt_first_line_does_not_crash_the_scan() {
+        let dir = temp_dir("list-corrupt");
+        let path = dir.join("2026-09-17").join("20260917T090000Z_0000000000000001.jsonl");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let valid =
+            ai_log::serialize_entry(&entry_at(LogRole::User, "still here", "2026-09-17T09:00:00Z"));
+        std::fs::write(&path, format!("not valid json\n{valid}\n")).unwrap();
+
+        let summaries = list_conversations_in(&dir);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].title, "still here");
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn an_executions_log_sibling_is_not_counted_as_its_own_conversation() {
+        let dir = temp_dir("list-executions-sibling");
+        let transcript = dir.join("2026-09-17").join("20260917T090000Z_abc123.jsonl");
+        let executions = dir.join("2026-09-17").join("20260917T090000Z_abc123.executions.jsonl");
+        append_entry(&transcript, &entry_at(LogRole::User, "hello", "2026-09-17T09:00:00Z"));
+        std::fs::write(&executions, "{\"t\":\"start\"}\n").unwrap();
+
+        let summaries = list_conversations_in(&dir);
+        assert_eq!(summaries.len(), 1);
+        assert_eq!(summaries[0].session_path, transcript);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn a_title_longer_than_the_max_is_truncated() {
+        assert_eq!(truncate_chars(&"x".repeat(100), 60).chars().count(), 60);
+        assert_eq!(truncate_chars("short", 60), "short");
     }
 }

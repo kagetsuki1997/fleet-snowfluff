@@ -6,10 +6,11 @@ pub mod chat_commands;
 pub mod chat_log_store;
 pub mod chat_pause;
 pub mod chat_window;
-pub mod cli_session_store;
 pub mod cli_workdir;
 pub mod commands;
 pub mod config_store;
+pub mod execution_log_store;
+pub mod execution_recorder;
 pub mod persona_store;
 pub mod secrets_store;
 pub mod session_domain;
@@ -97,6 +98,9 @@ pub fn run() {
             chat_commands::send_chat_message,
             chat_commands::stop_generation,
             chat_commands::new_chat_session,
+            chat_commands::list_conversations,
+            chat_commands::open_conversation,
+            chat_commands::delete_conversation,
             tool_confirmation::get_pending_tool_confirmations,
             tool_confirmation::resolve_tool_confirmations,
         ])

@@ -3,7 +3,7 @@ import { getVersion } from "@tauri-apps/api/app";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { open as openExternalLink } from "@tauri-apps/plugin-shell";
-import { open as openFolderPicker } from "@tauri-apps/plugin-dialog";
+import { confirm as confirmDialog, open as openFolderPicker } from "@tauri-apps/plugin-dialog";
 import "@picocss/pico/css/pico.min.css";
 import "./style.css";
 
@@ -188,6 +188,13 @@ interface ChatStateSnapshot {
   partial_text: string;
   ai_ready: boolean;
   not_ready_reason: NotReadyReason | null;
+  session_path: string;
+}
+
+interface ConversationSummary {
+  session_path: string;
+  title: string;
+  last_activity: string;
 }
 
 type ChatEvent =
@@ -1067,6 +1074,8 @@ async function renderChatWindow(): Promise<void> {
         <button type="button" id="chat-stop-button" class="secondary" hidden>${t("chat.stop_button")}</button>
       </form>
       <button type="button" id="chat-new-button" class="secondary outline">${t("chat.new_chat_button")}</button>
+      <button type="button" id="chat-conversations-button" class="secondary outline">${t("chat.conversations_button")}</button>
+      <div id="chat-conversations-list" class="chat-conversations-list" hidden></div>
     </main>
   `;
 
@@ -1077,6 +1086,71 @@ async function renderChatWindow(): Promise<void> {
   const sendButton = app.querySelector<HTMLButtonElement>("#chat-send-button")!;
   const stopButton = app.querySelector<HTMLButtonElement>("#chat-stop-button")!;
   const newButton = app.querySelector<HTMLButtonElement>("#chat-new-button")!;
+  const conversationsButton = app.querySelector<HTMLButtonElement>("#chat-conversations-button")!;
+  const conversationsListEl = app.querySelector<HTMLElement>("#chat-conversations-list")!;
+
+  // The currently-open conversation's path, from the last `refresh()` --
+  // used only to mark/grey it out in the picker, never fetched
+  // separately (`ChatStateSnapshot.session_path`, design.md's Decision
+  // 8).
+  let currentSessionPath = "";
+
+  function conversationRowHtml(conversation: ConversationSummary): string {
+    const isCurrent = conversation.session_path === currentSessionPath;
+    const title = conversation.title.trim() || t("chat.conversation_untitled");
+    const when = new Date(conversation.last_activity).toLocaleString();
+    const currentClass = isCurrent ? " chat-conversation-current" : "";
+    const path = escapeHtml(conversation.session_path);
+    const disabled = isCurrent ? "disabled" : "";
+    return `
+      <div class="chat-conversation-row${currentClass}">
+        <button type="button" class="chat-conversation-open" data-path="${path}" ${disabled}>
+          <span class="chat-conversation-title">${escapeHtml(title)}</span>
+          <span class="chat-conversation-time">${escapeHtml(when)}</span>
+        </button>
+        <button type="button" class="chat-conversation-delete" data-path="${path}" ${disabled} aria-label="${t("chat.delete_conversation_button")}">✕</button>
+      </div>
+    `;
+  }
+
+  async function refreshConversationsList(): Promise<void> {
+    const conversations = await invoke<ConversationSummary[]>("list_conversations");
+    conversationsListEl.innerHTML = conversations.map(conversationRowHtml).join("");
+  }
+
+  conversationsButton.addEventListener("click", () => {
+    conversationsListEl.hidden = !conversationsListEl.hidden;
+    if (!conversationsListEl.hidden) void refreshConversationsList();
+  });
+
+  conversationsListEl.addEventListener("click", (e) => {
+    const target = e.target as HTMLElement;
+
+    const deleteButton = target.closest<HTMLButtonElement>(".chat-conversation-delete");
+    if (deleteButton?.dataset.path) {
+      const path = deleteButton.dataset.path;
+      // The backend command does not re-confirm -- this is the one and
+      // only confirm step (design.md's Decision 8). `window.confirm`
+      // is a silent no-op in Tauri's webview (no native dialog host),
+      // so this goes through the dialog plugin instead, same as the
+      // folder picker above.
+      void confirmDialog(t("chat.delete_conversation_confirm")).then((confirmed) => {
+        if (!confirmed) return;
+        void invoke<boolean>("delete_conversation", { path }).then(() =>
+          refreshConversationsList(),
+        );
+      });
+      return;
+    }
+
+    const openButton = target.closest<HTMLButtonElement>(".chat-conversation-open");
+    const path = openButton?.dataset.path;
+    if (!path) return;
+    void invoke("open_conversation", { path }).then(() => {
+      conversationsListEl.hidden = true;
+      return refresh();
+    });
+  });
 
   // The canonical transcript, replaced wholesale by every `refresh()`.
   // A just-sent message is appended here optimistically (not through a
@@ -1138,9 +1212,11 @@ async function renderChatWindow(): Promise<void> {
   async function refresh(): Promise<void> {
     const state = await invoke<ChatStateSnapshot>("get_chat_state");
     committedEntries = state.entries;
+    currentSessionPath = state.session_path;
     renderTranscript(state.is_pending ? state.partial_text : null);
     setPendingUi(state.is_pending);
     updateReadiness(state.ai_ready, state.not_ready_reason);
+    if (!conversationsListEl.hidden) void refreshConversationsList();
     if (state.is_pending) {
       scheduleRefresh(1000);
     } else if (!state.ai_ready) {

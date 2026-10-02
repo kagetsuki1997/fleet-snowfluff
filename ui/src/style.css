@@ -308,6 +308,71 @@ body {
   width: auto;
 }
 
+.chat-conversations-list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 40%;
+  overflow-y: auto;
+}
+
+.chat-conversation-row {
+  display: flex;
+  align-items: stretch;
+  gap: 0.25rem;
+}
+
+.chat-conversation-row.chat-conversation-current {
+  border: 1px solid var(--pico-primary);
+}
+
+.chat-conversation-open {
+  display: flex;
+  flex: 1;
+  min-width: 0;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0.4rem 0.6rem;
+  text-align: left;
+  background: var(--pico-secondary-background);
+  /* Pico's own `button` selector locally redefines the --pico-color
+     custom property to --pico-primary-inverse (light text meant for
+     Pico's colored default button background); this button's own
+     background is the app's muted secondary color instead, so that
+     text reads as near-white on light pink -- unreadable. `inherit`
+     takes the parent `.chat-conversation-row`'s actual text color
+     instead of resolving the shadowed variable, same fix as
+     `.tab-button`'s own documented one above. */
+  color: inherit;
+}
+
+.chat-conversation-delete {
+  flex-shrink: 0;
+  margin: 0;
+  width: auto;
+  padding: 0.4rem 0.6rem;
+  color: inherit;
+}
+
+.chat-conversation-open:disabled,
+.chat-conversation-delete:disabled {
+  opacity: 0.6;
+}
+
+.chat-conversation-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.chat-conversation-time {
+  flex-shrink: 0;
+  font-size: 0.8em;
+  color: var(--pico-muted-color);
+}
+
 .tool-confirmation-window {
   display: flex;
   flex-direction: column;

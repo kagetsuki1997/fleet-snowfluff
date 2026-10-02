@@ -23,6 +23,70 @@ use crate::{
     tool_provider::{ToolCallStreamItem, ToolCallingProvider, ToolDefinition},
 };
 
+/// At most this many bytes of a rejected tool call's raw arguments are
+/// kept for diagnosis (`execution-log-and-context`) -- matching the
+/// magnitude of `run_command`'s and `read_file`'s own output caps, not
+/// because a malformed-arguments blob is a realistic attack surface for
+/// a desktop pet app, but because every other model-originated value
+/// already persisted in this codebase is bounded, and this is the one
+/// new place that persists one.
+const MAX_REJECTED_ARGS_BYTES: usize = 20 * 1024;
+const REJECTED_ARGS_TRUNCATION_MARKER: &str = " ...[truncated]";
+
+/// Serializes `arguments` compactly and caps it at
+/// [`MAX_REJECTED_ARGS_BYTES`], cutting on a UTF-8 character boundary
+/// (never mid-character) the same way `read_file`'s own cap does. A
+/// `Value` that somehow fails to serialize (never happens for anything
+/// `serde_json::from_str` itself produced, which is the only source of
+/// a `Rejected` call's arguments) falls back to a fixed placeholder
+/// rather than panicking.
+fn capped_arguments_preview(arguments: &Value) -> String {
+    let full = serde_json::to_string(arguments)
+        .unwrap_or_else(|_| "<arguments could not be serialized>".to_string());
+    if full.len() <= MAX_REJECTED_ARGS_BYTES {
+        return full;
+    }
+    let mut cut = MAX_REJECTED_ARGS_BYTES;
+    while !full.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}{REJECTED_ARGS_TRUNCATION_MARKER}", &full[..cut])
+}
+
+/// What became of one tool call the model requested, retained after the
+/// agent loop returns (`execution-log-and-context`'s "Tool call outcomes
+/// survive the turn that produced them"). Only `Rejected` keeps any
+/// content from the call itself -- the one outcome where the call never
+/// reached `execute()`, so there is no tool-side result to protect, and
+/// the argument is the only available diagnostic for why it failed.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolOutcome {
+    /// Reached `execute()`; `ok` is `false` for a `ToolError` or a
+    /// `ToolResult { is_error: true, .. }`, exactly the same distinction
+    /// `tool_result_content` already makes for the model-facing message.
+    Executed { ok: bool },
+    /// A `Deny`-tier tool -- a standing policy setting, not a one-off
+    /// choice for this call.
+    DeniedByPolicy,
+    /// A `Confirm`-tier tool the user declined for this call -- a
+    /// one-off choice that might go differently next time, kept
+    /// distinct from `DeniedByPolicy` for exactly that reason.
+    DeclinedByUser,
+    /// An unknown tool name, or arguments that are not a JSON object --
+    /// the two cases the loop already treats identically (an error
+    /// tool-result with no execution attempted).
+    Rejected { arguments_preview: String },
+}
+
+/// One tool call's name and what became of it, in the order the model
+/// requested it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ToolInvocation {
+    pub name: String,
+    pub outcome: ToolOutcome,
+}
+
 /// One tool call the model requested in a single turn, before it's
 /// known whether it's permitted to run -- the unit
 /// [`PermissionDecider::decide`] batches over (the "Batched
@@ -98,10 +162,21 @@ impl std::fmt::Display for AgentError {
 
 impl std::error::Error for AgentError {}
 
+/// The final answer text plus a trace of every tool call attempted
+/// during the turn, in the order the model requested them
+/// (`execution-log-and-context`'s "Tool call outcomes survive the turn
+/// that produced them"). The trace is empty for a turn that made no
+/// tool calls at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentOutcome {
+    pub text: String,
+    pub trace: Vec<ToolInvocation>,
+}
+
 /// Runs the tool-calling loop for a `ToolCallingProvider`. Implementers
 /// never need to manage `Conversation`/session lifecycle themselves --
-/// `run`'s job ends at producing the final answer text, the same
-/// boundary `TaskRouter::route()` draws for itself.
+/// `run`'s job ends at producing the final answer and its tool trace,
+/// the same boundary `TaskRouter::route()` draws for itself.
 ///
 /// `on_text_delta` is invoked for every [`ToolCallStreamItem::TextDelta`]
 /// as it arrives, on *every* iteration -- not just the final one that
@@ -111,7 +186,9 @@ impl std::error::Error for AgentError {}
 /// invisible either way; only real model-generated text ever reaches
 /// this callback. A model that narrates before calling a tool
 /// therefore still streams that narration live, exactly as if the tool
-/// call never happened.
+/// call never happened. The trace returned in `AgentOutcome` is a
+/// separate, after-the-fact summary -- not something `on_text_delta`
+/// or any other callback surfaces live.
 #[async_trait::async_trait]
 pub trait AgentRuntime: Send + Sync {
     async fn run(
@@ -122,7 +199,7 @@ pub trait AgentRuntime: Send + Sync {
         ctx: &ToolContext,
         permission: &dyn PermissionDecider,
         on_text_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
-    ) -> Result<String, AgentError>;
+    ) -> Result<AgentOutcome, AgentError>;
 }
 
 /// The runtime this change actually ships. `max_iterations` guards
@@ -160,8 +237,9 @@ impl AgentRuntime for AemeathAgentRuntime {
         ctx: &ToolContext,
         permission: &dyn PermissionDecider,
         on_text_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
-    ) -> Result<String, AgentError> {
+    ) -> Result<AgentOutcome, AgentError> {
         let mut last_text = String::new();
+        let mut trace: Vec<ToolInvocation> = Vec::new();
 
         for _ in 0..self.max_iterations {
             let mut stream = provider
@@ -185,7 +263,7 @@ impl AgentRuntime for AemeathAgentRuntime {
             last_text = text.clone();
 
             if calls.is_empty() {
-                return Ok(text);
+                return Ok(AgentOutcome { text, trace });
             }
 
             messages.push(Message::assistant_with_tool_calls(
@@ -212,6 +290,12 @@ impl AgentRuntime for AemeathAgentRuntime {
                         call.id.clone(),
                         format!("Error: unknown tool \"{}\"", call.name),
                     ));
+                    trace.push(ToolInvocation {
+                        name: call.name.clone(),
+                        outcome: ToolOutcome::Rejected {
+                            arguments_preview: capped_arguments_preview(&call.arguments),
+                        },
+                    });
                     continue;
                 };
                 if !call.arguments.is_object() {
@@ -219,19 +303,32 @@ impl AgentRuntime for AemeathAgentRuntime {
                         call.id.clone(),
                         format!("Error: arguments for \"{}\" must be a JSON object", call.name),
                     ));
+                    trace.push(ToolInvocation {
+                        name: call.name.clone(),
+                        outcome: ToolOutcome::Rejected {
+                            arguments_preview: capped_arguments_preview(&call.arguments),
+                        },
+                    });
                     continue;
                 }
                 match tool.required_permission(&call.arguments, ctx) {
                     PermissionTier::Auto => {
                         let id = call.id.clone();
+                        let name = call.name.clone();
                         let result = execute(&tool, call.arguments, ctx).await;
+                        let ok = !result.is_error;
                         messages.push(Message::tool_result(id, tool_result_content(result)));
+                        trace.push(ToolInvocation { name, outcome: ToolOutcome::Executed { ok } });
                     }
                     PermissionTier::Deny => {
                         messages.push(Message::tool_result(
                             call.id.clone(),
                             format!("Error: \"{}\" was not permitted to run", call.name),
                         ));
+                        trace.push(ToolInvocation {
+                            name: call.name.clone(),
+                            outcome: ToolOutcome::DeniedByPolicy,
+                        });
                     }
                     PermissionTier::Confirm => pending_confirm.push((call, tool)),
                 }
@@ -244,13 +341,20 @@ impl AgentRuntime for AemeathAgentRuntime {
                 for (call, tool) in pending_confirm {
                     if approved.contains(&call.id) {
                         let id = call.id.clone();
+                        let name = call.name.clone();
                         let result = execute(&tool, call.arguments, ctx).await;
+                        let ok = !result.is_error;
                         messages.push(Message::tool_result(id, tool_result_content(result)));
+                        trace.push(ToolInvocation { name, outcome: ToolOutcome::Executed { ok } });
                     } else {
                         messages.push(Message::tool_result(
                             call.id.clone(),
                             format!("Error: \"{}\" was not permitted to run", call.name),
                         ));
+                        trace.push(ToolInvocation {
+                            name: call.name.clone(),
+                            outcome: ToolOutcome::DeclinedByUser,
+                        });
                     }
                 }
             }
@@ -287,6 +391,80 @@ mod tests {
             project_root: None,
             conversation_id: ConversationId::from_session_path(std::path::Path::new("/tmp/x")),
         }
+    }
+
+    // -- execution-log-and-context: ToolOutcome/ToolInvocation/AgentOutcome --
+
+    #[test]
+    fn every_tool_outcome_round_trips_through_construction_and_equality() {
+        let outcomes = [
+            ToolOutcome::Executed { ok: true },
+            ToolOutcome::Executed { ok: false },
+            ToolOutcome::DeniedByPolicy,
+            ToolOutcome::DeclinedByUser,
+            ToolOutcome::Rejected { arguments_preview: "{}".to_string() },
+        ];
+        for outcome in outcomes {
+            let invocation = ToolInvocation { name: "alpha".to_string(), outcome: outcome.clone() };
+            assert_eq!(invocation.outcome, outcome);
+            assert_eq!(invocation.clone(), invocation);
+        }
+    }
+
+    #[test]
+    fn an_agent_outcome_round_trips() {
+        let outcome = AgentOutcome {
+            text: "done".to_string(),
+            trace: vec![ToolInvocation {
+                name: "alpha".to_string(),
+                outcome: ToolOutcome::Executed { ok: true },
+            }],
+        };
+        assert_eq!(outcome.clone(), outcome);
+    }
+
+    #[test]
+    fn arguments_within_the_cap_are_kept_verbatim() {
+        let args = json!({"path": "a.txt"});
+        assert_eq!(capped_arguments_preview(&args), r#"{"path":"a.txt"}"#);
+    }
+
+    #[test]
+    fn arguments_exactly_at_the_cap_are_not_marked_truncated() {
+        // Build a JSON string of exactly MAX_REJECTED_ARGS_BYTES bytes.
+        let filler = "x".repeat(MAX_REJECTED_ARGS_BYTES - 2); // minus the quotes
+        let args = Value::String(filler);
+        let preview = capped_arguments_preview(&args);
+        assert_eq!(preview.len(), MAX_REJECTED_ARGS_BYTES);
+        assert!(!preview.contains("truncated"));
+    }
+
+    #[test]
+    fn arguments_over_the_cap_are_truncated_with_a_visible_marker() {
+        let filler = "x".repeat(MAX_REJECTED_ARGS_BYTES * 3);
+        let args = Value::String(filler);
+        let preview = capped_arguments_preview(&args);
+        assert!(preview.starts_with("\"xxxx"));
+        assert!(preview.ends_with(REJECTED_ARGS_TRUNCATION_MARKER));
+        assert_eq!(preview.len(), MAX_REJECTED_ARGS_BYTES + REJECTED_ARGS_TRUNCATION_MARKER.len());
+    }
+
+    #[test]
+    fn truncation_never_splits_a_multi_byte_character_in_the_arguments_preview() {
+        // "雪" is 3 bytes in UTF-8; cutting at a raw byte count with no
+        // regard for character boundaries would, for most lengths, land
+        // mid-character. This only exercises the function's own
+        // boundary-walking, not a specific cap-size/char-width
+        // coincidence, so it doesn't matter whether `MAX_REJECTED_ARGS_BYTES`
+        // happens to be a multiple of 3.
+        let filler = "雪".repeat(MAX_REJECTED_ARGS_BYTES);
+        let args = Value::String(filler);
+        let preview = capped_arguments_preview(&args);
+        assert!(preview.ends_with(REJECTED_ARGS_TRUNCATION_MARKER));
+        let kept = preview.strip_suffix(REJECTED_ARGS_TRUNCATION_MARKER).unwrap();
+        assert!(kept.is_char_boundary(kept.len()), "the kept prefix must end on a char boundary");
+        assert!(!kept.contains('\u{FFFD}'), "no replacement characters from a split boundary");
+        assert!(kept.len() <= MAX_REJECTED_ARGS_BYTES);
     }
 
     /// Approves every call it's asked about -- the default for tests
@@ -439,7 +617,21 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result, "done");
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            result.trace,
+            vec![
+                ToolInvocation {
+                    name: "alpha".to_string(),
+                    outcome: ToolOutcome::Executed { ok: true }
+                },
+                ToolInvocation {
+                    name: "beta".to_string(),
+                    outcome: ToolOutcome::Executed { ok: true }
+                },
+            ],
+            "the trace accumulates across iterations, not just the final text-only one"
+        );
         assert_eq!(*alpha.calls.lock().unwrap(), 1);
         assert_eq!(*beta.calls.lock().unwrap(), 1);
     }
@@ -500,6 +692,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn all_five_tool_outcomes_in_one_turn_produce_a_trace_in_call_order() {
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                ToolCallStreamItem::ToolCall {
+                    id: "call_0".to_string(),
+                    name: "does_not_exist".to_string(),
+                    arguments: json!({}),
+                },
+                ToolCallStreamItem::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "needs_an_object".to_string(),
+                    arguments: json!("not an object"),
+                },
+                ToolCallStreamItem::ToolCall {
+                    id: "call_2".to_string(),
+                    name: "alpha".to_string(),
+                    arguments: json!({}),
+                },
+                ToolCallStreamItem::ToolCall {
+                    id: "call_3".to_string(),
+                    name: "gamma".to_string(),
+                    arguments: json!({}),
+                },
+                ToolCallStreamItem::ToolCall {
+                    id: "call_4".to_string(),
+                    name: "delta".to_string(),
+                    arguments: json!({}),
+                },
+            ],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let registry = ToolRegistry::new(vec![
+            Arc::new(CountingTool::new("needs_an_object", PermissionTier::Auto)),
+            Arc::new(CountingTool::new("alpha", PermissionTier::Auto)),
+            Arc::new(CountingTool::new("gamma", PermissionTier::Deny)),
+            Arc::new(CountingTool::new("delta", PermissionTier::Confirm)),
+        ]);
+        let runtime = AemeathAgentRuntime::default();
+
+        let result = runtime
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysDeny,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.text, "done");
+        let names: Vec<&str> = result.trace.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["does_not_exist", "needs_an_object", "alpha", "gamma", "delta"]);
+        assert!(matches!(result.trace[0].outcome, ToolOutcome::Rejected { .. }));
+        assert!(matches!(result.trace[1].outcome, ToolOutcome::Rejected { .. }));
+        assert_eq!(result.trace[2].outcome, ToolOutcome::Executed { ok: true });
+        assert_eq!(result.trace[3].outcome, ToolOutcome::DeniedByPolicy);
+        assert_eq!(result.trace[4].outcome, ToolOutcome::DeclinedByUser);
+    }
+
+    #[tokio::test]
     async fn iteration_stops_at_the_limit_without_hanging() {
         let provider = ScriptedProvider::repeating(vec![ToolCallStreamItem::ToolCall {
             id: "call_0".to_string(),
@@ -554,7 +808,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result, "ok");
+        assert_eq!(result.text, "ok");
+        assert_eq!(
+            result.trace,
+            vec![ToolInvocation {
+                name: "alpha".to_string(),
+                outcome: ToolOutcome::DeniedByPolicy
+            }]
+        );
         assert_eq!(*alpha.calls.lock().unwrap(), 0, "a Deny-tier call must never reach execute()");
     }
 
@@ -635,7 +896,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert_eq!(result, "ok");
+        assert_eq!(result.text, "ok");
+        assert!(matches!(
+            result.trace.as_slice(),
+            [ToolInvocation { name, outcome: ToolOutcome::Rejected { .. } }] if name == "does_not_exist"
+        ));
     }
 
     #[tokio::test]
@@ -672,7 +937,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result, "done");
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            result.trace,
+            vec![ToolInvocation {
+                name: "alpha".to_string(),
+                outcome: ToolOutcome::Executed { ok: true }
+            }]
+        );
         assert_eq!(*streamed.lock().unwrap(), "checkingdone");
     }
 }

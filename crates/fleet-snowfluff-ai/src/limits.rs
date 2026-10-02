@@ -7,4 +7,4 @@
 pub const CONTEXT_WINDOW_TURNS: usize = 20;
 
 /// Maximum output tokens requested per reply, across every provider.
-pub const MAX_RESPONSE_TOKENS: u32 = 300;
+pub const MAX_RESPONSE_TOKENS: u32 = 4096;

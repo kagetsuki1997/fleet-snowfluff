@@ -22,6 +22,8 @@
 use std::path::Path;
 
 use crate::{
+    agent_runtime::{ToolInvocation, ToolOutcome},
+    execution::{Execution, ExecutionEvent},
     log::{self, LogEntry, LogRole},
     message::Message,
     persona::{Language, Persona},
@@ -37,6 +39,20 @@ use crate::{
 pub trait SessionLog: Send + Sync {
     fn read(&self, session_path: &Path) -> Vec<LogEntry>;
     fn append(&self, session_path: &Path, entry: &LogEntry);
+}
+
+/// Reads and appends a conversation's execution log --
+/// `execution-log-and-context`'s design.md Decision 6. Parallel in shape
+/// to [`SessionLog`] (same reasoning: path resolution needs `AppHandle`,
+/// which this crate must not depend on), implemented in the app crate by
+/// delegating to `execution_log_store`. Kept as a second trait rather
+/// than merged into `SessionLog` because the two are different formats
+/// with different lifetimes, read by the same component for the same
+/// `session_path` but not always by the same future reader (a later
+/// Stage 7 compaction reader, say, may legitimately want only one).
+pub trait ExecutionLog: Send + Sync {
+    fn read(&self, session_path: &Path) -> Vec<Execution>;
+    fn append(&self, session_path: &Path, event: &ExecutionEvent);
 }
 
 /// Decides "what to bring" for a turn and records what came of it --
@@ -65,15 +81,51 @@ pub trait ContextManager: Send + Sync {
 }
 
 /// The `ContextManager` this change actually ships, generic over
-/// nothing -- it holds its `SessionLog` behind a trait object, the same
-/// way `WebSearchTool` holds its `SearchTransport`, since callers
-/// construct exactly one and never need to know its concrete type.
+/// nothing -- it holds its `SessionLog`/`ExecutionLog` behind trait
+/// objects, the same way `WebSearchTool` holds its `SearchTransport`,
+/// since callers construct exactly one and never need to know its
+/// concrete type.
 pub struct AemeathContextManager {
     log: Box<dyn SessionLog>,
+    execution_log: Box<dyn ExecutionLog>,
 }
 
 impl AemeathContextManager {
-    pub fn new(log: Box<dyn SessionLog>) -> Self { Self { log } }
+    pub fn new(log: Box<dyn SessionLog>, execution_log: Box<dyn ExecutionLog>) -> Self {
+        Self { log, execution_log }
+    }
+}
+
+/// Mirrors `providers::history_preamble`'s own header-then-body style
+/// (that module is private to `providers`, so this is a small sibling
+/// rendering, not a shared function -- same presentational convention,
+/// not the same code) for the one other place this codebase splices
+/// non-conversational context ahead of the current message.
+const TOOL_ACTIVITY_HEADER: &str =
+    "Tools were used earlier in this conversation (context only; reply to the current message):";
+
+fn render_tool_line(invocation: &ToolInvocation) -> String {
+    let outcome = match invocation.outcome {
+        ToolOutcome::Executed { ok: true } => "executed successfully",
+        ToolOutcome::Executed { ok: false } => "executed and failed",
+        ToolOutcome::DeniedByPolicy => "denied by standing permission policy",
+        ToolOutcome::DeclinedByUser => "declined by the user",
+        ToolOutcome::Rejected { .. } => "rejected (malformed call)",
+    };
+    format!("- {}: {outcome}", invocation.name)
+}
+
+/// `None` when the immediately preceding `Execution` made no tool calls
+/// (including when there is no preceding `Execution` at all, or it
+/// hasn't finished) -- the common case, where `build_context`'s
+/// behavior must stay exactly what it was before this note existed.
+fn tool_activity_note(prior: Option<&Execution>) -> Option<String> {
+    let trace = &prior?.end.as_ref()?.trace;
+    if trace.is_empty() {
+        return None;
+    }
+    let lines: Vec<String> = trace.iter().map(render_tool_line).collect();
+    Some(format!("{TOOL_ACTIVITY_HEADER}\n{}", lines.join("\n")))
 }
 
 #[async_trait::async_trait]
@@ -87,9 +139,35 @@ impl ContextManager for AemeathContextManager {
     ) -> Vec<Message> {
         let history_entries = self.log.read(session_path);
         let history = log::entries_to_context(&history_entries);
-        prompt::assemble_messages(persona, language, &history, user_message)
+
+        // The immediately preceding `Execution` for this conversation --
+        // `execution_log::read` pairs start/end events in file order, so
+        // the last entry is the most recent one (`execution-log-and-
+        // context`'s "A turn's tool activity informs the next turn's
+        // context"). A discarded `mix`-mode local attempt that escalated
+        // or failed is never last here, since its own fallback's
+        // `Execution` is appended after it -- exactly the one whose
+        // trace (if any) should inform this next turn.
+        let executions = self.execution_log.read(session_path);
+        let user_message = match tool_activity_note(executions.last()) {
+            Some(note) => format!("{note}\n\n{user_message}"),
+            None => user_message.to_string(),
+        };
+
+        prompt::assemble_messages(persona, language, &history, &user_message)
     }
 
+    /// Appends the transcript-facing reply text via `SessionLog`, as
+    /// this always has. Does **not** also append an `Execution` end
+    /// event via `ExecutionLog` -- design.md's Decision 6 considered
+    /// this, but by the time this runs, `ExecutionRecorder` (Decision 5)
+    /// has already written every field of that end event (status,
+    /// external_ref, seen_turns, trace, ended_at) from the
+    /// `chat_commands.rs` level; this method's own signature
+    /// (`session_path`, `reply`) has no further information to
+    /// contribute, so there is nothing left for it to write. The
+    /// `ExecutionLog` side of this type exists for `build_context`'s
+    /// read, not for a second, redundant write here.
     async fn record_execution(&self, session_path: &Path, reply: &str) {
         self.log.append(
             session_path,
@@ -104,7 +182,7 @@ impl ContextManager for AemeathContextManager {
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashMap, sync::Mutex};
+    use std::{collections::HashMap, path::PathBuf, sync::Mutex};
 
     use super::*;
     use crate::persona::parse_persona;
@@ -140,16 +218,74 @@ speech_style: "short"
         }
     }
 
+    /// An in-memory `ExecutionLog` -- mirrors `InMemorySessionLog` above;
+    /// `pair_events` does the real start/end pairing, exercised by
+    /// `execution.rs`'s own tests, so this double only needs to store and
+    /// replay whatever `Execution`s a test seeds it with directly.
+    #[derive(Default)]
+    struct InMemoryExecutionLog {
+        executions: Mutex<HashMap<std::path::PathBuf, Vec<Execution>>>,
+    }
+
+    impl ExecutionLog for InMemoryExecutionLog {
+        fn read(&self, session_path: &Path) -> Vec<Execution> {
+            self.executions.lock().unwrap().get(session_path).cloned().unwrap_or_default()
+        }
+
+        fn append(&self, _session_path: &Path, _event: &ExecutionEvent) {
+            unimplemented!("no test under this module calls record_execution's ExecutionLog side")
+        }
+    }
+
     fn manager_with(entries: Vec<LogEntry>, path: &Path) -> AemeathContextManager {
+        manager_with_executions(entries, Vec::new(), path)
+    }
+
+    fn manager_with_executions(
+        entries: Vec<LogEntry>,
+        executions: Vec<Execution>,
+        path: &Path,
+    ) -> AemeathContextManager {
         let log = InMemorySessionLog::default();
         for entry in entries {
             log.append(path, &entry);
         }
-        AemeathContextManager::new(Box::new(log))
+        let execution_log = InMemoryExecutionLog::default();
+        execution_log.executions.lock().unwrap().insert(path.to_path_buf(), executions);
+        AemeathContextManager::new(Box::new(log), Box::new(execution_log))
     }
 
     fn entry(role: LogRole, content: &str) -> LogEntry {
         LogEntry { role, content: content.to_string(), timestamp: "t".to_string() }
+    }
+
+    fn profile() -> crate::settings::ProfileKey {
+        crate::settings::ProfileKey {
+            provider: crate::message::ProviderKind::Anthropic,
+            auth_method: crate::settings::AuthMethod::Subscription,
+        }
+    }
+
+    /// A finished `Execution` with the given tool trace -- `route`/
+    /// `profile`/`working_dir`/timestamps are irrelevant to
+    /// `tool_activity_note`, which only looks at `end.trace`.
+    fn execution_with_trace(path: &Path, trace: Vec<ToolInvocation>) -> Execution {
+        Execution {
+            id: crate::execution::ExecutionId::new(),
+            conversation_id: crate::conversation::ConversationId::from_session_path(path),
+            route: crate::execution::ExecutionPath::Direct,
+            profile: profile(),
+            working_dir: PathBuf::new(),
+            started_at: "t0".to_string(),
+            end: Some(crate::execution::ExecutionEnd {
+                id: crate::execution::ExecutionId::new(),
+                status: crate::execution::ExecutionStatus::Completed,
+                external_ref: None,
+                seen_turns: None,
+                trace,
+                ended_at: "t1".to_string(),
+            }),
+        }
     }
 
     #[tokio::test]
@@ -195,7 +331,8 @@ speech_style: "short"
     async fn record_execution_appends_an_assistant_entry() {
         let path = Path::new("session.jsonl");
         let log = InMemorySessionLog::default();
-        let manager = AemeathContextManager::new(Box::new(log));
+        let manager =
+            AemeathContextManager::new(Box::new(log), Box::new(InMemoryExecutionLog::default()));
 
         manager.record_execution(path, "the final answer").await;
 
@@ -203,5 +340,79 @@ speech_style: "short"
         assert_eq!(recorded.len(), 1);
         assert_eq!(recorded[0].role, LogRole::Assistant);
         assert_eq!(recorded[0].content, "the final answer");
+    }
+
+    #[tokio::test]
+    async fn a_prior_tool_calling_turn_adds_a_note_to_the_next_turns_context() {
+        let path = Path::new("session.jsonl");
+        let trace = vec![ToolInvocation {
+            name: "read_file".to_string(),
+            outcome: ToolOutcome::Executed { ok: true },
+        }];
+        let manager =
+            manager_with_executions(vec![], vec![execution_with_trace(path, trace)], path);
+
+        let persona = parse_persona(PERSONA_YAML).unwrap();
+        let messages =
+            manager.build_context(path, &persona, Language::En, "what did you find?").await;
+
+        let last = messages.last().unwrap();
+        assert!(last.content.contains("read_file: executed successfully"));
+        assert!(last.content.ends_with("what did you find?"));
+    }
+
+    #[tokio::test]
+    async fn a_prior_plain_turn_adds_no_note() {
+        let path = Path::new("session.jsonl");
+        let manager =
+            manager_with_executions(vec![], vec![execution_with_trace(path, Vec::new())], path);
+
+        let persona = parse_persona(PERSONA_YAML).unwrap();
+        let messages = manager.build_context(path, &persona, Language::En, "hello").await;
+
+        assert_eq!(messages.last().unwrap().content, "hello");
+    }
+
+    #[tokio::test]
+    async fn no_preceding_execution_at_all_adds_no_note() {
+        let path = Path::new("session.jsonl");
+        let manager = manager_with(vec![], path);
+
+        let persona = parse_persona(PERSONA_YAML).unwrap();
+        let messages = manager.build_context(path, &persona, Language::En, "hello").await;
+
+        assert_eq!(messages.last().unwrap().content, "hello");
+    }
+
+    #[tokio::test]
+    async fn the_tool_activity_note_never_leaks_persona_few_shot_examples() {
+        // Same guard `history_preamble` already has: the note is built
+        // from the execution trace alone, never from the assembled
+        // message list, so it cannot echo a few-shot example back as if
+        // it were real tool activity.
+        const PERSONA_WITH_EXAMPLES: &str = r#"
+name: "Test"
+response_language: "auto"
+personality: "friendly"
+speech_style: "short"
+few_shot_examples:
+  en:
+    - user: "hi"
+      pet: "hey there"
+"#;
+        let path = Path::new("session.jsonl");
+        let trace = vec![ToolInvocation {
+            name: "read_file".to_string(),
+            outcome: ToolOutcome::Executed { ok: true },
+        }];
+        let manager =
+            manager_with_executions(vec![], vec![execution_with_trace(path, trace)], path);
+
+        let persona = parse_persona(PERSONA_WITH_EXAMPLES).unwrap();
+        let messages = manager.build_context(path, &persona, Language::En, "hello").await;
+
+        let note_message = messages.last().unwrap();
+        assert!(note_message.content.contains("read_file"));
+        assert!(!note_message.content.contains("hey there"), "must not echo the few-shot example");
     }
 }
