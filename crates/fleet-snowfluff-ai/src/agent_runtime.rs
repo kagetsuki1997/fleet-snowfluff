@@ -8,17 +8,22 @@
 //! Deliberately does not take the fuller `Execution`/`AgentResult`
 //! shape `docs/fleet-snowfluff-feature-planning.md` §6.7 sketches for
 //! the eventual multi-runtime architecture -- this proposal has only
-//! one `AgentRuntime` implementation and no sub-agent delegation yet
-//! (Stage 5's job), so there is nothing for a heavier `Execution`
-//! wrapper to abstract over today.
+//! one `AgentRuntime` implementation, so there is nothing for a
+//! heavier `Execution` wrapper to abstract over today.
+//!
+//! `sub-agent-delegation` added a bounded sub-task delegation
+//! capability (`DELEGATE_TOOL_NAME`/`DelegateTool`), special-cased
+//! directly inside `run()`'s own dispatch rather than implemented as a
+//! generic `Tool::execute()` call -- see that call site's own comment
+//! and design.md's Decision 1 for why.
 
 use std::{collections::HashSet, sync::Arc};
 
-use futures_util::StreamExt;
-use serde_json::Value;
+use futures_util::{stream, StreamExt};
+use serde_json::{json, Value};
 
 use crate::{
-    agent_tool::{PermissionTier, Tool, ToolContext, ToolResult},
+    agent_tool::{PermissionTier, Tool, ToolContext, ToolError, ToolResult},
     message::{Message, ProviderError, ToolCallRecord},
     tool_provider::{ToolCallStreamItem, ToolCallingProvider, ToolDefinition},
 };
@@ -32,6 +37,17 @@ use crate::{
 /// new place that persists one.
 const MAX_REJECTED_ARGS_BYTES: usize = 20 * 1024;
 const REJECTED_ARGS_TRUNCATION_MARKER: &str = " ...[truncated]";
+
+/// How many `Auto`-tier tool calls from one model turn may actually be
+/// executing at once (`sub-agent-delegation`'s own design.md Decision
+/// 7). Unlike every other native tool, a delegated sub-task's own
+/// blast radius (a full nested agent loop, possibly a CLI subprocess)
+/// is categorically larger than `read_file`'s, so this throttles total
+/// concurrency rather than letting an unbounded `join_all` run
+/// everything the model asked for at once. Calls beyond this limit
+/// still all execute -- they simply queue, starting as earlier ones
+/// finish, never rejected or dropped.
+const MAX_CONCURRENT_TOOL_CALLS: usize = 3;
 
 /// Serializes `arguments` compactly and caps it at
 /// [`MAX_REJECTED_ARGS_BYTES`], cutting on a UTF-8 character boundary
@@ -98,6 +114,96 @@ pub struct PendingToolCall {
     pub arguments: Value,
 }
 
+/// What `run()`'s classification pass decided for one call, before any
+/// `Auto`-tier call has actually been executed -- kept separate from
+/// execution so classification (synchronous, ordered) and `Auto`-tier
+/// execution (concurrent, bounded) can be two distinct passes without
+/// losing each call's original position.
+enum CallPlan {
+    UnknownTool,
+    MalformedArguments,
+    Denied,
+    Auto(Arc<dyn Tool>),
+    Confirm(Arc<dyn Tool>),
+    /// `call.name == DELEGATE_TOOL_NAME` *and* the registry actually
+    /// offers it (checked via the same `registry.find()` every other
+    /// call already goes through, not by name alone) -- a delegated
+    /// sub-task's own registry omits it entirely, so a child that
+    /// hallucinates this name still falls through to `UnknownTool`,
+    /// preserving the depth-1 cap. Carries the already-parsed task
+    /// description.
+    Delegate(String),
+}
+
+/// The reserved name `run()` recognizes to dispatch delegation
+/// specially, before ever reaching the generic `registry.find()` +
+/// `Tool::execute()` path (design.md's Decision 1: `Tool::execute()`'s
+/// signature cannot reach the `provider`/`registry`/`permission`
+/// references recursion needs).
+pub const DELEGATE_TOOL_NAME: &str = "delegate_task";
+
+/// `delegate_task`'s own schema -- registered normally in a
+/// `ToolRegistry` so the model can discover and call it like any other
+/// tool. The description tells the model to batch independent
+/// sub-tasks into one turn (several calls together) rather than one at
+/// a time waiting for each, since that's what actually benefits from
+/// the agent loop's own bounded concurrency
+/// (`MAX_CONCURRENT_TOOL_CALLS`) -- calling this once, waiting, then
+/// calling it again gets no parallelism no matter how concurrent the
+/// execution layer is capable of being.
+pub fn delegate_task_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: DELEGATE_TOOL_NAME.to_string(),
+        description: "Delegates a focused, self-contained sub-task to a new, independent agent \
+                      with no knowledge of this conversation -- include every fact the sub-task \
+                      needs directly in its description. Returns the sub-task's final answer. If \
+                      you have more than one independent sub-task, call this tool multiple times \
+                      in the same turn, not one at a time waiting for each, so they run \
+                      concurrently. The delegated sub-task cannot itself delegate further."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "task": {
+                    "type": "string",
+                    "description": "A complete, self-contained description of the sub-task, \
+                                     including any facts or context it needs -- the delegated \
+                                     agent has no access to this conversation."
+                }
+            },
+            "required": ["task"],
+        }),
+    }
+}
+
+/// `delegate_task`'s own `Tool` impl exists only so its `definition()`
+/// and `required_permission()` (never `Confirm`-tier -- see design.md's
+/// Decision 3) participate in the normal `ToolRegistry`/model-discovery
+/// machinery. `execute()` is unreachable in correct operation: `run()`'s
+/// own dispatch intercepts `DELEGATE_TOOL_NAME` before ever reaching
+/// the generic `Tool::execute()` path. If this ever runs, something
+/// upstream failed to special-case it -- fail loudly in the result
+/// rather than panicking, since a tool error is still safely reportable
+/// to the model.
+pub struct DelegateTool;
+
+#[async_trait::async_trait]
+impl Tool for DelegateTool {
+    fn definition(&self) -> ToolDefinition { delegate_task_definition() }
+
+    fn required_permission(&self, _args: &Value, _ctx: &ToolContext) -> PermissionTier {
+        PermissionTier::Auto
+    }
+
+    async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::error(
+            "delegate_task was dispatched through the generic tool path, which should be \
+             unreachable -- this is an internal bug, not a user-facing failure"
+                .to_string(),
+        ))
+    }
+}
+
 /// Decides how every `PermissionTier::Confirm` call from one model
 /// turn actually resolves -- `Auto`/`Deny` need no decision (the tier
 /// itself is the answer); only `Confirm` calls ever reach this. Kept as
@@ -128,6 +234,23 @@ impl ToolRegistry {
 
     pub fn find(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.tools.iter().find(|tool| tool.definition().name == name).cloned()
+    }
+
+    /// A copy of this registry excluding the named tool -- used to
+    /// build a delegated sub-task's own registry
+    /// (`sub-agent-delegation`'s depth-1 cap: a delegated sub-task's
+    /// registry simply omits `DELEGATE_TOOL_NAME`, so recursive
+    /// delegation is impossible by construction, not by a
+    /// runtime-checked counter).
+    pub fn without(&self, name: &str) -> Self {
+        Self {
+            tools: self
+                .tools
+                .iter()
+                .filter(|tool| tool.definition().name != name)
+                .cloned()
+                .collect(),
+        }
     }
 }
 
@@ -281,46 +404,158 @@ impl AgentRuntime for AemeathAgentRuntime {
             // Schema validation (tool exists, arguments is an object)
             // and a `Deny` decision both resolve the same way -- a
             // tool-result message telling the model the call didn't
-            // run -- so they're handled in the same pass rather than a
-            // separate up-front validation step.
-            let mut pending_confirm: Vec<(PendingToolCall, Arc<dyn Tool>)> = Vec::new();
-            for call in calls {
-                let Some(tool) = registry.find(&call.name) else {
-                    messages.push(Message::tool_result(
-                        call.id.clone(),
-                        format!("Error: unknown tool \"{}\"", call.name),
-                    ));
-                    trace.push(ToolInvocation {
-                        name: call.name.clone(),
-                        outcome: ToolOutcome::Rejected {
-                            arguments_preview: capped_arguments_preview(&call.arguments),
-                        },
-                    });
-                    continue;
-                };
-                if !call.arguments.is_object() {
-                    messages.push(Message::tool_result(
-                        call.id.clone(),
-                        format!("Error: arguments for \"{}\" must be a JSON object", call.name),
-                    ));
-                    trace.push(ToolInvocation {
-                        name: call.name.clone(),
-                        outcome: ToolOutcome::Rejected {
-                            arguments_preview: capped_arguments_preview(&call.arguments),
-                        },
-                    });
-                    continue;
-                }
-                match tool.required_permission(&call.arguments, ctx) {
-                    PermissionTier::Auto => {
-                        let id = call.id.clone();
-                        let name = call.name.clone();
-                        let result = execute(&tool, call.arguments, ctx).await;
-                        let ok = !result.is_error;
-                        messages.push(Message::tool_result(id, tool_result_content(result)));
-                        trace.push(ToolInvocation { name, outcome: ToolOutcome::Executed { ok } });
+            // run -- so they're classified in the same pass as `Auto`/
+            // `Confirm`, below. Classification itself is synchronous
+            // (no `.await`), so it stays a single ordered pass; only
+            // `Auto`-tier *execution* is deferred and run concurrently,
+            // in the next pass.
+            let plans: Vec<CallPlan> = calls
+                .iter()
+                .map(|call| {
+                    // `registry.find()` first, for every call, before
+                    // any name-based special-casing -- this is what
+                    // makes `delegate_task` fall through to the normal
+                    // `UnknownTool` rejection for a delegated sub-task
+                    // (whose own registry was built via `.without(
+                    // DELEGATE_TOOL_NAME)`), rather than being treated
+                    // as delegation by name alone regardless of
+                    // whether this registry actually offers it.
+                    let Some(tool) = registry.find(&call.name) else {
+                        return CallPlan::UnknownTool;
+                    };
+                    if call.name == DELEGATE_TOOL_NAME {
+                        return match call.arguments.get("task").and_then(Value::as_str) {
+                            Some(task) => CallPlan::Delegate(task.to_string()),
+                            None => CallPlan::MalformedArguments,
+                        };
                     }
-                    PermissionTier::Deny => {
+                    if !call.arguments.is_object() {
+                        return CallPlan::MalformedArguments;
+                    }
+                    match tool.required_permission(&call.arguments, ctx) {
+                        PermissionTier::Auto => CallPlan::Auto(tool),
+                        PermissionTier::Deny => CallPlan::Denied,
+                        PermissionTier::Confirm => CallPlan::Confirm(tool),
+                    }
+                })
+                .collect();
+
+            // `Auto`-tier calls run concurrently, bounded by
+            // `MAX_CONCURRENT_TOOL_CALLS` -- but `buffer_unordered`
+            // yields results in *completion* order, not the order the
+            // calls were originally requested in. Ollama pairs tool
+            // results with calls by position, not by id (unlike
+            // OpenAI/Anthropic, which use `tool_call_id`/`tool_use_id`
+            // explicitly) -- see `message.rs`'s own doc comment on
+            // `Message::tool_call_id` -- so results are written into a
+            // slot indexed by each call's *original* position here,
+            // and only read back out in that same order in the
+            // writeback pass below, regardless of which finished first.
+            let mut auto_results: Vec<Option<(bool, String)>> =
+                calls.iter().map(|_| None).collect();
+            // Built via a plain loop, not `.filter_map(closure)` -- a
+            // closure returning `impl Future` here hits rustc's HRTB
+            // inference limit (it cannot unify the borrowed-`call`
+            // lifetime across every closure invocation); boxing each
+            // future explicitly sidesteps that by giving `stream::iter`
+            // one concrete, uniform item type instead.
+            let mut auto_futures: Vec<
+                std::pin::Pin<
+                    Box<dyn std::future::Future<Output = (usize, bool, String)> + Send + '_>,
+                >,
+            > = Vec::new();
+            for (index, (call, plan)) in calls.iter().zip(plans.iter()).enumerate() {
+                match plan {
+                    CallPlan::Auto(tool) => {
+                        let tool = tool.clone();
+                        let arguments = call.arguments.clone();
+                        auto_futures.push(Box::pin(async move {
+                            let result = execute(&tool, arguments, ctx).await;
+                            (index, !result.is_error, tool_result_content(result))
+                        }));
+                    }
+                    CallPlan::Delegate(task) => {
+                        // A delegated sub-task's own registry omits
+                        // `DELEGATE_TOOL_NAME` (depth-1, enforced
+                        // structurally, not by a counter) and starts
+                        // from a plain, non-persona system prompt plus
+                        // the task alone -- no parent history, no
+                        // projected context (design.md's Decisions 2
+                        // and 5). Its own narration never reaches this
+                        // turn's `on_text_delta`: passing a discarding
+                        // closure instead of the caller's real one is
+                        // what actually keeps it invisible while it
+                        // runs, not merely a policy left unenforced.
+                        // Runs through this same concurrent pass, so
+                        // several delegations in one turn share the
+                        // same `MAX_CONCURRENT_TOOL_CALLS` bound as
+                        // every other tool call, not a separate limit.
+                        let task = task.clone();
+                        let child_registry = registry.without(DELEGATE_TOOL_NAME);
+                        auto_futures.push(Box::pin(async move {
+                            let child_messages = vec![
+                                Message::system(crate::prompt::delegated_task_system_prompt()),
+                                Message::user(task),
+                            ];
+                            let outcome = self
+                                .run(
+                                    provider,
+                                    child_messages,
+                                    &child_registry,
+                                    ctx,
+                                    permission,
+                                    &mut |_: &str| {},
+                                )
+                                .await;
+                            match outcome {
+                                Ok(AgentOutcome { text, .. }) => (index, true, text),
+                                Err(err) => {
+                                    (index, false, format!("delegated sub-task failed: {err}"))
+                                }
+                            }
+                        }));
+                    }
+                    _ => {}
+                }
+            }
+            let completed: Vec<(usize, bool, String)> = stream::iter(auto_futures)
+                .buffer_unordered(MAX_CONCURRENT_TOOL_CALLS)
+                .collect()
+                .await;
+            for (index, ok, content) in completed {
+                auto_results[index] = Some((ok, content));
+            }
+
+            // Writeback, in original request order -- the ordering
+            // guarantee the pass above exists to preserve.
+            let mut pending_confirm: Vec<(PendingToolCall, Arc<dyn Tool>)> = Vec::new();
+            for (index, call) in calls.into_iter().enumerate() {
+                match &plans[index] {
+                    CallPlan::UnknownTool => {
+                        messages.push(Message::tool_result(
+                            call.id.clone(),
+                            format!("Error: unknown tool \"{}\"", call.name),
+                        ));
+                        trace.push(ToolInvocation {
+                            name: call.name.clone(),
+                            outcome: ToolOutcome::Rejected {
+                                arguments_preview: capped_arguments_preview(&call.arguments),
+                            },
+                        });
+                    }
+                    CallPlan::MalformedArguments => {
+                        messages.push(Message::tool_result(
+                            call.id.clone(),
+                            format!("Error: arguments for \"{}\" must be a JSON object", call.name),
+                        ));
+                        trace.push(ToolInvocation {
+                            name: call.name.clone(),
+                            outcome: ToolOutcome::Rejected {
+                                arguments_preview: capped_arguments_preview(&call.arguments),
+                            },
+                        });
+                    }
+                    CallPlan::Denied => {
                         messages.push(Message::tool_result(
                             call.id.clone(),
                             format!("Error: \"{}\" was not permitted to run", call.name),
@@ -330,7 +565,24 @@ impl AgentRuntime for AemeathAgentRuntime {
                             outcome: ToolOutcome::DeniedByPolicy,
                         });
                     }
-                    PermissionTier::Confirm => pending_confirm.push((call, tool)),
+                    // A delegated sub-task's result folds into this
+                    // turn's own trace as an ordinary `Executed`
+                    // `ToolInvocation` -- no persisted child `Execution`
+                    // record (design.md's Decision 4); the tool-activity
+                    // note `execution-log-and-context` already built
+                    // picks this up for free on the next turn, same as
+                    // any other tool.
+                    CallPlan::Auto(_) | CallPlan::Delegate(_) => {
+                        let (ok, content) = auto_results[index].take().expect(
+                            "every Auto-tier/Delegate call has a result by the writeback pass",
+                        );
+                        messages.push(Message::tool_result(call.id.clone(), content));
+                        trace.push(ToolInvocation {
+                            name: call.name.clone(),
+                            outcome: ToolOutcome::Executed { ok },
+                        });
+                    }
+                    CallPlan::Confirm(tool) => pending_confirm.push((call, tool.clone())),
                 }
             }
 
@@ -391,6 +643,40 @@ mod tests {
             project_root: None,
             conversation_id: ConversationId::from_session_path(std::path::Path::new("/tmp/x")),
         }
+    }
+
+    // -- sub-agent-delegation: DELEGATE_TOOL_NAME / delegate_task_definition /
+    // ToolRegistry::without --
+
+    #[test]
+    fn delegate_task_definition_has_the_reserved_name_and_a_valid_schema() {
+        let definition = delegate_task_definition();
+        assert_eq!(definition.name, DELEGATE_TOOL_NAME);
+        assert_eq!(definition.parameters["type"], "object");
+        assert_eq!(definition.parameters["required"], json!(["task"]));
+        assert_eq!(definition.parameters["properties"]["task"]["type"], "string");
+    }
+
+    #[test]
+    fn delegate_tool_is_auto_tier_and_matches_the_reserved_definition() {
+        let tool = DelegateTool;
+        assert_eq!(tool.required_permission(&json!({"task": "x"}), &ctx()), PermissionTier::Auto);
+        assert_eq!(tool.definition().name, DELEGATE_TOOL_NAME);
+    }
+
+    #[test]
+    fn registry_without_excludes_only_the_named_tool() {
+        let alpha = Arc::new(CountingTool::new("alpha", PermissionTier::Auto));
+        let registry =
+            ToolRegistry::new(vec![alpha.clone(), Arc::new(DelegateTool) as Arc<dyn Tool>]);
+        assert_eq!(registry.definitions().len(), 2);
+
+        let without_delegate = registry.without(DELEGATE_TOOL_NAME);
+        let names: Vec<String> =
+            without_delegate.definitions().into_iter().map(|d| d.name).collect();
+        assert_eq!(names, vec!["alpha".to_string()]);
+        assert!(without_delegate.find(DELEGATE_TOOL_NAME).is_none());
+        assert!(without_delegate.find("alpha").is_some(), "every other tool is kept unchanged");
     }
 
     // -- execution-log-and-context: ToolOutcome/ToolInvocation/AgentOutcome --
@@ -751,6 +1037,444 @@ mod tests {
         assert_eq!(result.trace[2].outcome, ToolOutcome::Executed { ok: true });
         assert_eq!(result.trace[3].outcome, ToolOutcome::DeniedByPolicy);
         assert_eq!(result.trace[4].outcome, ToolOutcome::DeclinedByUser);
+    }
+
+    /// Blocks until `gate` is signaled before returning -- lets a test
+    /// force one `Auto`-tier call to finish strictly *after* another,
+    /// deterministically, with no reliance on real-time sleeps that
+    /// could flake under load.
+    struct WaitsForGate {
+        name: &'static str,
+        gate: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for WaitsForGate {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name.to_string(),
+                description: String::new(),
+                parameters: json!({"type": "object", "properties": {}}),
+            }
+        }
+
+        fn required_permission(&self, _args: &Value, _ctx: &ToolContext) -> PermissionTier {
+            PermissionTier::Auto
+        }
+
+        async fn execute(
+            &self,
+            _args: Value,
+            _ctx: &ToolContext,
+        ) -> Result<ToolResult, crate::agent_tool::ToolError> {
+            self.gate.notified().await;
+            Ok(ToolResult::ok(format!("{} ran", self.name)))
+        }
+    }
+
+    /// The counterpart to `WaitsForGate`: signals `gate` and returns
+    /// immediately, with no `.await` point of its own before doing so --
+    /// guarantees this call's own future resolves on its very first
+    /// poll, strictly before whatever is waiting on the same gate can.
+    struct SignalsGate {
+        name: &'static str,
+        gate: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for SignalsGate {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name.to_string(),
+                description: String::new(),
+                parameters: json!({"type": "object", "properties": {}}),
+            }
+        }
+
+        fn required_permission(&self, _args: &Value, _ctx: &ToolContext) -> PermissionTier {
+            PermissionTier::Auto
+        }
+
+        async fn execute(
+            &self,
+            _args: Value,
+            _ctx: &ToolContext,
+        ) -> Result<ToolResult, crate::agent_tool::ToolError> {
+            self.gate.notify_one();
+            Ok(ToolResult::ok(format!("{} ran", self.name)))
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_auto_calls_are_written_back_in_request_order_not_completion_order() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                ToolCallStreamItem::ToolCall {
+                    id: "call_0".to_string(),
+                    name: "slow".to_string(),
+                    arguments: json!({}),
+                },
+                ToolCallStreamItem::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "fast".to_string(),
+                    arguments: json!({}),
+                },
+            ],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        // "slow" is requested first but can only finish once "fast"
+        // signals the gate -- "fast" (requested second) is therefore
+        // guaranteed to complete first, regardless of scheduling.
+        let registry = ToolRegistry::new(vec![
+            Arc::new(WaitsForGate { name: "slow", gate: gate.clone() }),
+            Arc::new(SignalsGate { name: "fast", gate: gate.clone() }),
+        ]);
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.trace,
+            vec![
+                ToolInvocation {
+                    name: "slow".to_string(),
+                    outcome: ToolOutcome::Executed { ok: true }
+                },
+                ToolInvocation {
+                    name: "fast".to_string(),
+                    outcome: ToolOutcome::Executed { ok: true }
+                },
+            ],
+            "written back in request order even though \"fast\" completed first"
+        );
+    }
+
+    #[tokio::test]
+    async fn more_auto_calls_than_the_concurrency_cap_all_still_execute() {
+        // MAX_CONCURRENT_TOOL_CALLS is 3; five calls in one turn must
+        // all still run exactly once each, just throttled in how many
+        // start at once -- none rejected or silently dropped.
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                ToolCallStreamItem::ToolCall {
+                    id: "call_0".to_string(),
+                    name: "t0".to_string(),
+                    arguments: json!({}),
+                },
+                ToolCallStreamItem::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "t1".to_string(),
+                    arguments: json!({}),
+                },
+                ToolCallStreamItem::ToolCall {
+                    id: "call_2".to_string(),
+                    name: "t2".to_string(),
+                    arguments: json!({}),
+                },
+                ToolCallStreamItem::ToolCall {
+                    id: "call_3".to_string(),
+                    name: "t3".to_string(),
+                    arguments: json!({}),
+                },
+                ToolCallStreamItem::ToolCall {
+                    id: "call_4".to_string(),
+                    name: "t4".to_string(),
+                    arguments: json!({}),
+                },
+            ],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let t0 = Arc::new(CountingTool::new("t0", PermissionTier::Auto));
+        let t1 = Arc::new(CountingTool::new("t1", PermissionTier::Auto));
+        let t2 = Arc::new(CountingTool::new("t2", PermissionTier::Auto));
+        let t3 = Arc::new(CountingTool::new("t3", PermissionTier::Auto));
+        let t4 = Arc::new(CountingTool::new("t4", PermissionTier::Auto));
+        let registry =
+            ToolRegistry::new(vec![t0.clone(), t1.clone(), t2.clone(), t3.clone(), t4.clone()]);
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        let names: Vec<&str> = result.trace.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["t0", "t1", "t2", "t3", "t4"]);
+        assert!(result.trace.iter().all(|i| i.outcome == ToolOutcome::Executed { ok: true }));
+        for tool in [&t0, &t1, &t2, &t3, &t4] {
+            assert_eq!(*tool.calls.lock().unwrap(), 1, "{} must run exactly once", tool.name);
+        }
+    }
+
+    /// Proves `delegate_task` never requires confirmation structurally,
+    /// not merely that `DelegateTool::required_permission` happens to
+    /// return `Auto` -- the classification pass never even reaches
+    /// that method for a real `delegate_task` call (it returns
+    /// `CallPlan::Delegate`/`MalformedArguments` directly, by name,
+    /// before any tier is consulted). If that guarantee ever regressed
+    /// and delegation started flowing through the `Confirm` tier,
+    /// this decider makes the test fail loudly instead of silently
+    /// passing with an unexercised assumption.
+    struct PanicsIfAskedToDecide;
+
+    #[async_trait::async_trait]
+    impl PermissionDecider for PanicsIfAskedToDecide {
+        async fn decide(&self, _calls: &[PendingToolCall]) -> HashSet<String> {
+            panic!("delegate_task must never require confirmation");
+        }
+    }
+
+    #[tokio::test]
+    async fn delegate_task_never_triggers_a_confirmation_decision() {
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: DELEGATE_TOOL_NAME.to_string(),
+                arguments: json!({"task": "look up X"}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("child's answer".to_string())],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let registry = ToolRegistry::new(vec![Arc::new(DelegateTool)]);
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &PanicsIfAskedToDecide,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.text, "done", "completing without panicking is the test itself");
+    }
+
+    #[tokio::test]
+    async fn a_delegated_sub_tasks_result_becomes_the_calls_own_tool_result() {
+        let provider = ScriptedProvider::new(vec![
+            // Parent's 1st turn: delegates.
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: DELEGATE_TOOL_NAME.to_string(),
+                arguments: json!({"task": "look up X"}),
+            }],
+            // Child's own (only) turn: plain text, no tool calls.
+            vec![ToolCallStreamItem::TextDelta("child's answer".to_string())],
+            // Parent's 2nd turn, after the delegation result comes back.
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let registry = ToolRegistry::new(vec![Arc::new(DelegateTool)]);
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            result.trace,
+            vec![ToolInvocation {
+                name: DELEGATE_TOOL_NAME.to_string(),
+                outcome: ToolOutcome::Executed { ok: true }
+            }]
+        );
+
+        let received = provider.received.lock().unwrap();
+        assert_eq!(received.len(), 3, "parent's 1st turn, the child's turn, parent's 2nd turn");
+        let parents_second_turn = &received[2];
+        let tool_result = parents_second_turn
+            .iter()
+            .find(|m| m.role == crate::message::Role::Tool)
+            .expect("the delegation call's own tool result");
+        assert_eq!(tool_result.content, "child's answer");
+    }
+
+    #[tokio::test]
+    async fn a_delegated_sub_task_cannot_itself_delegate() {
+        let provider = ScriptedProvider::new(vec![
+            // Parent delegates.
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: DELEGATE_TOOL_NAME.to_string(),
+                arguments: json!({"task": "nested"}),
+            }],
+            // Child hallucinates delegate_task anyway -- its own
+            // registry (built via `.without(DELEGATE_TOOL_NAME)`)
+            // does not have it.
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_1".to_string(),
+                name: DELEGATE_TOOL_NAME.to_string(),
+                arguments: json!({"task": "grandchild"}),
+            }],
+            // Child's 2nd turn, after its own delegation attempt was rejected.
+            vec![ToolCallStreamItem::TextDelta(
+                "child done despite trying to delegate".to_string(),
+            )],
+            // Parent's 2nd turn.
+            vec![ToolCallStreamItem::TextDelta("parent done".to_string())],
+        ]);
+        let registry = ToolRegistry::new(vec![Arc::new(DelegateTool)]);
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        // From the parent's point of view, delegation still succeeded
+        // overall -- the child simply couldn't recurse, the same way
+        // any sub-task that hits a dead end can still report back.
+        assert_eq!(result.text, "parent done");
+        assert_eq!(
+            result.trace,
+            vec![ToolInvocation {
+                name: DELEGATE_TOOL_NAME.to_string(),
+                outcome: ToolOutcome::Executed { ok: true }
+            }]
+        );
+
+        let received = provider.received.lock().unwrap();
+        let childs_second_turn = &received[2];
+        let rejection = childs_second_turn
+            .iter()
+            .find(|m| m.role == crate::message::Role::Tool)
+            .expect("the child's own delegation attempt got a tool result");
+        assert!(
+            rejection.content.contains("unknown tool"),
+            "rejected the same way a call to any other unknown tool is: {}",
+            rejection.content
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delegated_sub_tasks_narration_never_reaches_the_parents_callback() {
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: DELEGATE_TOOL_NAME.to_string(),
+                arguments: json!({"task": "look up X"}),
+            }],
+            vec![ToolCallStreamItem::TextDelta(
+                "text only the child's own on_text_delta should ever see".to_string(),
+            )],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let registry = ToolRegistry::new(vec![Arc::new(DelegateTool)]);
+        let streamed = Arc::new(Mutex::new(String::new()));
+        let streamed_in_callback = streamed.clone();
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &mut |delta: &str| streamed_in_callback.lock().unwrap().push_str(delta),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            *streamed.lock().unwrap(),
+            "done",
+            "only the parent's own narration reaches the parent's callback -- the child's is \
+             dropped by the no-op closure the delegation branch passes instead"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_delegated_sub_task_that_exhausts_its_own_iterations_reports_failure_to_the_parent() {
+        // The child reuses `self.max_iterations` -- the same runtime
+        // instance recursing -- so to let the *parent* reach a second
+        // turn while the *child* exhausts its own budget, both need at
+        // least 2 iterations: the child's own two turns must each keep
+        // requesting a tool call (never a plain final answer), so its
+        // own `run()` falls through to `MaxIterationsReached` rather
+        // than returning `Ok` early.
+        let provider = ScriptedProvider::new(vec![
+            // Parent's 1st turn: delegates.
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: DELEGATE_TOOL_NAME.to_string(),
+                arguments: json!({"task": "never finishes"}),
+            }],
+            // Child's 1st (of 2 allowed) turns: requests a tool call.
+            vec![ToolCallStreamItem::ToolCall {
+                id: "child_call_0".to_string(),
+                name: "no_such_tool".to_string(),
+                arguments: json!({}),
+            }],
+            // Child's 2nd (and final) turn: still requesting a tool
+            // call, never a plain answer, so it exhausts its own
+            // max_iterations without ever reaching the early `Ok` return.
+            vec![ToolCallStreamItem::ToolCall {
+                id: "child_call_1".to_string(),
+                name: "no_such_tool".to_string(),
+                arguments: json!({}),
+            }],
+            // Parent's 2nd turn, after the delegation call reports its
+            // own child's failure back as an ordinary tool result.
+            vec![ToolCallStreamItem::TextDelta("parent continues anyway".to_string())],
+        ]);
+        let registry = ToolRegistry::new(vec![Arc::new(DelegateTool)]);
+        let runtime = AemeathAgentRuntime { max_iterations: 2 };
+
+        let result = runtime
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.text, "parent continues anyway");
+        assert_eq!(
+            result.trace,
+            vec![ToolInvocation {
+                name: DELEGATE_TOOL_NAME.to_string(),
+                outcome: ToolOutcome::Executed { ok: false }
+            }],
+            "the child's own MaxIterationsReached is reported as this call's own failure, not \
+             propagated to the parent's own Result"
+        );
     }
 
     #[tokio::test]

@@ -1281,68 +1281,85 @@ async function renderChatWindow(): Promise<void> {
 async function mainToolConfirmation(): Promise<void> {
   await loadDictionary();
   const app = document.querySelector<HTMLDivElement>("#app")!;
-  const items = await invoke<PendingConfirmationItem[]>("get_pending_tool_confirmations");
 
-  app.innerHTML = `
-    <main class="container-fluid tool-confirmation-window">
-      <h3>${t("tool_confirmation.heading")}</h3>
-      <div id="tool-confirmation-list"></div>
-      <div class="tool-confirmation-actions">
-        <button type="button" id="tool-confirmation-approve-all" class="secondary">${t("tool_confirmation.approve_all")}</button>
-        <button type="button" id="tool-confirmation-deny-all" class="secondary outline">${t("tool_confirmation.deny_all")}</button>
-      </div>
-      <button type="button" id="tool-confirmation-submit">${t("tool_confirmation.submit")}</button>
-    </main>
-  `;
+  // More than one batch can be queued now (`sub-agent-delegation`'s
+  // concurrent children can each trigger their own confirmation round
+  // at once) -- the window stays open across batches rather than
+  // closing between them, so this renders one batch at a time and
+  // re-fetches after each submit rather than running once per window
+  // lifetime. An empty fetch means the queue is drained; the window is
+  // closed from the Rust side at that point (`confirm_via_popup`), so
+  // there's nothing further to render.
+  async function renderNextBatch(): Promise<void> {
+    const items = await invoke<PendingConfirmationItem[]>("get_pending_tool_confirmations");
+    if (items.length === 0) return;
+    renderBatch(items);
+  }
 
-  const list = app.querySelector<HTMLDivElement>("#tool-confirmation-list")!;
-  const rows = items.map((item) => {
-    const row = document.createElement("div");
-    row.className = "tool-confirmation-item";
+  function renderBatch(items: PendingConfirmationItem[]): void {
+    app.innerHTML = `
+      <main class="container-fluid tool-confirmation-window">
+        <h3>${t("tool_confirmation.heading")}</h3>
+        <div id="tool-confirmation-list"></div>
+        <div class="tool-confirmation-actions">
+          <button type="button" id="tool-confirmation-approve-all" class="secondary">${t("tool_confirmation.approve_all")}</button>
+          <button type="button" id="tool-confirmation-deny-all" class="secondary outline">${t("tool_confirmation.deny_all")}</button>
+        </div>
+        <button type="button" id="tool-confirmation-submit">${t("tool_confirmation.submit")}</button>
+      </main>
+    `;
 
-    const approveLabel = document.createElement("label");
-    const approveInput = document.createElement("input");
-    approveInput.type = "checkbox";
-    approveLabel.appendChild(approveInput);
-    approveLabel.appendChild(document.createTextNode(` ${item.tool_name}: ${item.summary}`));
-    row.appendChild(approveLabel);
+    const list = app.querySelector<HTMLDivElement>("#tool-confirmation-list")!;
+    const rows = items.map((item) => {
+      const row = document.createElement("div");
+      row.className = "tool-confirmation-item";
 
-    let rememberInput: HTMLInputElement | null = null;
-    if (item.allows_remember) {
-      const rememberLabel = document.createElement("label");
-      rememberLabel.className = "remember-label";
-      rememberInput = document.createElement("input");
-      rememberInput.type = "checkbox";
-      rememberLabel.appendChild(rememberInput);
-      rememberLabel.appendChild(document.createTextNode(` ${t("tool_confirmation.remember")}`));
-      row.appendChild(rememberLabel);
-    }
+      const approveLabel = document.createElement("label");
+      const approveInput = document.createElement("input");
+      approveInput.type = "checkbox";
+      approveLabel.appendChild(approveInput);
+      approveLabel.appendChild(document.createTextNode(` ${item.tool_name}: ${item.summary}`));
+      row.appendChild(approveLabel);
 
-    list.appendChild(row);
-    return { item, approveInput, rememberInput };
-  });
+      let rememberInput: HTMLInputElement | null = null;
+      if (item.allows_remember) {
+        const rememberLabel = document.createElement("label");
+        rememberLabel.className = "remember-label";
+        rememberInput = document.createElement("input");
+        rememberInput.type = "checkbox";
+        rememberLabel.appendChild(rememberInput);
+        rememberLabel.appendChild(document.createTextNode(` ${t("tool_confirmation.remember")}`));
+        row.appendChild(rememberLabel);
+      }
 
-  app.querySelector("#tool-confirmation-approve-all")!.addEventListener("click", () => {
-    for (const row of rows) row.approveInput.checked = true;
-  });
-  app.querySelector("#tool-confirmation-deny-all")!.addEventListener("click", () => {
-    for (const row of rows) row.approveInput.checked = false;
-  });
+      list.appendChild(row);
+      return { item, approveInput, rememberInput };
+    });
 
-  // The window itself is closed from the Rust side once
-  // `resolve_tool_confirmations` unblocks the waiting Agent Loop
-  // (`tool_confirmation.rs`'s own `confirm_via_popup`) -- nothing to
-  // do here beyond sending the batch.
-  app.querySelector("#tool-confirmation-submit")!.addEventListener("click", () => {
-    const responses: ToolConfirmationResponse[] = rows.map(
-      ({ item, approveInput, rememberInput }) => ({
-        id: item.id,
-        approved: approveInput.checked,
-        remember: approveInput.checked && (rememberInput?.checked ?? false),
-      }),
-    );
-    void invoke("resolve_tool_confirmations", { responses });
-  });
+    app.querySelector("#tool-confirmation-approve-all")!.addEventListener("click", () => {
+      for (const row of rows) row.approveInput.checked = true;
+    });
+    app.querySelector("#tool-confirmation-deny-all")!.addEventListener("click", () => {
+      for (const row of rows) row.approveInput.checked = false;
+    });
+
+    // The window itself is closed from the Rust side once the queue is
+    // empty (`confirm_via_popup`); otherwise another batch is already
+    // waiting, so this fetches and renders it rather than leaving a
+    // stale, already-submitted batch on screen.
+    app.querySelector("#tool-confirmation-submit")!.addEventListener("click", () => {
+      const responses: ToolConfirmationResponse[] = rows.map(
+        ({ item, approveInput, rememberInput }) => ({
+          id: item.id,
+          approved: approveInput.checked,
+          remember: approveInput.checked && (rememberInput?.checked ?? false),
+        }),
+      );
+      void invoke("resolve_tool_confirmations", { responses }).then(() => renderNextBatch());
+    });
+  }
+
+  await renderNextBatch();
 }
 
 main();

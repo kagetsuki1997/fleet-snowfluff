@@ -527,16 +527,23 @@ Runtime Session
 >   `Execution` trace，有工具活動時附上一段摘要），讓 Agent Loop 有東西可以組裝；
 >   不含 compaction、memory retrieval、sub-agent projection。單一 Execution 就用得到，
 >   不需要等 delegation 或 memory 先存在。
-> - **Stage 5**：加上 §10.1 的 Sub-agent Context Projection（`SubAgentContextSpec`、
->   `build_sub_agent_context`）——這一段邏輯上就是為 delegation 存在的，Stage 5
->   之前沒有 child execution 可以投影 context 給。
-> - **Stage 7**：Compaction 與 Memory Retrieval，並視需求把 `ContextManager`
->   升級成 §10.3 的 `ContextEngine` trait——這兩者本質上是長期記憶／長對話摘要
->   問題，跟 Stage 7 本來就要做的近期記憶摘要、RAG 是同一類工作，沒有理由切成
->   兩個階段分別做。
+> - **Stage 5**：delegation 本身落地（見下方 Stage 5 章節），但**不含** §10.1 的
+>   Sub-agent Context Projection（`SubAgentContextSpec`、`build_sub_agent_context`）
+>   ——原本的假設是「Stage 5 之前沒有 child execution 可以投影 context 給，所以
+>   projection 理所當然排在 Stage 5」，但 `/opsx:explore stage 5` 的 grill 階段
+>   發現 projection 要做得有意義，本身就需要一個真正的 Context Engine（facts /
+>   decisions / summary 可供挑選），而那正是 Stage 7 才會存在的東西——Stage 5
+>   單獨做 projection 只會是半成品介面猜測。v1 改成：child 完全不拿 parent 的
+>   任何 context，由下達 delegate 的那個 model 自己把需要的事實寫進 task
+>   字串裡（它本來就看得到完整 parent context，這不是新負擔）。
+> - **Stage 7**：Compaction 與 Memory Retrieval，**現在也包含 §10.1 的
+>   Sub-agent Context Projection**（原排在 Stage 5，上面已說明為何挪過來）
+>   ，並視需求把 `ContextManager` 升級成 §10.3 的 `ContextEngine` trait——
+>   三者本質上都是「有真正的 Context Engine 之後才有意義」的問題，跟 Stage 7
+>   本來就要做的近期記憶摘要、RAG 是同一類工作，沒有理由切成兩個階段分別做。
 >
 > 不要在 Stage 3 就把完整 `ContextEngine`（含 compaction/retrieval/projection）
-> 一次做完——那些能力分別依賴 delegation（Stage 5）與長期記憶（Stage 7）才有
+> 一次做完——那些能力依賴長期記憶／真正的 Context Engine（Stage 7）才有
 > 真正的使用情境，提早做只會產生沒有真實需求驗證過的介面猜測。
 
 #### 10.1 Context Projection：Parent → Sub-agent
@@ -3317,9 +3324,13 @@ design.md）：
   `record_execution` 唯一新增的事是讀（供下一輪的工具活動摘要用），寫的部分還是只有
   transcript 本身
 
-### Stage 5 — Sub-agent / Delegation
+### Stage 5 — Sub-agent / Delegation（已完成）
 
-（原本在 Stage 3 內，獨立成自己的階段 —— 見第 6.13 節的完整設計。）
+（原本在 Stage 3 內，獨立成自己的階段 —— 見第 6.13 節的完整設計。已以
+`sub-agent-delegation` 這個 change 實作並 archive；下面是原始提案，與下方
+「實際做法與提案的落差」對照著看，落差比 Stage 4.5 當年還大——`/opsx:explore`
+
+- `/grill-me` 的 grill 階段把範圍一路收斂到比 §6.13 的完整願景小得多的東西。）
 
 建立：
 
@@ -3327,14 +3338,38 @@ design.md）：
 - Sub-agent child Execution（`parent_execution_id`、`ExecutionKind::SubAgent`）
 - parallel fan-out / join
 - delegation guardrails（depth / concurrency / budget / permission ceiling）
-- Context Engine：Sub-agent Context Projection（`SubAgentContextSpec`、
-  `build_sub_agent_context`，見第 10.1 節）
+
+**不含** Context Engine 的 Sub-agent Context Projection（`SubAgentContextSpec`、
+`build_sub_agent_context`，第 10.1 節）——改到 Stage 7，見上方 §10 的
+「實作時機」說明。
 
 依賴 Stage 3（要有可委派的 Agent Loop）、Stage 4（child 可能委派給 CLI runtime，需要
 CLI session 連續性與 working directory 行為已修正）與 Stage 4.5（Execution record 與
 `ContextManager` 接線已存在；本階段在其上以 additive 方式加入 `parent_execution_id` /
 `ExecutionKind` 與 context projection）。`SessionManager`、Runtime Adapter 若 delegation
 需要，在本階段依真實 consumer 補上，而不是預先猜測。
+
+**實際做法與提案的落差**（`sub-agent-delegation` 實作時發現/決定的，記錄於該 change 的
+design.md）：
+
+- 沒有獨立的 `DelegationManager` struct——delegation 直接特判在
+  `AemeathAgentRuntime::run()` 自己的 dispatch 裡，因為 `Tool::execute()` 的
+  signature 本來就拿不到 recursion 需要的 `provider`/`registry`/`permission`
+- 沒有 `parent_execution_id`/`ExecutionKind`/任何 persisted child `Execution`——
+  depth 固定卡在 1 層，没有 tree 需要可視化，child 的結果直接併進 parent 自己的
+  tool-call trace（一筆普通的 `ToolInvocation`），`execution-log-and-context`
+  已經做好的 tool-activity note 因此自動吃得到，不用再加新東西
+- 沒有獨立的「parallel fan-out / join」機制——改成一個更通用的改動：同一輪裡
+  任何被允許自動執行的 tool call（不只 delegate_task）現在都會並發執行（有上限，
+  `MAX_CONCURRENT_TOOL_CALLS = 3`），delegation 只是搭這班車，不是另外的管線
+- guardrails 實際只落地了depth（結構性、靠 child 的 registry 排除
+  `delegate_task`，不是跑時計數器）、concurrency（上面那個上限）、permission
+  ceiling（child 重用 parent 一模一樣的 `ToolContext`/tier 判斷，天生不會更寬）；
+  budget/cost 明確沒做——沒有任何 token/cost ledger 存在過，不論 parent 或
+  child，先留著當已知落差
+- child 沒有拿到 parent 的任何 context projection（如上，改到 Stage 7），也沒有
+  不同 runtime 的能力（child 永遠重用 parent 當下的 profile）——`TaskRouter`
+  從來沒有 capability-aware 的邏輯，不只 delegation 沒有
 
 ### Stage 6 — MCP + Context Awareness
 
@@ -3368,6 +3403,8 @@ context lifecycle，見第 10 節〕是兩個不同概念，只是中英文命�
 - 長期向量記憶（需求確認後）
 - Context Engine 升級：Compaction、Memory Retrieval，`ContextManager` →
   `ContextEngine` trait（見第 10.3 節）
+- Sub-agent Context Projection（`SubAgentContextSpec`、`build_sub_agent_context`，
+  第 10.1 節；原排在 Stage 5，挪到這裡的理由見上方 §10 的「實作時機」說明）
 
 ### Stage 8 — Voice / Automation
 
@@ -3745,7 +3782,6 @@ Sub-agent / Delegation
 + DelegationManager
 + parallel fan-out / join
 + delegation guardrails
-+ Context Engine: sub-agent projection
         │
         ▼
 Stage 6
@@ -3755,7 +3791,7 @@ MCP
         ▼
 Stage 7
 Memory / Knowledge
-+ Context Engine: compaction / retrieval
++ Context Engine: compaction / retrieval / sub-agent projection
         │
         ▼
 Stage 8
