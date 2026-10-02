@@ -72,6 +72,7 @@ before running:
 | `list_directory`     | Lists a directory's contents.                                                                |
 | `run_command`        | Runs a shell command.                                                                        |
 | `get_system_context` | Reports the current date/time, OS, and CPU/memory/uptime.                                    |
+| `delegate_task`      | Delegates a focused sub-task to a new, independent agent — see below.                        |
 
 `read_file`/`list_directory` are auto-allowed for any path inside your
 configured **project folder** (Settings → AI); a path outside it — or any
@@ -92,6 +93,17 @@ doesn't stall or flood the chat.
 `get_system_context` reports OS name, current UTC time, CPU core
 count/usage, memory used/total, and uptime. It deliberately does **not**
 read the active window title, your idle time, or clipboard content.
+
+`delegate_task` lets the model hand off a described sub-task to a new,
+independent agent and get back its final answer — useful for splitting a
+request with genuinely separate parts (research this, separately check
+that) so they can run at the same time instead of one after another. A
+delegated sub-task starts with **no knowledge of the current
+conversation** beyond whatever the model writes directly into the task
+description, and it **cannot itself delegate further** — at most one
+level of delegation. It's invisible in the chat window while running,
+the same as every other tool call; only its final answer (or failure)
+ever surfaces, folded back into the model's own reply.
 
 ### Web search
 
