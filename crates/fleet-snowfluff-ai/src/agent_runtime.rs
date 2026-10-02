@@ -14,7 +14,7 @@
 
 use std::{collections::HashSet, sync::Arc};
 
-use futures_util::StreamExt;
+use futures_util::{stream, StreamExt};
 use serde_json::Value;
 
 use crate::{
@@ -32,6 +32,17 @@ use crate::{
 /// new place that persists one.
 const MAX_REJECTED_ARGS_BYTES: usize = 20 * 1024;
 const REJECTED_ARGS_TRUNCATION_MARKER: &str = " ...[truncated]";
+
+/// How many `Auto`-tier tool calls from one model turn may actually be
+/// executing at once (`sub-agent-delegation`'s own design.md Decision
+/// 7). Unlike every other native tool, a delegated sub-task's own
+/// blast radius (a full nested agent loop, possibly a CLI subprocess)
+/// is categorically larger than `read_file`'s, so this throttles total
+/// concurrency rather than letting an unbounded `join_all` run
+/// everything the model asked for at once. Calls beyond this limit
+/// still all execute -- they simply queue, starting as earlier ones
+/// finish, never rejected or dropped.
+const MAX_CONCURRENT_TOOL_CALLS: usize = 3;
 
 /// Serializes `arguments` compactly and caps it at
 /// [`MAX_REJECTED_ARGS_BYTES`], cutting on a UTF-8 character boundary
@@ -96,6 +107,19 @@ pub struct PendingToolCall {
     pub id: String,
     pub name: String,
     pub arguments: Value,
+}
+
+/// What `run()`'s classification pass decided for one call, before any
+/// `Auto`-tier call has actually been executed -- kept separate from
+/// execution so classification (synchronous, ordered) and `Auto`-tier
+/// execution (concurrent, bounded) can be two distinct passes without
+/// losing each call's original position.
+enum CallPlan {
+    UnknownTool,
+    MalformedArguments,
+    Denied,
+    Auto(Arc<dyn Tool>),
+    Confirm(Arc<dyn Tool>),
 }
 
 /// Decides how every `PermissionTier::Confirm` call from one model
@@ -281,46 +305,100 @@ impl AgentRuntime for AemeathAgentRuntime {
             // Schema validation (tool exists, arguments is an object)
             // and a `Deny` decision both resolve the same way -- a
             // tool-result message telling the model the call didn't
-            // run -- so they're handled in the same pass rather than a
-            // separate up-front validation step.
-            let mut pending_confirm: Vec<(PendingToolCall, Arc<dyn Tool>)> = Vec::new();
-            for call in calls {
-                let Some(tool) = registry.find(&call.name) else {
-                    messages.push(Message::tool_result(
-                        call.id.clone(),
-                        format!("Error: unknown tool \"{}\"", call.name),
-                    ));
-                    trace.push(ToolInvocation {
-                        name: call.name.clone(),
-                        outcome: ToolOutcome::Rejected {
-                            arguments_preview: capped_arguments_preview(&call.arguments),
-                        },
-                    });
-                    continue;
-                };
-                if !call.arguments.is_object() {
-                    messages.push(Message::tool_result(
-                        call.id.clone(),
-                        format!("Error: arguments for \"{}\" must be a JSON object", call.name),
-                    ));
-                    trace.push(ToolInvocation {
-                        name: call.name.clone(),
-                        outcome: ToolOutcome::Rejected {
-                            arguments_preview: capped_arguments_preview(&call.arguments),
-                        },
-                    });
-                    continue;
-                }
-                match tool.required_permission(&call.arguments, ctx) {
-                    PermissionTier::Auto => {
-                        let id = call.id.clone();
-                        let name = call.name.clone();
-                        let result = execute(&tool, call.arguments, ctx).await;
-                        let ok = !result.is_error;
-                        messages.push(Message::tool_result(id, tool_result_content(result)));
-                        trace.push(ToolInvocation { name, outcome: ToolOutcome::Executed { ok } });
+            // run -- so they're classified in the same pass as `Auto`/
+            // `Confirm`, below. Classification itself is synchronous
+            // (no `.await`), so it stays a single ordered pass; only
+            // `Auto`-tier *execution* is deferred and run concurrently,
+            // in the next pass.
+            let plans: Vec<CallPlan> = calls
+                .iter()
+                .map(|call| {
+                    let Some(tool) = registry.find(&call.name) else {
+                        return CallPlan::UnknownTool;
+                    };
+                    if !call.arguments.is_object() {
+                        return CallPlan::MalformedArguments;
                     }
-                    PermissionTier::Deny => {
+                    match tool.required_permission(&call.arguments, ctx) {
+                        PermissionTier::Auto => CallPlan::Auto(tool),
+                        PermissionTier::Deny => CallPlan::Denied,
+                        PermissionTier::Confirm => CallPlan::Confirm(tool),
+                    }
+                })
+                .collect();
+
+            // `Auto`-tier calls run concurrently, bounded by
+            // `MAX_CONCURRENT_TOOL_CALLS` -- but `buffer_unordered`
+            // yields results in *completion* order, not the order the
+            // calls were originally requested in. Ollama pairs tool
+            // results with calls by position, not by id (unlike
+            // OpenAI/Anthropic, which use `tool_call_id`/`tool_use_id`
+            // explicitly) -- see `message.rs`'s own doc comment on
+            // `Message::tool_call_id` -- so results are written into a
+            // slot indexed by each call's *original* position here,
+            // and only read back out in that same order in the
+            // writeback pass below, regardless of which finished first.
+            let mut auto_results: Vec<Option<(bool, String)>> =
+                calls.iter().map(|_| None).collect();
+            // Built via a plain loop, not `.filter_map(closure)` -- a
+            // closure returning `impl Future` here hits rustc's HRTB
+            // inference limit (it cannot unify the borrowed-`call`
+            // lifetime across every closure invocation); boxing each
+            // future explicitly sidesteps that by giving `stream::iter`
+            // one concrete, uniform item type instead.
+            let mut auto_futures: Vec<
+                std::pin::Pin<
+                    Box<dyn std::future::Future<Output = (usize, bool, String)> + Send + '_>,
+                >,
+            > = Vec::new();
+            for (index, (call, plan)) in calls.iter().zip(plans.iter()).enumerate() {
+                if let CallPlan::Auto(tool) = plan {
+                    let tool = tool.clone();
+                    let arguments = call.arguments.clone();
+                    auto_futures.push(Box::pin(async move {
+                        let result = execute(&tool, arguments, ctx).await;
+                        (index, !result.is_error, tool_result_content(result))
+                    }));
+                }
+            }
+            let completed: Vec<(usize, bool, String)> = stream::iter(auto_futures)
+                .buffer_unordered(MAX_CONCURRENT_TOOL_CALLS)
+                .collect()
+                .await;
+            for (index, ok, content) in completed {
+                auto_results[index] = Some((ok, content));
+            }
+
+            // Writeback, in original request order -- the ordering
+            // guarantee the pass above exists to preserve.
+            let mut pending_confirm: Vec<(PendingToolCall, Arc<dyn Tool>)> = Vec::new();
+            for (index, call) in calls.into_iter().enumerate() {
+                match &plans[index] {
+                    CallPlan::UnknownTool => {
+                        messages.push(Message::tool_result(
+                            call.id.clone(),
+                            format!("Error: unknown tool \"{}\"", call.name),
+                        ));
+                        trace.push(ToolInvocation {
+                            name: call.name.clone(),
+                            outcome: ToolOutcome::Rejected {
+                                arguments_preview: capped_arguments_preview(&call.arguments),
+                            },
+                        });
+                    }
+                    CallPlan::MalformedArguments => {
+                        messages.push(Message::tool_result(
+                            call.id.clone(),
+                            format!("Error: arguments for \"{}\" must be a JSON object", call.name),
+                        ));
+                        trace.push(ToolInvocation {
+                            name: call.name.clone(),
+                            outcome: ToolOutcome::Rejected {
+                                arguments_preview: capped_arguments_preview(&call.arguments),
+                            },
+                        });
+                    }
+                    CallPlan::Denied => {
                         messages.push(Message::tool_result(
                             call.id.clone(),
                             format!("Error: \"{}\" was not permitted to run", call.name),
@@ -330,7 +408,17 @@ impl AgentRuntime for AemeathAgentRuntime {
                             outcome: ToolOutcome::DeniedByPolicy,
                         });
                     }
-                    PermissionTier::Confirm => pending_confirm.push((call, tool)),
+                    CallPlan::Auto(_) => {
+                        let (ok, content) = auto_results[index]
+                            .take()
+                            .expect("every Auto-tier call has a result by the writeback pass");
+                        messages.push(Message::tool_result(call.id.clone(), content));
+                        trace.push(ToolInvocation {
+                            name: call.name.clone(),
+                            outcome: ToolOutcome::Executed { ok },
+                        });
+                    }
+                    CallPlan::Confirm(tool) => pending_confirm.push((call, tool.clone())),
                 }
             }
 
@@ -751,6 +839,189 @@ mod tests {
         assert_eq!(result.trace[2].outcome, ToolOutcome::Executed { ok: true });
         assert_eq!(result.trace[3].outcome, ToolOutcome::DeniedByPolicy);
         assert_eq!(result.trace[4].outcome, ToolOutcome::DeclinedByUser);
+    }
+
+    /// Blocks until `gate` is signaled before returning -- lets a test
+    /// force one `Auto`-tier call to finish strictly *after* another,
+    /// deterministically, with no reliance on real-time sleeps that
+    /// could flake under load.
+    struct WaitsForGate {
+        name: &'static str,
+        gate: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for WaitsForGate {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name.to_string(),
+                description: String::new(),
+                parameters: json!({"type": "object", "properties": {}}),
+            }
+        }
+
+        fn required_permission(&self, _args: &Value, _ctx: &ToolContext) -> PermissionTier {
+            PermissionTier::Auto
+        }
+
+        async fn execute(
+            &self,
+            _args: Value,
+            _ctx: &ToolContext,
+        ) -> Result<ToolResult, crate::agent_tool::ToolError> {
+            self.gate.notified().await;
+            Ok(ToolResult::ok(format!("{} ran", self.name)))
+        }
+    }
+
+    /// The counterpart to `WaitsForGate`: signals `gate` and returns
+    /// immediately, with no `.await` point of its own before doing so --
+    /// guarantees this call's own future resolves on its very first
+    /// poll, strictly before whatever is waiting on the same gate can.
+    struct SignalsGate {
+        name: &'static str,
+        gate: Arc<tokio::sync::Notify>,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for SignalsGate {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name.to_string(),
+                description: String::new(),
+                parameters: json!({"type": "object", "properties": {}}),
+            }
+        }
+
+        fn required_permission(&self, _args: &Value, _ctx: &ToolContext) -> PermissionTier {
+            PermissionTier::Auto
+        }
+
+        async fn execute(
+            &self,
+            _args: Value,
+            _ctx: &ToolContext,
+        ) -> Result<ToolResult, crate::agent_tool::ToolError> {
+            self.gate.notify_one();
+            Ok(ToolResult::ok(format!("{} ran", self.name)))
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_auto_calls_are_written_back_in_request_order_not_completion_order() {
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                ToolCallStreamItem::ToolCall {
+                    id: "call_0".to_string(),
+                    name: "slow".to_string(),
+                    arguments: json!({}),
+                },
+                ToolCallStreamItem::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "fast".to_string(),
+                    arguments: json!({}),
+                },
+            ],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        // "slow" is requested first but can only finish once "fast"
+        // signals the gate -- "fast" (requested second) is therefore
+        // guaranteed to complete first, regardless of scheduling.
+        let registry = ToolRegistry::new(vec![
+            Arc::new(WaitsForGate { name: "slow", gate: gate.clone() }),
+            Arc::new(SignalsGate { name: "fast", gate: gate.clone() }),
+        ]);
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.trace,
+            vec![
+                ToolInvocation {
+                    name: "slow".to_string(),
+                    outcome: ToolOutcome::Executed { ok: true }
+                },
+                ToolInvocation {
+                    name: "fast".to_string(),
+                    outcome: ToolOutcome::Executed { ok: true }
+                },
+            ],
+            "written back in request order even though \"fast\" completed first"
+        );
+    }
+
+    #[tokio::test]
+    async fn more_auto_calls_than_the_concurrency_cap_all_still_execute() {
+        // MAX_CONCURRENT_TOOL_CALLS is 3; five calls in one turn must
+        // all still run exactly once each, just throttled in how many
+        // start at once -- none rejected or silently dropped.
+        let provider = ScriptedProvider::new(vec![
+            vec![
+                ToolCallStreamItem::ToolCall {
+                    id: "call_0".to_string(),
+                    name: "t0".to_string(),
+                    arguments: json!({}),
+                },
+                ToolCallStreamItem::ToolCall {
+                    id: "call_1".to_string(),
+                    name: "t1".to_string(),
+                    arguments: json!({}),
+                },
+                ToolCallStreamItem::ToolCall {
+                    id: "call_2".to_string(),
+                    name: "t2".to_string(),
+                    arguments: json!({}),
+                },
+                ToolCallStreamItem::ToolCall {
+                    id: "call_3".to_string(),
+                    name: "t3".to_string(),
+                    arguments: json!({}),
+                },
+                ToolCallStreamItem::ToolCall {
+                    id: "call_4".to_string(),
+                    name: "t4".to_string(),
+                    arguments: json!({}),
+                },
+            ],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let t0 = Arc::new(CountingTool::new("t0", PermissionTier::Auto));
+        let t1 = Arc::new(CountingTool::new("t1", PermissionTier::Auto));
+        let t2 = Arc::new(CountingTool::new("t2", PermissionTier::Auto));
+        let t3 = Arc::new(CountingTool::new("t3", PermissionTier::Auto));
+        let t4 = Arc::new(CountingTool::new("t4", PermissionTier::Auto));
+        let registry =
+            ToolRegistry::new(vec![t0.clone(), t1.clone(), t2.clone(), t3.clone(), t4.clone()]);
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        let names: Vec<&str> = result.trace.iter().map(|i| i.name.as_str()).collect();
+        assert_eq!(names, ["t0", "t1", "t2", "t3", "t4"]);
+        assert!(result.trace.iter().all(|i| i.outcome == ToolOutcome::Executed { ok: true }));
+        for tool in [&t0, &t1, &t2, &t3, &t4] {
+            assert_eq!(*tool.calls.lock().unwrap(), 1, "{} must run exactly once", tool.name);
+        }
     }
 
     #[tokio::test]
