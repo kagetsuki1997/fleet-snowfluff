@@ -21,7 +21,7 @@ use fleet_snowfluff_ai::{
     ClaudeCodeToolAccess, CliContext, ContextManager, DefaultTaskRouter, DelegateTool,
     EscalationDecision, ExecutionPath, GetSystemContextTool, Language, ListDirectoryTool, LogEntry,
     Message, Persona, ProfileKey, ProviderCredentials, ProviderKind, ProviderProfile, ReadFileTool,
-    ResponseLanguage, RoutingContext, RunCommandTool, Task, TaskRouter, TaskRouterMode,
+    ResponseLanguage, RoutingContext, RunCommandTool, Task, TaskRouter, TaskRouterMode, Tool,
     ToolCallingProvider, ToolContext, ToolRegistry, WebSearchTool,
 };
 use futures_util::StreamExt;
@@ -925,6 +925,27 @@ fn native_tool_registry() -> ToolRegistry {
     ])
 }
 
+/// The local-first mix-mode attempt's own, deliberately narrower
+/// registry (`mix-mode-local-tools`): read-only, side-effect-free
+/// tools only -- never `run_command` or `delegate_task`, in any
+/// state, ever (see design.md's Non-Goals). `read_file`/`list_directory`
+/// are only ever `Auto`-tier inside a configured project folder; with
+/// none configured, every path asks for confirmation
+/// (`AI_FEATURES.md`), which would make both tools either an
+/// immediate escalate or a silent denial on every attempt -- dead
+/// weight in the model's own tool list. `web_search`/
+/// `get_system_context` are always `Auto` regardless, so they're
+/// offered unconditionally.
+fn mix_local_tool_registry(project_root: Option<&Path>) -> ToolRegistry {
+    let mut tools: Vec<Arc<dyn Tool>> =
+        vec![Arc::new(WebSearchTool::default()), Arc::new(GetSystemContextTool)];
+    if project_root.is_some() {
+        tools.push(Arc::new(ReadFileTool));
+        tools.push(Arc::new(ListDirectoryTool));
+    }
+    ToolRegistry::new(tools)
+}
+
 /// Same contract as `run_generation`, but for a `ToolCapable` provider:
 /// runs `AemeathAgentRuntime` instead of a plain `chat()` stream. Text
 /// deltas stream live via the `on_text_delta` callback (see
@@ -1694,5 +1715,31 @@ mod tests {
         assert_eq!(names.len(), 6);
         assert!(names.contains(&"delegate_task".to_string()));
         assert!(registry.find("delegate_task").is_some());
+    }
+
+    #[test]
+    fn mix_local_tool_registry_excludes_filesystem_tools_without_a_project_root() {
+        let registry = mix_local_tool_registry(None);
+        let names: Vec<String> = registry.definitions().into_iter().map(|d| d.name).collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"web_search".to_string()));
+        assert!(names.contains(&"get_system_context".to_string()));
+        assert!(registry.find("read_file").is_none());
+        assert!(registry.find("list_directory").is_none());
+        assert!(registry.find("run_command").is_none());
+        assert!(registry.find("delegate_task").is_none());
+    }
+
+    #[test]
+    fn mix_local_tool_registry_includes_filesystem_tools_with_a_project_root() {
+        let registry = mix_local_tool_registry(Some(Path::new("/some/project")));
+        let names: Vec<String> = registry.definitions().into_iter().map(|d| d.name).collect();
+        assert_eq!(names.len(), 4);
+        assert!(registry.find("read_file").is_some());
+        assert!(registry.find("list_directory").is_some());
+        assert!(registry.find("web_search").is_some());
+        assert!(registry.find("get_system_context").is_some());
+        assert!(registry.find("run_command").is_none());
+        assert!(registry.find("delegate_task").is_none());
     }
 }
