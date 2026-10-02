@@ -57,6 +57,20 @@ fn build_system_prompt(persona: &Persona, language: Language) -> String {
     prompt
 }
 
+/// The system prompt for a delegated sub-task (`sub-agent-delegation`'s
+/// design.md Decision 5) -- deliberately *not* `build_system_prompt`'s
+/// persona framing. A delegated sub-task's own output is read by the
+/// *parent model*, not the end user; persona framing (speech style,
+/// boundaries, in-character warmth) is tuned for the latter and would
+/// make the child's report harder for the parent to use, not just
+/// unnecessary. No language parameter either -- there is no end user
+/// to localize for here.
+pub fn delegated_task_system_prompt() -> String {
+    "You are completing a focused sub-task delegated by another process. Complete the task below \
+     and report your findings concisely -- your response is read by another AI, not the end user."
+        .to_string()
+}
+
 /// Builds the final message list sent to a provider: a system prompt
 /// derived from `persona`, that language's few-shot examples (never a
 /// blend of languages, to avoid the "language leakage" problem the
@@ -108,6 +122,24 @@ few_shot_examples:
 "#;
 
     fn persona() -> Persona { parse_persona(PERSONA_YAML).unwrap() }
+
+    #[test]
+    fn delegated_task_system_prompt_carries_no_persona_framing() {
+        let prompt = delegated_task_system_prompt();
+        let persona = persona();
+        assert!(!prompt.contains(&persona.name), "must not reference the persona's own name");
+        assert!(!prompt.contains(&persona.personality));
+        assert!(!prompt.contains(&persona.speech_style));
+        assert!(
+            prompt.contains("another AI"),
+            "frames the reader as the parent model, not the end user"
+        );
+    }
+
+    #[test]
+    fn delegated_task_system_prompt_is_stable_across_calls() {
+        assert_eq!(delegated_task_system_prompt(), delegated_task_system_prompt());
+    }
 
     #[test]
     fn cap_history_keeps_only_the_most_recent_turns() {

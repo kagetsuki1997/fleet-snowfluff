@@ -10,7 +10,7 @@
 
 ## 3. Delegated sub-task's own system prompt
 
-- [ ] 3.1 Add a small function alongside `prompt::build_system_prompt` (e.g. `prompt::delegated_task_system_prompt() -> String`) returning a plain, non-persona system prompt that frames the message as a delegated sub-task whose response is read by another AI, not the end user. Verify with a test asserting the returned text contains no persona fields (name/personality/speech_style/boundaries) and is stable across calls.
+- [x] 3.1 Add a small function alongside `prompt::build_system_prompt` (e.g. `prompt::delegated_task_system_prompt() -> String`) returning a plain, non-persona system prompt that frames the message as a delegated sub-task whose response is read by another AI, not the end user. Verify with a test asserting the returned text contains no persona fields (name/personality/speech_style/boundaries) and is stable across calls. Landed exactly as specified, `pub fn` (needs cross-module visibility for Group 4's dispatch branch to call it; no top-level `lib.rs` re-export needed since the only caller, `agent_runtime.rs`, is in the same crate). 2 tests.
 
 ## 4. The `delegate_task` capability and its special-cased dispatch
 
