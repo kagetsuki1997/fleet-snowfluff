@@ -20,6 +20,7 @@ pub mod credentials;
 pub mod execution;
 pub mod limits;
 pub mod log;
+pub mod mcp;
 pub mod message;
 pub mod native_tools;
 pub mod persona;
@@ -43,6 +44,7 @@ pub use execution::{
     ExecutionId, ExecutionPath, ExecutionStart, ExecutionStatus,
 };
 pub use log::{LogEntry, LogRole};
+pub use mcp::{McpClient, McpError, McpTool, McpToolCallResult, McpToolDescriptor, StdioTransport};
 pub use message::{
     Message, ModelInfo, ProviderError, ProviderKind, Role, StreamChunk, ToolCallRecord,
 };
