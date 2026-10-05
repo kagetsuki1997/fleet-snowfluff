@@ -44,7 +44,10 @@ pub use execution::{
     ExecutionId, ExecutionPath, ExecutionStart, ExecutionStatus,
 };
 pub use log::{LogEntry, LogRole};
-pub use mcp::{McpClient, McpError, McpTool, McpToolCallResult, McpToolDescriptor, StdioTransport};
+pub use mcp::{
+    HttpTransport, McpClient, McpError, McpServerConfig, McpServerTransportConfig, McpTool,
+    McpToolCallResult, McpToolDescriptor, McpTransport, StdioTransport,
+};
 pub use message::{
     Message, ModelInfo, ProviderError, ProviderKind, Role, StreamChunk, ToolCallRecord,
 };

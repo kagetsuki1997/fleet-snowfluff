@@ -11,6 +11,7 @@ pub mod commands;
 pub mod config_store;
 pub mod execution_log_store;
 pub mod execution_recorder;
+pub mod mcp_connection;
 pub mod persona_store;
 pub mod secrets_store;
 pub mod session_domain;
@@ -220,6 +221,7 @@ pub fn run() {
             app.manage(chat_commands::ChatRuntimeState::default());
             app.manage(chat_pause::ChatPauseState::default());
             app.manage(tool_confirmation::ToolConfirmationState::default());
+            app.manage(mcp_connection::McpConnectionState::default());
             app.manage(Mutex::<Option<tauri_plugin_updater::Update>>::new(None));
             tray::build(&app_handle)?;
             updater::spawn_startup_check(app_handle.clone());

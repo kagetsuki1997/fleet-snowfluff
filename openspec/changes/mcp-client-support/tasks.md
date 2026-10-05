@@ -14,9 +14,9 @@
 
 ## 3. Connection lifecycle
 
-- [ ] 3.1 Add `McpConnectionState`, a Tauri-managed singleton (same tier as `ChatRuntimeState`/`ToolConfirmationState`) holding live connections keyed by server id. Add a lookup function used at registry-build time: return the existing connection if present, otherwise lazily (re)establish it from the server's persisted config. Verify with a test covering both branches (hit, and lazy-reconnect-on-miss) against a scripted transport.
-- [ ] 3.2 On server removal (see 4.4), tear down and drop that server's live connection from `McpConnectionState` immediately, not just the persisted config. Verify with a test asserting the connection is gone from the state after removal.
-- [ ] 3.3 Confirm (by reading the code, and a test if practically constructible without a real subprocess) that `McpConnectionState`'s own `Drop`/app-shutdown path terminates any live stdio subprocess rather than leaving it running after the app exits — same intent as `kill_on_drop`, at app-lifetime scope instead of per-turn.
+- [x] 3.1 Add `McpConnectionState`, a Tauri-managed singleton (same tier as `ChatRuntimeState`/`ToolConfirmationState`) holding live connections keyed by server id. Add a lookup function used at registry-build time: return the existing connection if present, otherwise lazily (re)establish it from the server's persisted config. Verify with a test covering both branches (hit, and lazy-reconnect-on-miss) against a scripted transport. (Defines `McpServerConfig`'s shape in `fleet-snowfluff-ai` to type this lookup — Group 4.3 adds it as a persisted `AiSettings` sibling; this task only needed the type to exist.)
+- [x] 3.2 On server removal (see 4.4), tear down and drop that server's live connection from `McpConnectionState` immediately, not just the persisted config. Verify with a test asserting the connection is gone from the state after removal.
+- [x] 3.3 Confirm (by reading the code, and a test if practically constructible without a real subprocess) that `McpConnectionState`'s own `Drop`/app-shutdown path terminates any live stdio subprocess rather than leaving it running after the app exits — same intent as `kill_on_drop`, at app-lifetime scope instead of per-turn. (`McpConnectionState` holds the only long-lived `Arc<McpClient>`; a test proves removal drops the underlying transport, and `StdioTransport`'s own `kill_on_drop` — proven in Group 1 — does the rest.)
 
 ## 4. `connect_mcp_server`, persistence, and removal
 

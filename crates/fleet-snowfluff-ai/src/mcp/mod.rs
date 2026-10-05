@@ -5,6 +5,7 @@
 //! consuming direction; see this change's `proposal.md` for why the
 //! reverse (Aemeath as a server) is out of scope.
 
+pub mod config;
 pub mod error;
 pub mod http_transport;
 pub mod oauth;
@@ -13,6 +14,7 @@ pub mod stdio_transport;
 pub mod tool;
 pub mod transport;
 
+pub use config::{McpServerConfig, McpServerTransportConfig};
 pub use error::McpError;
 pub use http_transport::HttpTransport;
 pub use oauth::{
