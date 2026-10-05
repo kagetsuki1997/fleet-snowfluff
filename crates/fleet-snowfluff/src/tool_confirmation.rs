@@ -13,13 +13,21 @@ use std::{
     sync::Mutex,
 };
 
-use fleet_snowfluff_ai::{PendingToolCall, PermissionDecider, Tool, ToolRegistry};
+use fleet_snowfluff_ai::{
+    build_authorization_url, discover, exchange_code_for_token, generate_pkce, generate_state,
+    probe_authorization, register_client_or_explain, AuthProbeOutcome, McpConnectOutcome,
+    McpConnectRequest, McpConnector, McpServerConfig, McpServerCredential, McpServerRecord,
+    McpServerStatus, McpServerTransportConfig, McpToolSummary, PendingToolCall, PermissionDecider,
+    RedirectListener, Tool, ToolRegistry, CONNECT_MCP_SERVER_TOOL_NAME,
+};
 use serde_json::Value;
 use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri_plugin_shell::ShellExt;
 use tokio::sync::oneshot;
 
 use crate::{
     chat_commands::{ChatRuntimeState, RememberKey},
+    mcp_connection::McpConnectionState,
     session_domain::ConversationId,
 };
 
@@ -274,6 +282,301 @@ impl PermissionDecider for PopupPermissionDecider<'_> {
             }
         }
         approved
+    }
+}
+
+/// A short, human-legible summary of what would be connected -- shown
+/// in the confirmation popup exactly as `summarize_args` already does
+/// for other tool calls, just specialized to this one request shape
+/// rather than a generic args-field scan.
+fn summarize_connect_request(request: &McpConnectRequest) -> String {
+    match request {
+        McpConnectRequest::Stdio { command, args, .. } => {
+            if args.is_empty() {
+                command.clone()
+            } else {
+                format!("{command} {}", args.join(" "))
+            }
+        }
+        McpConnectRequest::Http { url } => url.clone(),
+    }
+}
+
+/// There's nothing in the request itself to name a server by other
+/// than what it resolves to -- no separate "display name" field exists
+/// on `connect_mcp_server`'s own schema, so the resolved command/URL
+/// doubles as the name shown everywhere (the popup, the Settings UI,
+/// a success message).
+fn display_name_for(request: &McpConnectRequest) -> String {
+    match request {
+        McpConnectRequest::Stdio { command, .. } => command.clone(),
+        McpConnectRequest::Http { url } => url.clone(),
+    }
+}
+
+fn generate_server_id() -> String { format!("mcp-{:x}", rand::random::<u64>()) }
+
+/// Replaces (by id) or appends `record` in the persisted
+/// `mcp-servers.json`, then writes it back -- every write to this file
+/// goes through here, so "connect", "finish OAuth", and (Group 4.4/4.5)
+/// "remove"/"refresh" all share one read-modify-write shape.
+fn upsert_server_record(app: &AppHandle, record: McpServerRecord) {
+    let mut servers = crate::mcp_servers_store::load(app);
+    servers.servers.retain(|existing| existing.config.id != record.config.id);
+    servers.servers.push(record);
+    crate::mcp_servers_store::save(app, &servers);
+}
+
+pub(crate) fn summarize_tools(
+    tools: Vec<fleet_snowfluff_ai::McpToolDescriptor>,
+) -> Vec<McpToolSummary> {
+    tools
+        .into_iter()
+        .map(|tool| McpToolSummary {
+            name: tool.name,
+            description: tool.description.unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// Finishes an OAuth flow once the redirect listener catches a code:
+/// exchanges it for a token, stores the token, and completes the
+/// connection -- run as a detached background task from
+/// `start_oauth_flow`, specifically so nothing in the chat turn that
+/// triggered it ever awaits this (the "does not block the rest of the
+/// conversation" scenario).
+#[allow(clippy::too_many_arguments)]
+async fn finish_oauth(
+    app: AppHandle,
+    config: McpServerConfig,
+    client: reqwest::Client,
+    token_endpoint: String,
+    code: String,
+    redirect_uri: String,
+    client_id: String,
+    code_verifier: String,
+) {
+    let token = match exchange_code_for_token(
+        &client,
+        &token_endpoint,
+        &code,
+        &redirect_uri,
+        &client_id,
+        &code_verifier,
+    )
+    .await
+    {
+        Ok(token) => token,
+        Err(err) => {
+            log::warn!("MCP OAuth token exchange for \"{}\" failed: {err}", config.display_name);
+            return;
+        }
+    };
+
+    let mut creds = crate::secrets_store::load(&app);
+    creds.mcp_server_credentials.insert(
+        config.id.clone(),
+        McpServerCredential::OAuthToken {
+            access_token: token.access_token.clone(),
+            refresh_token: token.refresh_token.clone(),
+        },
+    );
+    crate::secrets_store::save(&app, &creds);
+
+    let connection_state = app.state::<McpConnectionState>();
+    match connection_state.connection_for(&config, Some(&token.access_token)).await {
+        Ok(client_conn) => {
+            let tools = client_conn.list_tools().await.map(summarize_tools).unwrap_or_default();
+            upsert_server_record(
+                &app,
+                McpServerRecord { config, status: McpServerStatus::Ready, tools },
+            );
+        }
+        Err(err) => {
+            log::warn!(
+                "MCP connection for \"{}\" failed right after authorization: {err}",
+                config.display_name
+            );
+        }
+    }
+}
+
+/// Runs the full OAuth bootstrap (discovery, Dynamic Client
+/// Registration, PKCE) for an HTTP server that needs it, opens the
+/// browser, and returns `PendingAuthorization` immediately -- the rest
+/// (waiting for the redirect, exchanging the code, persisting the
+/// result) happens in a detached background task
+/// ([`finish_oauth`]), never awaited by this function's own caller,
+/// which is what actually keeps this from blocking the conversation.
+async fn start_oauth_flow(
+    app: &AppHandle,
+    config: McpServerConfig,
+    url: String,
+    www_authenticate: Option<String>,
+) -> McpConnectOutcome {
+    let client = reqwest::Client::new();
+    let metadata = match discover(&client, &url, www_authenticate.as_deref()).await {
+        Ok(metadata) => metadata,
+        Err(err) => return McpConnectOutcome::Failed { reason: err.to_string() },
+    };
+    let listener = match RedirectListener::bind().await {
+        Ok(listener) => listener,
+        Err(err) => return McpConnectOutcome::Failed { reason: err.to_string() },
+    };
+    let redirect_uri = listener.redirect_uri();
+    let registration =
+        match register_client_or_explain(&client, &metadata, &config.display_name, &redirect_uri)
+            .await
+        {
+            Ok(registration) => registration,
+            Err(err) => return McpConnectOutcome::Failed { reason: err.to_string() },
+        };
+    let pkce = generate_pkce();
+    let state = generate_state();
+    let authorization_url = build_authorization_url(
+        &metadata,
+        &registration.client_id,
+        &redirect_uri,
+        &pkce,
+        &state,
+        &url,
+    );
+
+    // Persisted as pending *before* the browser even opens, so the
+    // Settings UI reflects this attempt even if the app restarts
+    // before the user finishes (or never does).
+    upsert_server_record(
+        app,
+        McpServerRecord {
+            config: config.clone(),
+            status: McpServerStatus::Pending,
+            tools: Vec::new(),
+        },
+    );
+
+    // `Shell::open` is deprecated in favor of `tauri-plugin-opener`, but
+    // remains functional; this app already depends on
+    // `tauri-plugin-shell` for other reasons, and adding a second
+    // plugin + its own capability grant for this one call isn't worth
+    // it yet.
+    #[allow(deprecated)]
+    let opened = app.shell().open(&authorization_url, None);
+    if let Err(err) = opened {
+        return McpConnectOutcome::Failed { reason: format!("failed to open the browser: {err}") };
+    }
+
+    let display_name = config.display_name.clone();
+    let task_display_name = display_name.clone();
+    let app = app.clone();
+    let token_endpoint = metadata.token_endpoint.clone();
+    let client_id = registration.client_id.clone();
+    let code_verifier = pkce.verifier.clone();
+    tokio::spawn(async move {
+        let code = match listener.wait_for_code(&state).await {
+            Ok(code) => code,
+            Err(err) => {
+                log::warn!("MCP OAuth redirect for \"{task_display_name}\" failed: {err}");
+                return;
+            }
+        };
+        finish_oauth(
+            app,
+            config,
+            client,
+            token_endpoint,
+            code,
+            redirect_uri,
+            client_id,
+            code_verifier,
+        )
+        .await;
+    });
+
+    McpConnectOutcome::PendingAuthorization { display_name }
+}
+
+/// Attempts the connection itself, after the user has already approved
+/// it: resolves a fresh server id, probes an HTTP server for whether it
+/// needs OAuth (never declared upfront -- see `mcp::oauth`'s own doc
+/// comment), and either connects directly (stdio, or HTTP needing no
+/// auth) or hands off to [`start_oauth_flow`].
+async fn attempt_connection(app: &AppHandle, request: McpConnectRequest) -> McpConnectOutcome {
+    let display_name = display_name_for(&request);
+    let id = generate_server_id();
+
+    let (config, credential): (McpServerConfig, Option<String>) = match request {
+        McpConnectRequest::Stdio { command, args, credential_env_var, credential_value } => (
+            McpServerConfig {
+                id,
+                display_name: display_name.clone(),
+                transport: McpServerTransportConfig::Stdio { command, args, credential_env_var },
+            },
+            credential_value,
+        ),
+        McpConnectRequest::Http { url } => {
+            match probe_authorization(&reqwest::Client::new(), &url).await {
+                Ok(AuthProbeOutcome::Required { www_authenticate }) => {
+                    let config = McpServerConfig {
+                        id,
+                        display_name: display_name.clone(),
+                        transport: McpServerTransportConfig::Http { url: url.clone() },
+                    };
+                    return start_oauth_flow(app, config, url, www_authenticate).await;
+                }
+                Ok(AuthProbeOutcome::NotRequired) => (
+                    McpServerConfig {
+                        id,
+                        display_name: display_name.clone(),
+                        transport: McpServerTransportConfig::Http { url },
+                    },
+                    None,
+                ),
+                Err(err) => return McpConnectOutcome::Failed { reason: err.to_string() },
+            }
+        }
+    };
+
+    let connection_state = app.state::<McpConnectionState>();
+    match connection_state.connection_for(&config, credential.as_deref()).await {
+        Ok(client) => {
+            let tools = client.list_tools().await.map(summarize_tools).unwrap_or_default();
+            let tool_count = tools.len();
+            upsert_server_record(
+                app,
+                McpServerRecord { config, status: McpServerStatus::Ready, tools },
+            );
+            McpConnectOutcome::Connected { display_name, tool_count }
+        }
+        Err(err) => McpConnectOutcome::Failed { reason: err.to_string() },
+    }
+}
+
+/// The real, popup-backed `McpConnector` (Group 4.2): shows the exact
+/// resolved command/URL via the same confirmation popup flow
+/// `PopupPermissionDecider` already uses, and only on approval attempts
+/// the connection.
+pub struct PopupMcpConnector {
+    pub app: AppHandle,
+}
+
+#[async_trait::async_trait]
+impl McpConnector for PopupMcpConnector {
+    async fn connect(&self, request: McpConnectRequest) -> McpConnectOutcome {
+        let id = rand::random::<u64>().to_string();
+        let item = PendingConfirmationItem {
+            id: id.clone(),
+            tool_name: CONNECT_MCP_SERVER_TOOL_NAME.to_string(),
+            summary: summarize_connect_request(&request),
+            allows_remember: false,
+        };
+
+        let responses = confirm_via_popup(&self.app, vec![item]).await;
+        let approved = responses.iter().any(|response| response.id == id && response.approved);
+        if !approved {
+            return McpConnectOutcome::Declined;
+        }
+
+        attempt_connection(&self.app, request).await
     }
 }
 
@@ -536,5 +839,65 @@ mod tests {
         );
         state.pending.lock().unwrap().pop_front().unwrap().responder.send(vec![]).ok();
         rx_b.await.ok();
+    }
+
+    // -- mcp-client-support: PopupMcpConnector's own pure helpers.
+    // `PopupMcpConnector::connect` itself, like `PopupPermissionDecider::decide`
+    // above (never directly unit-tested in this file either), touches
+    // `AppHandle`-backed state (`confirm_via_popup`, `McpConnectionState`,
+    // `mcp_servers_store`) and is verified manually, consistent with
+    // this file's own established boundary -- only the AppHandle-free
+    // logic is unit-tested here.
+
+    #[test]
+    fn summarize_connect_request_shows_the_exact_command_or_url() {
+        assert_eq!(
+            summarize_connect_request(&McpConnectRequest::Stdio {
+                command: "npx".to_string(),
+                args: vec!["-y".to_string(), "server-filesystem".to_string()],
+                credential_env_var: None,
+                credential_value: None,
+            }),
+            "npx -y server-filesystem"
+        );
+        assert_eq!(
+            summarize_connect_request(&McpConnectRequest::Stdio {
+                command: "cat".to_string(),
+                args: vec![],
+                credential_env_var: None,
+                credential_value: None,
+            }),
+            "cat",
+            "no trailing space when there are no args"
+        );
+        assert_eq!(
+            summarize_connect_request(&McpConnectRequest::Http {
+                url: "https://mcp.example.com/sse".to_string()
+            }),
+            "https://mcp.example.com/sse"
+        );
+    }
+
+    #[test]
+    fn display_name_for_uses_the_resolved_command_or_url() {
+        assert_eq!(
+            display_name_for(&McpConnectRequest::Stdio {
+                command: "github-mcp-server".to_string(),
+                args: vec!["--flag".to_string()],
+                credential_env_var: None,
+                credential_value: None,
+            }),
+            "github-mcp-server",
+            "the command alone, not its args"
+        );
+        assert_eq!(
+            display_name_for(&McpConnectRequest::Http { url: "https://example.com".to_string() }),
+            "https://example.com"
+        );
+    }
+
+    #[test]
+    fn generate_server_id_produces_distinct_values() {
+        assert_ne!(generate_server_id(), generate_server_id());
     }
 }

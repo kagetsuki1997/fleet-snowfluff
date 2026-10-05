@@ -14,7 +14,10 @@ pub mod stdio_transport;
 pub mod tool;
 pub mod transport;
 
-pub use config::{McpServerConfig, McpServerTransportConfig};
+pub use config::{
+    McpServerConfig, McpServerRecord, McpServerStatus, McpServerTransportConfig, McpServersConfig,
+    McpToolSummary,
+};
 pub use error::McpError;
 pub use http_transport::HttpTransport;
 pub use oauth::{

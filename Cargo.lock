@@ -1364,6 +1364,7 @@ dependencies = [
  "objc2-app-kit",
  "pollster",
  "rand 0.9.5",
+ "reqwest",
  "rodio",
  "rust-embed",
  "serde",

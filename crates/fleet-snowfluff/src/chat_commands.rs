@@ -18,13 +18,13 @@ use std::{
 use fleet_snowfluff_ai::{
     detect_escalation, log::LogRole, with_task_router_rules, AemeathAgentRuntime,
     AemeathContextManager, AgentRuntime, AiProvider, AiSettings, AuthMethod, ChatStream,
-    ClaudeCodeToolAccess, CliContext, ContextManager, DefaultTaskRouter, DelegateTool,
-    EscalationDecision, ExecutionPath, GetSystemContextTool, Language, ListDirectoryTool, LogEntry,
-    Message, PendingToolCall, PermissionDecider, PermissionTier, Persona, ProfileKey,
-    ProviderCredentials, ProviderKind, ProviderProfile, ReadFileTool, ResponseLanguage,
-    RoutingContext, RunCommandTool, Task, TaskRouter, TaskRouterMode, Tool, ToolCallRecord,
-    ToolCallStream, ToolCallStreamItem, ToolCallingProvider, ToolContext, ToolInvocation,
-    ToolOutcome, ToolRegistry, ToolResult, WebSearchTool,
+    ClaudeCodeToolAccess, CliContext, ConnectMcpServerTool, ContextManager, DefaultTaskRouter,
+    DelegateTool, EscalationDecision, ExecutionPath, GetSystemContextTool, Language,
+    ListDirectoryTool, LogEntry, Message, NeverConnectMcp, PendingToolCall, PermissionDecider,
+    PermissionTier, Persona, ProfileKey, ProviderCredentials, ProviderKind, ProviderProfile,
+    ReadFileTool, ResponseLanguage, RoutingContext, RunCommandTool, Task, TaskRouter,
+    TaskRouterMode, Tool, ToolCallRecord, ToolCallStream, ToolCallStreamItem, ToolCallingProvider,
+    ToolContext, ToolInvocation, ToolOutcome, ToolRegistry, ToolResult, WebSearchTool,
 };
 use futures_util::StreamExt;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
@@ -925,6 +925,7 @@ fn native_tool_registry() -> ToolRegistry {
         Arc::new(RunCommandTool::default()),
         Arc::new(GetSystemContextTool),
         Arc::new(DelegateTool),
+        Arc::new(ConnectMcpServerTool),
     ])
 }
 
@@ -994,6 +995,7 @@ async fn run_generation_with_tools(
         conversation_id: conversation_id.clone(),
         registry: &registry,
     };
+    let mcp_connector = crate::tool_confirmation::PopupMcpConnector { app: app.clone() };
 
     let result = {
         let mut on_text_delta = |delta: &str| {
@@ -1001,7 +1003,15 @@ async fn run_generation_with_tools(
             channel.send(ChatEvent::Chunk { delta: delta.to_string() }).ok();
         };
         runtime
-            .run(provider.as_ref(), messages, &registry, &ctx, &permission, &mut on_text_delta)
+            .run(
+                provider.as_ref(),
+                messages,
+                &registry,
+                &ctx,
+                &permission,
+                &mcp_connector,
+                &mut on_text_delta,
+            )
             .await
     };
 
@@ -1404,7 +1414,15 @@ async fn run_generation_mix_local(
             channel.send(ChatEvent::Chunk { delta: delta.to_string() }).ok();
         };
         runtime
-            .run(provider.as_ref(), next_messages, &registry, &ctx, &decider, &mut on_text_delta)
+            .run(
+                provider.as_ref(),
+                next_messages,
+                &registry,
+                &ctx,
+                &decider,
+                &NeverConnectMcp,
+                &mut on_text_delta,
+            )
             .await
     };
 
@@ -1905,9 +1923,11 @@ mod tests {
     fn native_tool_registry_offers_delegate_task_alongside_the_five_native_tools() {
         let registry = native_tool_registry();
         let names: Vec<String> = registry.definitions().into_iter().map(|d| d.name).collect();
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 7, "5 native tools, plus delegate_task and connect_mcp_server");
         assert!(names.contains(&"delegate_task".to_string()));
         assert!(registry.find("delegate_task").is_some());
+        assert!(names.contains(&"connect_mcp_server".to_string()));
+        assert!(registry.find("connect_mcp_server").is_some());
     }
 
     #[test]
@@ -1921,6 +1941,10 @@ mod tests {
         assert!(registry.find("list_directory").is_none());
         assert!(registry.find("run_command").is_none());
         assert!(registry.find("delegate_task").is_none());
+        assert!(
+            registry.find("connect_mcp_server").is_none(),
+            "mix-mode's own local attempt must never offer connect_mcp_server (4.6)"
+        );
     }
 
     #[test]
@@ -1934,6 +1958,10 @@ mod tests {
         assert!(registry.find("get_system_context").is_some());
         assert!(registry.find("run_command").is_none());
         assert!(registry.find("delegate_task").is_none());
+        assert!(
+            registry.find("connect_mcp_server").is_none(),
+            "mix-mode's own local attempt must never offer connect_mcp_server (4.6)"
+        );
     }
 
     /// Builds a `ToolCallStream` yielding exactly `items`, in order --

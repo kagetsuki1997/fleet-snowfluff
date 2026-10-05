@@ -32,8 +32,10 @@ pub mod task_router;
 pub mod tool_provider;
 
 pub use agent_runtime::{
-    AemeathAgentRuntime, AgentError, AgentOutcome, AgentRuntime, DelegateTool, PendingToolCall,
-    PermissionDecider, ToolInvocation, ToolOutcome, ToolRegistry,
+    AemeathAgentRuntime, AgentError, AgentOutcome, AgentRuntime, ConnectMcpServerTool,
+    DelegateTool, McpConnectOutcome, McpConnectRequest, McpConnector, NeverConnectMcp,
+    PendingToolCall, PermissionDecider, ToolInvocation, ToolOutcome, ToolRegistry,
+    CONNECT_MCP_SERVER_TOOL_NAME,
 };
 pub use agent_tool::{PermissionTier, Tool, ToolContext, ToolError, ToolResult};
 pub use context_manager::{AemeathContextManager, ContextManager, ExecutionLog, SessionLog};
@@ -45,8 +47,11 @@ pub use execution::{
 };
 pub use log::{LogEntry, LogRole};
 pub use mcp::{
-    HttpTransport, McpClient, McpError, McpServerConfig, McpServerTransportConfig, McpTool,
-    McpToolCallResult, McpToolDescriptor, McpTransport, StdioTransport,
+    build_authorization_url, discover, exchange_code_for_token, generate_pkce, generate_state,
+    probe_authorization, register_client_or_explain, AuthProbeOutcome, AuthorizationServerMetadata,
+    HttpTransport, McpClient, McpError, McpServerConfig, McpServerRecord, McpServerStatus,
+    McpServerTransportConfig, McpServersConfig, McpTool, McpToolCallResult, McpToolDescriptor,
+    McpToolSummary, McpTransport, PkceChallenge, RedirectListener, StdioTransport, TokenResponse,
 };
 pub use message::{
     Message, ModelInfo, ProviderError, ProviderKind, Role, StreamChunk, ToolCallRecord,

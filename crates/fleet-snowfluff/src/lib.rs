@@ -11,7 +11,9 @@ pub mod commands;
 pub mod config_store;
 pub mod execution_log_store;
 pub mod execution_recorder;
+pub mod mcp_commands;
 pub mod mcp_connection;
+pub mod mcp_servers_store;
 pub mod persona_store;
 pub mod secrets_store;
 pub mod session_domain;
@@ -104,6 +106,9 @@ pub fn run() {
             chat_commands::delete_conversation,
             tool_confirmation::get_pending_tool_confirmations,
             tool_confirmation::resolve_tool_confirmations,
+            mcp_commands::list_mcp_servers,
+            mcp_commands::remove_mcp_server,
+            mcp_commands::refresh_mcp_server_tools,
         ])
         .setup(|app| {
             // Always on (not just debug builds) -- otherwise a release

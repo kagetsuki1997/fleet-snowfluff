@@ -133,6 +133,13 @@ enum CallPlan {
     /// preserving the depth-1 cap. Carries the already-parsed task
     /// description.
     Delegate(String),
+    /// `call.name == CONNECT_MCP_SERVER_TOOL_NAME` *and* the registry
+    /// actually offers it -- same registry-gated reasoning as
+    /// `Delegate` above, and for the same purpose: a delegated sub-
+    /// task's own registry also omits this name (see its own
+    /// `child_registry` construction below), so it falls through to
+    /// `UnknownTool` there too. Carries the already-parsed request.
+    ConnectMcp(McpConnectRequest),
 }
 
 /// The reserved name `run()` recognizes to dispatch delegation
@@ -201,6 +208,184 @@ impl Tool for DelegateTool {
              unreachable -- this is an internal bug, not a user-facing failure"
                 .to_string(),
         ))
+    }
+}
+
+/// The reserved name `run()` recognizes to dispatch `mcp-client-support`'s
+/// own connect flow specially -- same reason and same mechanism as
+/// [`DELEGATE_TOOL_NAME`]: the model decides to call this mid-turn, so
+/// dispatch is special-cased *inside* `run()`'s own per-iteration loop,
+/// not before `run()` is ever reached.
+pub const CONNECT_MCP_SERVER_TOOL_NAME: &str = "connect_mcp_server";
+
+/// What the model supplied when requesting a connection -- resolved as
+/// given, with no allowlist matching attempted (design.md's "No
+/// curated server list, by explicit choice").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpConnectRequest {
+    Stdio {
+        command: String,
+        args: Vec<String>,
+        /// Both present together, or neither -- the environment
+        /// variable to inject a credential's value under, and the
+        /// value itself. Optional: most stdio servers (filesystem,
+        /// git, local dev tools) need no credential at all.
+        credential_env_var: Option<String>,
+        credential_value: Option<String>,
+    },
+    Http {
+        url: String,
+    },
+}
+
+/// What [`McpConnector::connect`] resolved to -- the three-way branch
+/// design.md's own Decision requires of any implementation: approved
+/// and ready (tools now available, starting the next message), still
+/// waiting on OAuth (must never block the rest of the conversation --
+/// see the `mcp` capability's own "does not block the rest of the
+/// conversation" scenario), or not approved/failed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpConnectOutcome {
+    Connected { display_name: String, tool_count: usize },
+    PendingAuthorization { display_name: String },
+    Declined,
+    Failed { reason: String },
+}
+
+/// Mirrors [`PermissionDecider`]'s own shape (design.md's chosen
+/// resolution for how `connect_mcp_server`'s dispatch reaches
+/// `AppHandle`-level capability without `agent_runtime.rs` taking on a
+/// `tauri` dependency): defined abstractly here, implemented
+/// concretely with a real `AppHandle` in the app crate, passed into
+/// `run()` the same way `permission: &dyn PermissionDecider` already
+/// is. `connect()` must itself resolve the confirm/connect/OAuth-pending
+/// split -- `run()`'s own dispatch just awaits it in place, the same
+/// way it already awaits `permission.decide(...)` for any other
+/// `Confirm`-tier call; no new control-flow concept is needed here.
+#[async_trait::async_trait]
+pub trait McpConnector: Send + Sync {
+    async fn connect(&self, request: McpConnectRequest) -> McpConnectOutcome;
+}
+
+/// A safe, never-reached default for a call site whose own registry
+/// never actually offers `connect_mcp_server` -- the recursive
+/// `delegate_task` call below, and `mix-mode-local-tools`'s own
+/// continuation call in the app crate -- mirroring `AlwaysDenyConfirm`'s
+/// own shape for the same reason. Reached only if that exclusion ever
+/// regressed, in which case this fails the call safely rather than
+/// doing anything.
+pub struct NeverConnectMcp;
+
+#[async_trait::async_trait]
+impl McpConnector for NeverConnectMcp {
+    async fn connect(&self, _request: McpConnectRequest) -> McpConnectOutcome {
+        McpConnectOutcome::Failed {
+            reason: "connecting to an MCP server is not available here".to_string(),
+        }
+    }
+}
+
+/// `connect_mcp_server`'s own schema -- registered normally so the
+/// model can discover and call it like any other tool.
+pub fn connect_mcp_server_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: CONNECT_MCP_SERVER_TOOL_NAME.to_string(),
+        description: "Connects to a third-party MCP (Model Context Protocol) server, making its \
+                      own tools available starting your next message. Resolve the server's exact \
+                      command (for a local/stdio server) or URL (for a remote/HTTP server) from \
+                      the user's request or your own knowledge -- there is no pre-vetted list to \
+                      match against. The user will be shown exactly what you resolved and must \
+                      approve it before anything connects."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "transport": {
+                    "type": "string",
+                    "enum": ["stdio", "http"],
+                    "description": "\"stdio\" for a local server run as a subprocess, \"http\" \
+                                     for a remote server reached by URL."
+                },
+                "command": {
+                    "type": "string",
+                    "description": "Required for \"stdio\": the command to run."
+                },
+                "args": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional for \"stdio\": the command's own arguments."
+                },
+                "url": {
+                    "type": "string",
+                    "description": "Required for \"http\": the server's own URL."
+                },
+                "credential_env_var": {
+                    "type": "string",
+                    "description": "Optional, \"stdio\" only: the environment variable name a \
+                                     credential should be injected under, if this server needs \
+                                     one. Must be given together with credential_value."
+                },
+                "credential_value": {
+                    "type": "string",
+                    "description": "Optional, \"stdio\" only: the credential's own value. Must \
+                                     be given together with credential_env_var."
+                }
+            },
+            "required": ["transport"],
+        }),
+    }
+}
+
+/// `connect_mcp_server`'s own `Tool` impl exists only so its
+/// `definition()` participates in the normal `ToolRegistry`/model-
+/// discovery machinery, mirroring `DelegateTool`'s own unreachable-
+/// `execute()` shape for the identical reason: `run()`'s own dispatch
+/// intercepts this reserved name before ever reaching the generic
+/// `Tool::execute()` path.
+pub struct ConnectMcpServerTool;
+
+#[async_trait::async_trait]
+impl Tool for ConnectMcpServerTool {
+    fn definition(&self) -> ToolDefinition { connect_mcp_server_definition() }
+
+    fn required_permission(&self, _args: &Value, _ctx: &ToolContext) -> PermissionTier {
+        PermissionTier::Auto
+    }
+
+    async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::error(
+            "connect_mcp_server was dispatched through the generic tool path, which should be \
+             unreachable -- this is an internal bug, not a user-facing failure"
+                .to_string(),
+        ))
+    }
+}
+
+/// Parses `connect_mcp_server`'s own arguments into a request, or
+/// `None` for anything malformed (an unrecognized `transport`, or a
+/// transport missing the field it requires) -- the same "malformed
+/// arguments" bucket every other tool call's bad input already falls
+/// into, not a new error shape.
+fn parse_mcp_connect_request(arguments: &Value) -> Option<McpConnectRequest> {
+    match arguments.get("transport").and_then(Value::as_str) {
+        Some("stdio") => {
+            let command = arguments.get("command").and_then(Value::as_str)?.to_string();
+            let args = arguments
+                .get("args")
+                .and_then(Value::as_array)
+                .map(|values| values.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .unwrap_or_default();
+            let credential_env_var =
+                arguments.get("credential_env_var").and_then(Value::as_str).map(str::to_string);
+            let credential_value =
+                arguments.get("credential_value").and_then(Value::as_str).map(str::to_string);
+            Some(McpConnectRequest::Stdio { command, args, credential_env_var, credential_value })
+        }
+        Some("http") => {
+            let url = arguments.get("url").and_then(Value::as_str)?.to_string();
+            Some(McpConnectRequest::Http { url })
+        }
+        _ => None,
     }
 }
 
@@ -314,6 +499,7 @@ pub struct AgentOutcome {
 /// or any other callback surfaces live.
 #[async_trait::async_trait]
 pub trait AgentRuntime: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
     async fn run(
         &self,
         provider: &dyn ToolCallingProvider,
@@ -321,6 +507,7 @@ pub trait AgentRuntime: Send + Sync {
         registry: &ToolRegistry,
         ctx: &ToolContext,
         permission: &dyn PermissionDecider,
+        mcp_connector: &dyn McpConnector,
         on_text_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> Result<AgentOutcome, AgentError>;
 }
@@ -352,6 +539,7 @@ fn tool_result_content(result: ToolResult) -> String {
 
 #[async_trait::async_trait]
 impl AgentRuntime for AemeathAgentRuntime {
+    #[allow(clippy::too_many_arguments)]
     async fn run(
         &self,
         provider: &dyn ToolCallingProvider,
@@ -359,6 +547,7 @@ impl AgentRuntime for AemeathAgentRuntime {
         registry: &ToolRegistry,
         ctx: &ToolContext,
         permission: &dyn PermissionDecider,
+        mcp_connector: &dyn McpConnector,
         on_text_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> Result<AgentOutcome, AgentError> {
         let mut last_text = String::new();
@@ -429,6 +618,12 @@ impl AgentRuntime for AemeathAgentRuntime {
                             None => CallPlan::MalformedArguments,
                         };
                     }
+                    if call.name == CONNECT_MCP_SERVER_TOOL_NAME {
+                        return match parse_mcp_connect_request(&call.arguments) {
+                            Some(request) => CallPlan::ConnectMcp(request),
+                            None => CallPlan::MalformedArguments,
+                        };
+                    }
                     if !call.arguments.is_object() {
                         return CallPlan::MalformedArguments;
                     }
@@ -491,7 +686,17 @@ impl AgentRuntime for AemeathAgentRuntime {
                         // same `MAX_CONCURRENT_TOOL_CALLS` bound as
                         // every other tool call, not a separate limit.
                         let task = task.clone();
-                        let child_registry = registry.without(DELEGATE_TOOL_NAME);
+                        // Also excludes `CONNECT_MCP_SERVER_TOOL_NAME`,
+                        // for the same reason it excludes itself:
+                        // opening a browser/showing a real confirmation
+                        // popup from inside an invisible, no-history
+                        // delegated sub-task is the same category of
+                        // blast-radius concern `run_command`/`delegate_task`
+                        // are already kept out of a child's own registry
+                        // for.
+                        let child_registry = registry
+                            .without(DELEGATE_TOOL_NAME)
+                            .without(CONNECT_MCP_SERVER_TOOL_NAME);
                         auto_futures.push(Box::pin(async move {
                             let child_messages = vec![
                                 Message::system(crate::prompt::delegated_task_system_prompt()),
@@ -504,6 +709,7 @@ impl AgentRuntime for AemeathAgentRuntime {
                                     &child_registry,
                                     ctx,
                                     permission,
+                                    &NeverConnectMcp,
                                     &mut |_: &str| {},
                                 )
                                 .await;
@@ -513,6 +719,41 @@ impl AgentRuntime for AemeathAgentRuntime {
                                     (index, false, format!("delegated sub-task failed: {err}"))
                                 }
                             }
+                        }));
+                    }
+                    CallPlan::ConnectMcp(request) => {
+                        // `mcp_connector.connect()` is awaited in place,
+                        // the same way `permission.decide(...)` already
+                        // is for any other `Confirm`-tier call -- its
+                        // own implementation resolves the confirm/
+                        // connect/OAuth-pending split and must never
+                        // itself block on OAuth completion (design.md's
+                        // own Decision); there is no new control-flow
+                        // concept for `run()` to learn here.
+                        let request = request.clone();
+                        auto_futures.push(Box::pin(async move {
+                            let (ok, content) = match mcp_connector.connect(request).await {
+                                McpConnectOutcome::Connected { display_name, tool_count } => (
+                                    true,
+                                    format!(
+                                        "Connected to \"{display_name}\" -- {tool_count} tool(s) \
+                                         will be available starting your next message."
+                                    ),
+                                ),
+                                McpConnectOutcome::PendingAuthorization { display_name } => (
+                                    true,
+                                    format!(
+                                        "Started authorizing \"{display_name}\" -- the user needs \
+                                         to finish in their browser; its tools will be available \
+                                         once that's done."
+                                    ),
+                                ),
+                                McpConnectOutcome::Declined => {
+                                    (false, "the user did not approve this connection".to_string())
+                                }
+                                McpConnectOutcome::Failed { reason } => (false, reason),
+                            };
+                            (index, ok, content)
                         }));
                     }
                     _ => {}
@@ -565,16 +806,18 @@ impl AgentRuntime for AemeathAgentRuntime {
                             outcome: ToolOutcome::DeniedByPolicy,
                         });
                     }
-                    // A delegated sub-task's result folds into this
+                    // A delegated sub-task's result, and a
+                    // `connect_mcp_server` outcome, both fold into this
                     // turn's own trace as an ordinary `Executed`
                     // `ToolInvocation` -- no persisted child `Execution`
                     // record (design.md's Decision 4); the tool-activity
                     // note `execution-log-and-context` already built
                     // picks this up for free on the next turn, same as
                     // any other tool.
-                    CallPlan::Auto(_) | CallPlan::Delegate(_) => {
+                    CallPlan::Auto(_) | CallPlan::Delegate(_) | CallPlan::ConnectMcp(_) => {
                         let (ok, content) = auto_results[index].take().expect(
-                            "every Auto-tier/Delegate call has a result by the writeback pass",
+                            "every Auto-tier/Delegate/ConnectMcp call has a result by the \
+                             writeback pass",
                         );
                         messages.push(Message::tool_result(call.id.clone(), content));
                         trace.push(ToolInvocation {
@@ -662,6 +905,178 @@ mod tests {
         let tool = DelegateTool;
         assert_eq!(tool.required_permission(&json!({"task": "x"}), &ctx()), PermissionTier::Auto);
         assert_eq!(tool.definition().name, DELEGATE_TOOL_NAME);
+    }
+
+    #[test]
+    fn connect_mcp_server_definition_has_the_reserved_name_and_a_valid_schema() {
+        let definition = connect_mcp_server_definition();
+        assert_eq!(definition.name, CONNECT_MCP_SERVER_TOOL_NAME);
+        assert_eq!(definition.parameters["type"], "object");
+        assert_eq!(definition.parameters["required"], json!(["transport"]));
+        assert_eq!(
+            definition.parameters["properties"]["transport"]["enum"],
+            json!(["stdio", "http"])
+        );
+    }
+
+    #[test]
+    fn connect_mcp_server_tool_matches_the_reserved_definition() {
+        let tool = ConnectMcpServerTool;
+        assert_eq!(tool.definition().name, CONNECT_MCP_SERVER_TOOL_NAME);
+    }
+
+    #[test]
+    fn parse_mcp_connect_request_handles_both_transports() {
+        assert_eq!(
+            parse_mcp_connect_request(
+                &json!({"transport": "stdio", "command": "npx", "args": ["-y", "pkg"]})
+            ),
+            Some(McpConnectRequest::Stdio {
+                command: "npx".to_string(),
+                args: vec!["-y".to_string(), "pkg".to_string()],
+                credential_env_var: None,
+                credential_value: None,
+            })
+        );
+        assert_eq!(
+            parse_mcp_connect_request(&json!({"transport": "stdio", "command": "cat"})),
+            Some(McpConnectRequest::Stdio {
+                command: "cat".to_string(),
+                args: vec![],
+                credential_env_var: None,
+                credential_value: None,
+            }),
+            "args is optional, defaulting to empty"
+        );
+        assert_eq!(
+            parse_mcp_connect_request(
+                &json!({"transport": "http", "url": "https://example.com/sse"})
+            ),
+            Some(McpConnectRequest::Http { url: "https://example.com/sse".to_string() })
+        );
+    }
+
+    #[test]
+    fn parse_mcp_connect_request_picks_up_a_stdio_credential() {
+        let request = parse_mcp_connect_request(&json!({
+            "transport": "stdio",
+            "command": "github-mcp-server",
+            "credential_env_var": "GITHUB_TOKEN",
+            "credential_value": "ghp_secret",
+        }));
+        assert_eq!(
+            request,
+            Some(McpConnectRequest::Stdio {
+                command: "github-mcp-server".to_string(),
+                args: vec![],
+                credential_env_var: Some("GITHUB_TOKEN".to_string()),
+                credential_value: Some("ghp_secret".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_mcp_connect_request_rejects_malformed_or_unknown_transports() {
+        assert_eq!(
+            parse_mcp_connect_request(&json!({"transport": "stdio"})),
+            None,
+            "missing command"
+        );
+        assert_eq!(parse_mcp_connect_request(&json!({"transport": "http"})), None, "missing url");
+        assert_eq!(parse_mcp_connect_request(&json!({"transport": "carrier_pigeon"})), None);
+        assert_eq!(parse_mcp_connect_request(&json!({})), None);
+    }
+
+    #[tokio::test]
+    async fn connect_mcp_server_dispatch_is_reached_with_the_parsed_request() {
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: CONNECT_MCP_SERVER_TOOL_NAME.to_string(),
+                arguments: json!({"transport": "stdio", "command": "npx", "args": ["-y", "server-fs"]}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let registry = ToolRegistry::new(vec![Arc::new(ConnectMcpServerTool)]);
+        let connector = RecordingMcpConnector {
+            requests: Mutex::new(Vec::new()),
+            outcome: McpConnectOutcome::Connected {
+                display_name: "Local FS".to_string(),
+                tool_count: 3,
+            },
+        };
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &connector,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            result.trace,
+            vec![ToolInvocation {
+                name: CONNECT_MCP_SERVER_TOOL_NAME.to_string(),
+                outcome: ToolOutcome::Executed { ok: true }
+            }]
+        );
+        let requests = connector.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "dispatch must reach the connector exactly once");
+        assert_eq!(
+            requests[0],
+            McpConnectRequest::Stdio {
+                command: "npx".to_string(),
+                args: vec!["-y".to_string(), "server-fs".to_string()],
+                credential_env_var: None,
+                credential_value: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_connect_request_never_reaches_the_connector() {
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: CONNECT_MCP_SERVER_TOOL_NAME.to_string(),
+                arguments: json!({"transport": "stdio"}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let registry = ToolRegistry::new(vec![Arc::new(ConnectMcpServerTool)]);
+        let connector = RecordingMcpConnector {
+            requests: Mutex::new(Vec::new()),
+            outcome: McpConnectOutcome::Declined,
+        };
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &connector,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            result.trace.as_slice(),
+            [ToolInvocation { outcome: ToolOutcome::Rejected { .. }, .. }]
+        ));
+        assert!(
+            connector.requests.lock().unwrap().is_empty(),
+            "a malformed request must never reach the connector"
+        );
     }
 
     #[test]
@@ -771,6 +1186,22 @@ mod tests {
     #[async_trait::async_trait]
     impl PermissionDecider for AlwaysDeny {
         async fn decide(&self, _calls: &[PendingToolCall]) -> HashSet<String> { HashSet::new() }
+    }
+
+    /// Records every request it's asked to connect, and returns the
+    /// same canned `outcome` each time -- a scripted `McpConnector`
+    /// double, same purpose as `ScriptedProvider`.
+    struct RecordingMcpConnector {
+        requests: Mutex<Vec<McpConnectRequest>>,
+        outcome: McpConnectOutcome,
+    }
+
+    #[async_trait::async_trait]
+    impl McpConnector for RecordingMcpConnector {
+        async fn connect(&self, request: McpConnectRequest) -> McpConnectOutcome {
+            self.requests.lock().unwrap().push(request);
+            self.outcome.clone()
+        }
     }
 
     /// A tool that records how many times it actually ran, so tests can
@@ -898,6 +1329,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -954,6 +1386,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysDeny,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1024,6 +1457,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysDeny,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1138,6 +1572,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1209,6 +1644,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1260,6 +1696,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &PanicsIfAskedToDecide,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1291,6 +1728,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1348,6 +1786,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1379,6 +1818,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_delegated_sub_task_cannot_call_connect_mcp_server() {
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: DELEGATE_TOOL_NAME.to_string(),
+                arguments: json!({"task": "try to connect"}),
+            }],
+            // Child hallucinates connect_mcp_server anyway -- its own
+            // registry (built via `.without(CONNECT_MCP_SERVER_TOOL_NAME)`
+            // too) does not have it.
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_1".to_string(),
+                name: CONNECT_MCP_SERVER_TOOL_NAME.to_string(),
+                arguments: json!({"transport": "http", "url": "https://example.com"}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("child done despite trying to connect".to_string())],
+            vec![ToolCallStreamItem::TextDelta("parent done".to_string())],
+        ]);
+        let registry =
+            ToolRegistry::new(vec![Arc::new(DelegateTool), Arc::new(ConnectMcpServerTool)]);
+        let connector = RecordingMcpConnector {
+            requests: Mutex::new(Vec::new()),
+            outcome: McpConnectOutcome::Declined,
+        };
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &connector,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.text, "parent done");
+        assert!(
+            connector.requests.lock().unwrap().is_empty(),
+            "the outer (real) connector must never be reached by a delegated child"
+        );
+
+        let received = provider.received.lock().unwrap();
+        let childs_second_turn = &received[2];
+        let rejection = childs_second_turn
+            .iter()
+            .find(|m| m.role == crate::message::Role::Tool)
+            .expect("the child's own connect attempt got a tool result");
+        assert!(
+            rejection.content.contains("unknown tool"),
+            "rejected the same way a call to any other unknown tool is: {}",
+            rejection.content
+        );
+    }
+
+    #[tokio::test]
     async fn a_delegated_sub_tasks_narration_never_reaches_the_parents_callback() {
         let provider = ScriptedProvider::new(vec![
             vec![ToolCallStreamItem::ToolCall {
@@ -1402,6 +1899,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |delta: &str| streamed_in_callback.lock().unwrap().push_str(delta),
             )
             .await
@@ -1460,6 +1958,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1496,6 +1995,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             ),
         )
@@ -1527,6 +2027,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1564,6 +2065,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysDeny,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1585,6 +2087,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1616,6 +2119,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1656,6 +2160,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |delta: &str| streamed_in_callback.lock().unwrap().push_str(delta),
             )
             .await
