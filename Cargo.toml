@@ -11,6 +11,7 @@ repository = "https://github.com/kagetsuki1997/fleet-snowfluff"
 [workspace.dependencies]
 async-stream = "0.3.6"
 async-trait = "0.1.92"
+base64 = "0.22"
 chrono = { version = "0.4.45", features = ["clock"] }
 core-foundation = "0.10"
 core-graphics = "0.25"
@@ -26,13 +27,14 @@ objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSResponder", "NSView"] }
 pollster = "0.4"
 rand = "0.9"
-reqwest = { version = "0.13.5", features = ["json", "stream"] }
+reqwest = { version = "0.13.5", features = ["json", "stream", "form"] }
 rodio = { version = "0.22", default-features = false, features = ["playback", "wav"] }
 rust-embed = "8"
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = "1.2.0"
 serde_json = "1"
 shadow-rs = { version = "2", default-features = false }
+sha2 = "0.10"
 sys-locale = "0.3"
 sysinfo = "0.39.6"
 tauri = { version = "2.8.5", features = [
@@ -47,7 +49,7 @@ tauri-plugin-dialog = "2"
 tauri-plugin-log = "2"
 tauri-plugin-shell = "2"
 tauri-plugin-updater = "2"
-tokio = { version = "1.53.1", features = ["rt", "macros", "time", "process"] }
+tokio = { version = "1.53.1", features = ["rt", "macros", "time", "process", "net"] }
 wgpu = "27"
 windows = { version = "0.61", features = [
   "Win32_Foundation",

@@ -38,7 +38,7 @@ pub use agent_runtime::{
 pub use agent_tool::{PermissionTier, Tool, ToolContext, ToolError, ToolResult};
 pub use context_manager::{AemeathContextManager, ContextManager, ExecutionLog, SessionLog};
 pub use conversation::ConversationId;
-pub use credentials::ProviderCredentials;
+pub use credentials::{McpServerCredential, ProviderCredentials};
 pub use execution::{
     pair_events, parse_events, serialize_event, Execution, ExecutionEnd, ExecutionEvent,
     ExecutionId, ExecutionPath, ExecutionStart, ExecutionStatus,

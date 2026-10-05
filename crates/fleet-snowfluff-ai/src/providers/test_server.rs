@@ -31,19 +31,33 @@ impl CapturedRequest {
 /// `chunks` are written one at a time with a short pause between them,
 /// so the client sees them as separate reads.
 pub fn serve_once(status: u16, chunks: Vec<Vec<u8>>) -> (String, JoinHandle<CapturedRequest>) {
+    serve_once_with_headers(status, Vec::new(), chunks)
+}
+
+/// Like [`serve_once`], but lets a test add extra response headers
+/// (`mcp-client-support`'s OAuth-discovery tests need a `WWW-Authenticate`
+/// value on a `401`, which the fixed `Content-Type` this server always
+/// sends can't express on its own).
+pub fn serve_once_with_headers(
+    status: u16,
+    extra_headers: Vec<(&str, &str)>,
+    chunks: Vec<Vec<u8>>,
+) -> (String, JoinHandle<CapturedRequest>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
     let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let extra_headers: Vec<(String, String)> =
+        extra_headers.into_iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
     let handle = std::thread::spawn(move || {
         let (mut stream, _) = listener.accept().expect("a client connects");
         let captured = read_request(&mut stream);
 
         let reason = if status == 200 { "OK" } else { "Error" };
-        write!(
-            stream,
-            "HTTP/1.1 {status} {reason}\r\nContent-Type: text/event-stream\r\nConnection: \
-             close\r\n\r\n"
-        )
-        .unwrap();
+        write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: text/event-stream\r\n")
+            .unwrap();
+        for (name, value) in &extra_headers {
+            write!(stream, "{name}: {value}\r\n").unwrap();
+        }
+        write!(stream, "Connection: close\r\n\r\n").unwrap();
         for chunk in chunks {
             stream.write_all(&chunk).unwrap();
             stream.flush().unwrap();
