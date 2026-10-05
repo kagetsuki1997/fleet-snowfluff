@@ -91,6 +91,46 @@ async fn connect(
     Ok(client)
 }
 
+/// Everything an in-flight OAuth attempt needs to finish, once a code
+/// is in hand -- whether that code comes from the redirect listener
+/// catching it, or (Group 5.3) the user pasting it manually when the
+/// loopback redirect didn't work.
+pub struct PendingOAuthAttempt {
+    pub config: McpServerConfig,
+    pub client: reqwest::Client,
+    pub token_endpoint: String,
+    pub redirect_uri: String,
+    pub client_id: String,
+    pub code_verifier: String,
+}
+
+/// App-lifetime bookkeeping for OAuth attempts still waiting on a code
+/// -- keyed by server id, same tier as `McpConnectionState`. Exists
+/// because the redirect listener and a manual code-paste (Group 5.3)
+/// are two *competing* ways the same attempt can finish: whichever
+/// calls [`PendingOAuthState::take`] first gets to finish it, the
+/// other finds nothing left to do. Never persisted to disk --
+/// in-flight-only state, gone the moment it's consumed or the app
+/// restarts.
+#[derive(Default)]
+pub struct PendingOAuthState {
+    attempts: Mutex<HashMap<String, PendingOAuthAttempt>>,
+}
+
+impl PendingOAuthState {
+    pub async fn insert(&self, server_id: String, attempt: PendingOAuthAttempt) {
+        self.attempts.lock().await.insert(server_id, attempt);
+    }
+
+    /// Removes and returns `server_id`'s own pending attempt, if it's
+    /// still there -- `None` if it was never registered, already
+    /// consumed by whichever of the two finishing paths got there
+    /// first, or the server id is simply unknown.
+    pub async fn take(&self, server_id: &str) -> Option<PendingOAuthAttempt> {
+        self.attempts.lock().await.remove(server_id)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -196,5 +236,40 @@ mod tests {
     async fn removing_an_unknown_id_is_a_harmless_no_op() {
         let state = McpConnectionState::default();
         state.remove("never-connected").await;
+    }
+
+    fn pending_attempt() -> PendingOAuthAttempt {
+        PendingOAuthAttempt {
+            config: fleet_snowfluff_ai::McpServerConfig {
+                id: "github".to_string(),
+                display_name: "GitHub".to_string(),
+                transport: fleet_snowfluff_ai::McpServerTransportConfig::Http {
+                    url: "https://example.com".to_string(),
+                },
+            },
+            client: reqwest::Client::new(),
+            token_endpoint: "https://auth.example.com/token".to_string(),
+            redirect_uri: "http://127.0.0.1:1/callback".to_string(),
+            client_id: "client-1".to_string(),
+            code_verifier: "verifier".to_string(),
+        }
+    }
+
+    #[tokio::test]
+    async fn taking_a_pending_oauth_attempt_removes_it_so_a_second_taker_finds_nothing() {
+        let state = PendingOAuthState::default();
+        state.insert("github".to_string(), pending_attempt()).await;
+
+        let first = state.take("github").await;
+        assert!(first.is_some(), "the first taker (redirect listener, or a manual paste) gets it");
+
+        let second = state.take("github").await;
+        assert!(second.is_none(), "whichever finishes second finds nothing left to do");
+    }
+
+    #[tokio::test]
+    async fn taking_an_unregistered_id_is_none() {
+        let state = PendingOAuthState::default();
+        assert!(state.take("never-started").await.is_none());
     }
 }

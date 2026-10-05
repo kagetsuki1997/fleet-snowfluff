@@ -27,7 +27,7 @@ use tokio::sync::oneshot;
 
 use crate::{
     chat_commands::{ChatRuntimeState, RememberKey},
-    mcp_connection::McpConnectionState,
+    mcp_connection::{McpConnectionState, PendingOAuthAttempt, PendingOAuthState},
     session_domain::ConversationId,
 };
 
@@ -339,41 +339,40 @@ pub(crate) fn summarize_tools(
         .collect()
 }
 
-/// Finishes an OAuth flow once the redirect listener catches a code:
-/// exchanges it for a token, stores the token, and completes the
-/// connection -- run as a detached background task from
+/// Finishes an OAuth flow once a code is in hand -- from the redirect
+/// listener catching it (run as a detached background task from
 /// `start_oauth_flow`, specifically so nothing in the chat turn that
-/// triggered it ever awaits this (the "does not block the rest of the
-/// conversation" scenario).
-#[allow(clippy::too_many_arguments)]
-async fn finish_oauth(
-    app: AppHandle,
-    config: McpServerConfig,
-    client: reqwest::Client,
-    token_endpoint: String,
-    code: String,
-    redirect_uri: String,
-    client_id: String,
-    code_verifier: String,
-) {
+/// triggered it ever awaits this -- the "does not block the rest of
+/// the conversation" scenario), or from a manual paste (Group 5.3,
+/// `submit_mcp_oauth_code`). Exchanges the code for a token, stores
+/// it, and completes the connection.
+pub(crate) async fn finish_oauth(
+    app: &AppHandle,
+    attempt: PendingOAuthAttempt,
+    code: &str,
+) -> McpConnectOutcome {
     let token = match exchange_code_for_token(
-        &client,
-        &token_endpoint,
-        &code,
-        &redirect_uri,
-        &client_id,
-        &code_verifier,
+        &attempt.client,
+        &attempt.token_endpoint,
+        code,
+        &attempt.redirect_uri,
+        &attempt.client_id,
+        &attempt.code_verifier,
     )
     .await
     {
         Ok(token) => token,
         Err(err) => {
-            log::warn!("MCP OAuth token exchange for \"{}\" failed: {err}", config.display_name);
-            return;
+            log::warn!(
+                "MCP OAuth token exchange for \"{}\" failed: {err}",
+                attempt.config.display_name
+            );
+            return McpConnectOutcome::Failed { reason: err.to_string() };
         }
     };
 
-    let mut creds = crate::secrets_store::load(&app);
+    let config = attempt.config;
+    let mut creds = crate::secrets_store::load(app);
     creds.mcp_server_credentials.insert(
         config.id.clone(),
         McpServerCredential::OAuthToken {
@@ -381,22 +380,26 @@ async fn finish_oauth(
             refresh_token: token.refresh_token.clone(),
         },
     );
-    crate::secrets_store::save(&app, &creds);
+    crate::secrets_store::save(app, &creds);
 
     let connection_state = app.state::<McpConnectionState>();
     match connection_state.connection_for(&config, Some(&token.access_token)).await {
         Ok(client_conn) => {
             let tools = client_conn.list_tools().await.map(summarize_tools).unwrap_or_default();
+            let tool_count = tools.len();
+            let display_name = config.display_name.clone();
             upsert_server_record(
-                &app,
+                app,
                 McpServerRecord { config, status: McpServerStatus::Ready, tools },
             );
+            McpConnectOutcome::Connected { display_name, tool_count }
         }
         Err(err) => {
             log::warn!(
                 "MCP connection for \"{}\" failed right after authorization: {err}",
                 config.display_name
             );
+            McpConnectOutcome::Failed { reason: err.to_string() }
         }
     }
 }
@@ -454,6 +457,25 @@ async fn start_oauth_flow(
         },
     );
 
+    // Registered *before* opening the browser: a manual code paste
+    // (Group 5.3) racing the redirect listener must find this attempt
+    // the moment it could plausibly exist, not after some further
+    // setup here.
+    let pending_state = app.state::<PendingOAuthState>();
+    pending_state
+        .insert(
+            config.id.clone(),
+            PendingOAuthAttempt {
+                config: config.clone(),
+                client: client.clone(),
+                token_endpoint: metadata.token_endpoint.clone(),
+                redirect_uri: redirect_uri.clone(),
+                client_id: registration.client_id.clone(),
+                code_verifier: pkce.verifier.clone(),
+            },
+        )
+        .await;
+
     // `Shell::open` is deprecated in favor of `tauri-plugin-opener`, but
     // remains functional; this app already depends on
     // `tauri-plugin-shell` for other reasons, and adding a second
@@ -462,15 +484,14 @@ async fn start_oauth_flow(
     #[allow(deprecated)]
     let opened = app.shell().open(&authorization_url, None);
     if let Err(err) = opened {
+        pending_state.take(&config.id).await;
         return McpConnectOutcome::Failed { reason: format!("failed to open the browser: {err}") };
     }
 
     let display_name = config.display_name.clone();
     let task_display_name = display_name.clone();
+    let server_id = config.id.clone();
     let app = app.clone();
-    let token_endpoint = metadata.token_endpoint.clone();
-    let client_id = registration.client_id.clone();
-    let code_verifier = pkce.verifier.clone();
     tokio::spawn(async move {
         let code = match listener.wait_for_code(&state).await {
             Ok(code) => code,
@@ -479,17 +500,13 @@ async fn start_oauth_flow(
                 return;
             }
         };
-        finish_oauth(
-            app,
-            config,
-            client,
-            token_endpoint,
-            code,
-            redirect_uri,
-            client_id,
-            code_verifier,
-        )
-        .await;
+        // `take`, not a plain lookup: if a manual code paste (Group
+        // 5.3) already consumed this attempt, there is nothing left
+        // for the redirect to finish -- it arriving late is expected,
+        // not an error.
+        if let Some(attempt) = app.state::<PendingOAuthState>().take(&server_id).await {
+            finish_oauth(&app, attempt, &code).await;
+        }
     });
 
     McpConnectOutcome::PendingAuthorization { display_name }
@@ -500,7 +517,10 @@ async fn start_oauth_flow(
 /// needs OAuth (never declared upfront -- see `mcp::oauth`'s own doc
 /// comment), and either connects directly (stdio, or HTTP needing no
 /// auth) or hands off to [`start_oauth_flow`].
-async fn attempt_connection(app: &AppHandle, request: McpConnectRequest) -> McpConnectOutcome {
+pub(crate) async fn attempt_connection(
+    app: &AppHandle,
+    request: McpConnectRequest,
+) -> McpConnectOutcome {
     let display_name = display_name_for(&request);
     let id = generate_server_id();
 

@@ -1,23 +1,59 @@
-//! Settings-UI-callable commands for connected MCP servers (Group
-//! 4.4/4.5): listing, removal (credential + config entry + live
-//! connection, together), and refreshing a connected server's own
-//! cached tools. All plain `#[tauri::command]`s -- unlike
+//! Settings-UI-callable commands for connected MCP servers (Groups
+//! 4.4/4.5 and 5.2/5.3): listing, adding a server manually, removal
+//! (credential + config entry + live connection, together), refreshing
+//! a connected server's own cached tools, and submitting a manually
+//! pasted OAuth code. All plain `#[tauri::command]`s -- unlike
 //! `connect_mcp_server`'s own chat-triggered path, these already
 //! receive `AppHandle` the normal way and never go through
 //! `AgentRuntime::run()`'s dispatch at all (design.md's own Decision).
 
 use fleet_snowfluff_ai::{
-    McpServerCredential, McpServerRecord, McpServersConfig, McpToolSummary, ProviderCredentials,
+    McpConnectOutcome, McpConnectRequest, McpServerCredential, McpServerRecord, McpServersConfig,
+    McpToolSummary, ProviderCredentials,
 };
 use tauri::{AppHandle, State};
 
 use crate::{
-    mcp_connection::McpConnectionState, mcp_servers_store, secrets_store, tool_confirmation,
+    mcp_connection::{McpConnectionState, PendingOAuthState},
+    mcp_servers_store, secrets_store, tool_confirmation,
 };
 
 #[tauri::command]
 pub fn list_mcp_servers(app: AppHandle) -> Vec<McpServerRecord> {
     mcp_servers_store::load(&app).servers
+}
+
+/// The manual "add server" path (Group 5.2): the user filling in the
+/// Settings UI's own form and submitting it already *is* their
+/// explicit approval -- the same bar `connect_mcp_server`'s own
+/// `Confirm`-tier popup exists to clear for the chat-triggered path --
+/// so this calls `attempt_connection` directly rather than routing
+/// through `PopupMcpConnector`'s own (redundant, here) confirmation
+/// step.
+#[tauri::command]
+pub async fn add_mcp_server(app: AppHandle, request: McpConnectRequest) -> McpConnectOutcome {
+    tool_confirmation::attempt_connection(&app, request).await
+}
+
+/// The manual "paste the code" fallback (Group 5.3, design.md's own
+/// 2.4) for when the loopback redirect can't be used. Competes with
+/// the redirect listener to finish the same attempt -- whichever calls
+/// `PendingOAuthState::take` first wins; the other finds nothing left
+/// to do.
+#[tauri::command]
+pub async fn submit_mcp_oauth_code(
+    app: AppHandle,
+    pending: State<'_, PendingOAuthState>,
+    server_id: String,
+    code: String,
+) -> Result<McpConnectOutcome, String> {
+    match pending.take(&server_id).await {
+        Some(attempt) => Ok(tool_confirmation::finish_oauth(&app, attempt, &code).await),
+        None => Err(format!(
+            "no pending authorization for server \"{server_id}\" -- it may have already finished, \
+             or this attempt is no longer active"
+        )),
+    }
 }
 
 /// The pure part of removal: drops `server_id`'s stored credential (if

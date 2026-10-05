@@ -526,3 +526,40 @@ body.bubble-window #app {
   padding: 0.2rem 0.6rem;
   font-size: 0.8em;
 }
+
+/* Connected MCP servers (mcp-client-support) -- reuses the
+   `.ai-profile-row`/`.ai-profile-name`/`.ai-profile-body` pattern
+   above, one <details> per connected server, same reasoning:
+   collapsible without needing a separate sub-tab. */
+#ai-mcp-servers {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.ai-mcp-server-status {
+  font-size: 0.8em;
+  color: var(--pico-muted-color);
+  flex-shrink: 0;
+}
+
+.ai-mcp-remove-button,
+.ai-mcp-refresh-button,
+.ai-mcp-submit-code-button {
+  width: auto;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.8em;
+}
+
+.ai-mcp-tools-list {
+  margin: 0;
+  padding-left: 1.25rem;
+  font-size: 0.9em;
+}
+
+.ai-mcp-add-row summary {
+  cursor: pointer;
+}

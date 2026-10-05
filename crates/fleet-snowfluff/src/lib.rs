@@ -107,8 +107,10 @@ pub fn run() {
             tool_confirmation::get_pending_tool_confirmations,
             tool_confirmation::resolve_tool_confirmations,
             mcp_commands::list_mcp_servers,
+            mcp_commands::add_mcp_server,
             mcp_commands::remove_mcp_server,
             mcp_commands::refresh_mcp_server_tools,
+            mcp_commands::submit_mcp_oauth_code,
         ])
         .setup(|app| {
             // Always on (not just debug builds) -- otherwise a release
@@ -227,6 +229,7 @@ pub fn run() {
             app.manage(chat_pause::ChatPauseState::default());
             app.manage(tool_confirmation::ToolConfirmationState::default());
             app.manage(mcp_connection::McpConnectionState::default());
+            app.manage(mcp_connection::PendingOAuthState::default());
             app.manage(Mutex::<Option<tauri_plugin_updater::Update>>::new(None));
             tray::build(&app_handle)?;
             updater::spawn_startup_check(app_handle.clone());

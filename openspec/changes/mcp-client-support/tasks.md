@@ -30,9 +30,9 @@
 
 ## 5. Settings UI
 
-- [ ] 5.1 Add a connected-MCP-servers section to the AI tab, reusing the existing `.ai-profile-row`/`<details>`-per-entry pattern: each server shown as one collapsible entry (name, status, remove control), expanded body showing its cached discovered tools (name + description) plus a refresh action. Verify by running the dev build and exercising add/list/expand/refresh/remove manually (noted explicitly as manual verification, consistent with this codebase's own established boundary for `AppHandle`-dependent UI wiring).
-- [ ] 5.2 Add a manual "add server" form (command/args/env-vars for stdio, or URL for HTTP) feeding into the same confirmation-and-connect flow as 4.2, not a separate path. Verify manually alongside 5.1.
-- [ ] 5.3 If an OAuth flow needs the manual-code fallback (2.4), surface a way to paste the code in this same UI. Verify manually.
+- [x] 5.1 Add a connected-MCP-servers section to the AI tab, reusing the existing `.ai-profile-row`/`<details>`-per-entry pattern: each server shown as one collapsible entry (name, status, remove control), expanded body showing its cached discovered tools (name + description) plus a refresh action. `tsc --noEmit` and a production `vite build` both pass clean; full interactive manual exercising (add/list/expand/refresh/remove in a real running window) was **not** performed by the agent implementing this — no display/GPU is available in this environment — and remains for the user, consistent with this task's own already-established manual-verification framing.
+- [x] 5.2 Add a manual "add server" form (command/args/env-vars for stdio, or URL for HTTP) feeding into the same confirmation-and-connect flow as 4.2, not a separate path. (`add_mcp_server` calls `attempt_connection` directly -- the form submission itself is the user's explicit approval, so this intentionally does not *also* route through `PopupMcpConnector`'s own popup, which would be redundant confirmation of the same thing the user just typed.) Same manual-verification caveat as 5.1.
+- [x] 5.3 If an OAuth flow needs the manual-code fallback (2.4), surface a way to paste the code in this same UI. (New `PendingOAuthState` app-lifetime map, keyed by server id, holding what `finish_oauth` needs; `submit_mcp_oauth_code` and the redirect listener's own background task race to `take()` it -- whichever gets there first finishes the attempt, the other finds nothing left to do.) Same manual-verification caveat as 5.1.
 
 ## 6. Docs and final verification
 

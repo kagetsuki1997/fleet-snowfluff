@@ -220,8 +220,12 @@ pub const CONNECT_MCP_SERVER_TOOL_NAME: &str = "connect_mcp_server";
 
 /// What the model supplied when requesting a connection -- resolved as
 /// given, with no allowlist matching attempted (design.md's "No
-/// curated server list, by explicit choice").
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// curated server list, by explicit choice"). `Serialize`/`Deserialize`
+/// so the Settings UI's own manual "add server" form (Group 5.2) can
+/// build one directly and send it across IPC, feeding the same
+/// `attempt_connection` the chat-triggered path uses.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "transport", rename_all = "snake_case")]
 pub enum McpConnectRequest {
     Stdio {
         command: String,
@@ -243,8 +247,11 @@ pub enum McpConnectRequest {
 /// and ready (tools now available, starting the next message), still
 /// waiting on OAuth (must never block the rest of the conversation --
 /// see the `mcp` capability's own "does not block the rest of the
-/// conversation" scenario), or not approved/failed.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// conversation" scenario), or not approved/failed. `Serialize` so the
+/// Settings UI's manual "add server" command (Group 5.2) can return
+/// one directly to the frontend.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
 pub enum McpConnectOutcome {
     Connected { display_name: String, tool_count: usize },
     PendingAuthorization { display_name: String },
