@@ -1,24 +1,4 @@
-# Spec: task-router
-
-## Purpose
-
-Defines how Aemeath decides which provider profile handles a given chat message — the routing modes available, how a routing decision is made, and how it falls back when the chosen path is unavailable or unsuitable.
-
-## Requirements
-
-### Requirement: Task routing mode
-
-The application SHALL support two task-routing modes: single, where every message is handled by the default profile, and mixed, where an eligible local profile is tried first for a message before falling back to the default profile. The mode SHALL default to single, so upgrading an existing installation does not change existing behavior.
-
-#### Scenario: Single mode matches existing behavior
-
-- **WHEN** task routing mode is single
-- **THEN** every message is sent to the default profile, regardless of its content
-
-#### Scenario: Mixed mode is opt-in
-
-- **WHEN** an existing installation is upgraded to a version that supports task routing modes
-- **THEN** task routing mode is single until the user explicitly changes it
+## MODIFIED Requirements
 
 ### Requirement: Local-first classification in mixed mode
 
@@ -53,17 +33,3 @@ In mixed mode, the application SHALL first attempt a message against an eligible
 
 - **WHEN** the local profile's attempt fails after it has already shown text or executed a tool call for the same message
 - **THEN** the failure is shown to the user as an error for that message, rather than the message being silently retried against the default profile
-
-### Requirement: Fallback to the default profile
-
-In mixed mode, if the local profile is unavailable, not enabled, or fails during a request, the application SHALL fall back to the default profile for that message automatically, the same way an escalated message is retried.
-
-#### Scenario: Local profile unavailable falls back silently
-
-- **WHEN** the local profile is not enabled or its runtime is unavailable
-- **THEN** the message is sent to the default profile without the user needing to take any action
-
-#### Scenario: Local profile error mid-response falls back
-
-- **WHEN** the local profile fails partway through responding to a message
-- **THEN** the message is retried against the default profile rather than the failure being shown to the user as the final result

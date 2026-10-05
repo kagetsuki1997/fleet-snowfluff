@@ -1436,6 +1436,25 @@ simple 任務的延遲跟現在 `single` 模式幾乎一樣——使用者直接
 runtime 同時存在時才有意義的 audit 資訊。目前只有「本機模型」與
 「default_profile」兩個選項可選，沒有東西需要審計。
 
+#### Update（`mix-mode-local-tools`）：本機模型現在可以用唯讀工具
+
+上面「先問本機模型」原本完全是文字層的判斷——本機模型永遠不會被給工具，
+即使它本身是 `ToolCapable`。`mix-mode-local-tools` 放寬了這點：這次嘗試
+現在可以使用一組固定、唯讀、無副作用的 native tools
+（`read_file`/`list_directory`/`web_search`/`get_system_context`，永遠不
+包含 `run_command`/`delegate_task`），依是否設定 project folder 動態決定
+要給哪幾個。
+
+escalation 的判斷點從「只看文字」變成「文字或工具呼叫，先到先決定」：第一
+個動作如果是文字且分歧（不再是 marker 的 prefix），或是第一個動作是工具
+呼叫且不需要 confirm，都視為「確定走本機」；一旦確定（不管是哪一種），這
+次嘗試就不會再回頭 escalate——沒有機制可以把已經顯示給使用者的文字收回。
+唯一的例外：第一個動作（還沒顯示/執行任何東西之前）就是一個需要 confirm
+或被拒絕的工具呼叫，才視為跟文字 marker 等價的 escalation 訊號。確定走本
+機之後，第二輪開始交給既有、未修改的 `AemeathAgentRuntime::run()` 接手，
+但 `Confirm`-tier 的呼叫永遠被靜默拒絕——這條路徑從頭到尾都不會開
+`tool-confirmation` 視窗。
+
 ---
 
 ## 5. Subscription-first Chat

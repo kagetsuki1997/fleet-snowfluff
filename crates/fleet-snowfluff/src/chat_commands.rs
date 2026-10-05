@@ -10,7 +10,7 @@
 //! for -- a deliberate Stage 1 simplification.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -20,9 +20,11 @@ use fleet_snowfluff_ai::{
     AemeathContextManager, AgentRuntime, AiProvider, AiSettings, AuthMethod, ChatStream,
     ClaudeCodeToolAccess, CliContext, ContextManager, DefaultTaskRouter, DelegateTool,
     EscalationDecision, ExecutionPath, GetSystemContextTool, Language, ListDirectoryTool, LogEntry,
-    Message, Persona, ProfileKey, ProviderCredentials, ProviderKind, ProviderProfile, ReadFileTool,
-    ResponseLanguage, RoutingContext, RunCommandTool, Task, TaskRouter, TaskRouterMode,
-    ToolCallingProvider, ToolContext, ToolRegistry, WebSearchTool,
+    Message, PendingToolCall, PermissionDecider, PermissionTier, Persona, ProfileKey,
+    ProviderCredentials, ProviderKind, ProviderProfile, ReadFileTool, ResponseLanguage,
+    RoutingContext, RunCommandTool, Task, TaskRouter, TaskRouterMode, Tool, ToolCallRecord,
+    ToolCallStream, ToolCallStreamItem, ToolCallingProvider, ToolContext, ToolInvocation,
+    ToolOutcome, ToolRegistry, ToolResult, WebSearchTool,
 };
 use futures_util::StreamExt;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
@@ -734,12 +736,13 @@ async fn run_generation_fallback(
 /// the existing plain `chat()` path or the tool-calling Agent Loop --
 /// the two places that decision needs making (`send_chat_message`'s own
 /// direct-to-`default_profile` branch, and `run_generation_fallback`
-/// above). Deliberately not applied inside `run_generation_mix_local`'s
-/// own local-classification attempt: that's a separate, text-only
-/// escalation-detection mechanism (`task-router-rules.md`,
-/// `<<ESCALATE>>` detection) that doesn't yet interact with tool
-/// calling -- see design.md for why combining the two is future work,
-/// not resolved here.
+/// above). Not applied inside `run_generation_mix_local`'s own
+/// local-classification attempt, which hand-rolls its own, narrower
+/// tool-calling path for the same reason it never routed through this
+/// function at all: `route_provider`'s `ToolCapable` branch hands off
+/// to `AemeathAgentRuntime::run()` wholesale, which has no way to
+/// abort mid-stream the instant `<<ESCALATE>>` is detected
+/// (`mix-mode-local-tools`'s design.md).
 #[allow(clippy::too_many_arguments)]
 async fn run_generation_routed(
     app: AppHandle,
@@ -925,6 +928,27 @@ fn native_tool_registry() -> ToolRegistry {
     ])
 }
 
+/// The local-first mix-mode attempt's own, deliberately narrower
+/// registry (`mix-mode-local-tools`): read-only, side-effect-free
+/// tools only -- never `run_command` or `delegate_task`, in any
+/// state, ever (see design.md's Non-Goals). `read_file`/`list_directory`
+/// are only ever `Auto`-tier inside a configured project folder; with
+/// none configured, every path asks for confirmation
+/// (`AI_FEATURES.md`), which would make both tools either an
+/// immediate escalate or a silent denial on every attempt -- dead
+/// weight in the model's own tool list. `web_search`/
+/// `get_system_context` are always `Auto` regardless, so they're
+/// offered unconditionally.
+fn mix_local_tool_registry(project_root: Option<&Path>) -> ToolRegistry {
+    let mut tools: Vec<Arc<dyn Tool>> =
+        vec![Arc::new(WebSearchTool::default()), Arc::new(GetSystemContextTool)];
+    if project_root.is_some() {
+        tools.push(Arc::new(ReadFileTool));
+        tools.push(Arc::new(ListDirectoryTool));
+    }
+    ToolRegistry::new(tools)
+}
+
 /// Same contract as `run_generation`, but for a `ToolCapable` provider:
 /// runs `AemeathAgentRuntime` instead of a plain `chat()` stream. Text
 /// deltas stream live via the `on_text_delta` callback (see
@@ -997,27 +1021,142 @@ async fn run_generation_with_tools(
     }
 }
 
+/// Always denies every `Confirm`-tier call -- used once the mix-mode
+/// local attempt below has already committed to running locally
+/// (iteration 2 onward of `AemeathAgentRuntime::run()`). This path
+/// never opens the real confirmation window (`mix-mode-local-tools`'s
+/// design.md): a later `Confirm`-tier call is just reported back to
+/// the model as not permitted, the same fail-closed shape
+/// `agent-core-and-task-router`'s own `DenyAllConfirm` placeholder had
+/// before `PopupPermissionDecider` replaced it.
+struct AlwaysDenyConfirm;
+
+/// One tool call from the mix-local attempt's first iteration, paired
+/// with the tool it resolved to (`None` for an unknown name) and the
+/// permission tier that resolved to.
+type MixLocalCallPlan = (PendingToolCall, Option<Arc<dyn Tool>>, PermissionTier);
+
+#[async_trait::async_trait]
+impl PermissionDecider for AlwaysDenyConfirm {
+    async fn decide(&self, _calls: &[PendingToolCall]) -> HashSet<String> { HashSet::new() }
+}
+
+/// What the mix-local attempt's first iteration resolved to, read
+/// directly off `provider.chat_with_tools()`'s own stream -- no
+/// `AppHandle` involved, so this (and [`read_mix_local_first_iteration`]
+/// below) is directly unit-testable with a scripted `ToolCallStream`,
+/// unlike the `AppHandle`-touching orchestration around it.
+#[derive(Debug, PartialEq, Eq)]
+enum MixLocalFirstIteration {
+    /// The full `<<ESCALATE>>` marker matched -- the stream was
+    /// dropped without reading further.
+    Escalate,
+    /// The stream ended with no tool calls at all -- `text` is
+    /// already the complete answer.
+    Simple { text: String },
+    /// At least one tool call was requested. `pre_commitment` is
+    /// whether the *first* one arrived while text was still
+    /// [`EscalationDecision::Undecided`] -- the turn's very first
+    /// action, not merely the state once the whole iteration is read.
+    Committed { text: String, calls: Vec<PendingToolCall>, pre_commitment: bool },
+    /// The stream itself errored mid-read.
+    ProviderError,
+}
+
+/// Reads one `chat_with_tools()` iteration to completion, watching
+/// text for [`detect_escalation`] exactly as the old text-only mix-local
+/// attempt did, while also collecting any tool calls. Drops out of the
+/// loop immediately on a conclusive `Escalate` (the caller is
+/// responsible for actually dropping the stream/provider to cancel the
+/// underlying request -- this function only *reads*, since the caller
+/// still owns the stream after a `Simple`/`Committed`/`ProviderError`
+/// outcome too).
+async fn read_mix_local_first_iteration(stream: &mut ToolCallStream) -> MixLocalFirstIteration {
+    let mut buffer = String::new();
+    let mut calls: Vec<PendingToolCall> = Vec::new();
+    let mut first_call_was_pre_commitment: Option<bool> = None;
+    loop {
+        match stream.next().await {
+            Some(Ok(ToolCallStreamItem::TextDelta(delta))) => {
+                buffer.push_str(&delta);
+                if let EscalationDecision::Escalate = detect_escalation(&buffer) {
+                    return MixLocalFirstIteration::Escalate;
+                }
+            }
+            Some(Ok(ToolCallStreamItem::ToolCall { id, name, arguments })) => {
+                if first_call_was_pre_commitment.is_none() {
+                    first_call_was_pre_commitment =
+                        Some(matches!(detect_escalation(&buffer), EscalationDecision::Undecided));
+                }
+                calls.push(PendingToolCall { id, name, arguments });
+            }
+            Some(Err(_)) => return MixLocalFirstIteration::ProviderError,
+            None => break,
+        }
+    }
+    if calls.is_empty() {
+        MixLocalFirstIteration::Simple { text: buffer }
+    } else {
+        MixLocalFirstIteration::Committed {
+            text: buffer,
+            calls,
+            pre_commitment: first_call_was_pre_commitment.unwrap_or(false),
+        }
+    }
+}
+
+/// Resolves each call to the tool it names (`None` for an unknown
+/// name, classified as `Deny` since it's not `Auto` either way) and
+/// the permission tier that call requires. No `AppHandle` -- directly
+/// unit-testable alongside [`read_mix_local_first_iteration`].
+fn classify_mix_local_calls(
+    calls: Vec<PendingToolCall>,
+    registry: &ToolRegistry,
+    ctx: &ToolContext,
+) -> Vec<MixLocalCallPlan> {
+    calls
+        .into_iter()
+        .map(|call| match registry.find(&call.name) {
+            Some(tool) => {
+                let tier = tool.required_permission(&call.arguments, ctx);
+                (call, Some(tool), tier)
+            }
+            None => (call, None, PermissionTier::Deny),
+        })
+        .collect()
+}
+
 /// `mode: mix`'s local-first attempt (`agent-core-and-task-router`'s
-/// "Local-first classification in mixed mode"). Buffers the local
-/// provider's own reply through [`detect_escalation`] *before*
-/// forwarding anything to the UI or the chat log:
+/// "Local-first classification in mixed mode", extended by
+/// `mix-mode-local-tools` to let the attempt use a small, read-only
+/// set of native tools -- see that change's own design.md for why
+/// this hand-rolls its first iteration against
+/// `provider.chat_with_tools()` directly rather than going through
+/// `AemeathAgentRuntime::run()`: today's escalation mechanism depends
+/// on being able to `drop(stream)` mid-read the instant
+/// `<<ESCALATE>>` is detected, and `run()` offers no such abort hook.
 ///
-/// - a conclusive [`EscalationDecision::Simple`] (a mismatch, or the stream
-///   ending while still a strict prefix of the marker) flushes the buffered
-///   prefix and hands the rest of the same stream to [`stream_to_completion`],
-///   exactly as if this had been a normal attempt from the start;
-/// - [`EscalationDecision::Escalate`], or any failure to even start or continue
-///   the local stream, discards everything buffered so far -- nothing shown,
-///   nothing logged -- and retries the message against `fallback.profile` via a
-///   fresh [`run_generation`] call instead.
+/// [`detect_escalation`] now governs a *commitment* point covering
+/// both text and an early tool call, not just text:
+///
+/// - a conclusive [`EscalationDecision::Escalate`] (the full marker matched)
+///   drops the stream immediately, exactly as before -- nothing shown, nothing
+///   logged;
+/// - once the whole first iteration has been read, an outcome of
+///   [`EscalationDecision::Simple`] (divergence, or the stream ending while
+///   still a strict prefix) with no tool calls at all finishes the turn
+///   directly with the now-complete text;
+/// - a tool call requested while text was still [`EscalationDecision::
+///   Undecided`] is itself a commitment, *unless* it (or any other call in that
+///   same first batch) would need confirmation or is denied, in which case the
+///   whole attempt is discarded the same way a textual `Escalate` is;
+/// - once anything has been shown or executed, the attempt runs to completion
+///   locally no matter what: a later tool call needing confirmation is silently
+///   denied (never a popup -- see [`AlwaysDenyConfirm`]), and iteration 2
+///   onward hands off to the ordinary, unmodified `AemeathAgentRuntime::run()`.
 ///
 /// Either way, `TaskRouter::route()` is never called a second time --
-/// see `task_router.rs`'s own module doc. Deliberately never routes
-/// through `run_generation_with_tools`, even when `local_profile`
-/// happens to be `ToolCapable` -- this classification attempt is a
-/// separate, text-only escalation-detection mechanism that doesn't yet
-/// interact with tool calling (see `run_generation_routed`'s own doc
-/// comment).
+/// see `task_router.rs`'s own module doc.
 #[allow(clippy::too_many_arguments)]
 async fn run_generation_mix_local(
     app: AppHandle,
@@ -1034,10 +1173,9 @@ async fn run_generation_mix_local(
     let local_profile_key = local_profile.key();
     log::debug!("{execution_id:?} starting mix-mode local attempt for {local_profile_key:?}");
 
-    // This attempt's own `Execution` record -- recorded even though its
-    // content, win or lose, is either discarded (escalated/errored) or
-    // folded into a later `stream_to_completion` call that marks it
-    // itself (`Simple`); see each branch below for which applies.
+    // This attempt's own `Execution` record -- recorded even though
+    // its content, win or lose, is either discarded (escalated/
+    // errored) or marked directly below once the attempt finishes.
     let mut recorder = ExecutionRecorder::start(
         session_path.clone(),
         conversation_id.clone(),
@@ -1046,54 +1184,38 @@ async fn run_generation_mix_local(
         fallback.working_dir.clone(),
     );
 
-    // No `cli_sessions` lookup here: Ollama has no resumable-session
-    // concept (`AiProvider::session_id`'s default `None`, never
-    // overridden), so a mix-mode local attempt is always a fresh call.
-    // `claude_code_tool_access` is read off `fallback` purely because
-    // it's already in scope there -- this call is always Ollama, so the
-    // value is provably unused by it (see `route_provider`'s own doc
-    // comment).
-    let local_provider = ai_commands::build_provider(
+    // Always Ollama+Local (`send_chat_message`'s own hardcoded
+    // `local_profile_key`), which always `supports_tool_calling()` --
+    // so `route_provider` provably never resolves `PlainChat` here.
+    // No `cli_sessions` lookup: Ollama has no resumable-session
+    // concept, so this is always a fresh call.
+    let provider = match ai_commands::route_provider(
         &credentials,
         &local_profile,
-        None,
+        CliContext::fresh(std::env::temp_dir()),
         &fallback.claude_code_tool_access,
-    );
-    let mut stream = match local_provider.chat(local_messages).await {
-        Ok(stream) => stream,
-        Err(_) => {
-            // Infra-level failure before the local attempt even
-            // started (e.g. `RuntimeUnavailable` -- Ollama enabled in
-            // settings but not actually reachable). Nothing was shown
-            // or logged for this attempt; fall back directly. `Errored`,
-            // not `Escalated` -- this is an infra failure, not the local
-            // model's own content decision (see
-            // `fleet_snowfluff_ai::ExecutionStatus::Escalated`'s doc
-            // comment for why the two are kept distinct).
-            recorder.mark_errored(None, None, Vec::new());
-            drop(recorder);
-            run_generation_fallback(
-                app,
-                fallback,
-                execution_id,
-                conversation_id,
-                channel,
-                partial_text,
-                session_path,
-            )
-            .await;
-            return;
-        }
+    ) {
+        RoutedExecution::ToolCapable(provider) => provider,
+        RoutedExecution::PlainChat(_) => unreachable!(
+            "local_profile is always Ollama+Local, which always supports_tool_calling()"
+        ),
+    };
+    let registry = mix_local_tool_registry(fallback.project_root.as_deref());
+    let ctx = ToolContext {
+        project_root: fallback.project_root.clone(),
+        conversation_id: conversation_id.clone(),
     };
 
-    let mut buffer = String::new();
-    loop {
-        let chunk = match stream.next().await {
-            Some(Ok(chunk)) => chunk,
-            Some(Err(_)) => {
-                // Mid-stream infra failure. Whatever's in `buffer` was
-                // never shown or logged -- fall back directly. `Errored`,
-                // same reasoning as the initial-call failure above.
+    let mut stream =
+        match provider.chat_with_tools(local_messages.clone(), registry.definitions()).await {
+            Ok(stream) => stream,
+            Err(_) => {
+                // Infra-level failure before the local attempt even
+                // started (e.g. `RuntimeUnavailable` -- Ollama enabled
+                // in settings but not actually reachable). Nothing was
+                // shown or logged for this attempt; fall back directly.
+                // `Errored`, not `Escalated` -- an infra failure, not
+                // the local model's own content decision.
                 recorder.mark_errored(None, None, Vec::new());
                 drop(recorder);
                 run_generation_fallback(
@@ -1108,105 +1230,197 @@ async fn run_generation_mix_local(
                 .await;
                 return;
             }
-            None => {
-                // Stream ended while still deciding (or with nothing
-                // ever having diverged) -- can't be escalating if it
-                // never finished saying the marker, so this resolves as
-                // simple no matter what `detect_escalation` last
-                // reported.
-                if !buffer.is_empty() {
-                    partial_text.lock().unwrap().push_str(&buffer);
-                    channel.send(ChatEvent::Chunk { delta: buffer }).ok();
-                }
-                // Ollama has no resumable session, so this is always
-                // `mark_completed(None, None, ..)` in substance -- going
-                // through `record_turn_outcome` anyway keeps this in
-                // step with every other completion path, rather than
-                // hand-rolling the same "no session id" case differently
-                // here.
-                let mut turn = TurnCtx {
-                    session_path: session_path.clone(),
-                    working_dir: fallback.working_dir.clone(),
-                    history_len: fallback.history.len(),
-                    prior_seen_turns: 0,
-                    recorder,
-                };
-                app.state::<ChatRuntimeState>().record_turn_outcome(
-                    &mut turn,
-                    conversation_id,
-                    local_profile_key,
-                    local_provider.as_ref(),
-                    true,
-                );
-                drop(turn);
-                let final_text = partial_text.lock().unwrap().clone();
-                context_manager().record_execution(&session_path, &final_text).await;
-                channel.send(ChatEvent::Done { content: final_text }).ok();
-                clear_pending(&app);
-                mark_unread_unless_focused(&app, UnreadKind::Reply);
-                return;
-            }
         };
-        buffer.push_str(&chunk.delta);
 
-        match detect_escalation(&buffer) {
-            EscalationDecision::Undecided => continue,
-            EscalationDecision::Simple => {
-                if !buffer.is_empty() {
-                    partial_text.lock().unwrap().push_str(&buffer);
-                    channel.send(ChatEvent::Chunk { delta: buffer }).ok();
-                }
-                // `recorder` is handed through unmarked, not marked
-                // `Completed` here: reaching the `Simple` decision only
-                // means the attempt isn't escalating, not that it has
-                // finished -- `stream_to_completion` marks it itself
-                // (`Completed` on success, `Errored` if the *rest* of
-                // the stream still fails), exactly as it already does
-                // for every other caller.
-                stream_to_completion(
-                    app,
-                    local_provider,
-                    &mut stream,
-                    conversation_id,
-                    local_profile_key,
-                    channel,
-                    partial_text,
-                    TurnCtx {
-                        session_path,
-                        working_dir: fallback.working_dir.clone(),
-                        history_len: fallback.history.len(),
-                        prior_seen_turns: 0,
-                        recorder,
+    let first_iteration = read_mix_local_first_iteration(&mut stream).await;
+
+    let (buffer, calls, first_call_was_pre_commitment) = match first_iteration {
+        MixLocalFirstIteration::Escalate => {
+            // Nothing in the buffer was ever shown or logged. Drop the
+            // stream/provider (ends the underlying HTTP request) and
+            // retry fresh against `default_profile`.
+            drop(stream);
+            drop(provider);
+            recorder.mark_escalated();
+            drop(recorder);
+            run_generation_fallback(
+                app,
+                fallback,
+                execution_id,
+                conversation_id,
+                channel,
+                partial_text,
+                session_path,
+            )
+            .await;
+            return;
+        }
+        MixLocalFirstIteration::ProviderError => {
+            // Mid-stream infra failure. Whatever text there was was
+            // never shown or logged -- fall back directly.
+            recorder.mark_errored(None, None, Vec::new());
+            drop(recorder);
+            run_generation_fallback(
+                app,
+                fallback,
+                execution_id,
+                conversation_id,
+                channel,
+                partial_text,
+                session_path,
+            )
+            .await;
+            return;
+        }
+        MixLocalFirstIteration::Simple { text } => {
+            // A pure text answer -- `Simple` via divergence, or the
+            // stream ending while still `Undecided` (can't be
+            // escalating if it never finished saying the marker). The
+            // whole iteration has already been read to reach this
+            // point, so this is already the complete answer; finish
+            // directly rather than handing off to `stream_to_completion`
+            // (there is nothing left on this stream for it to read).
+            if !text.is_empty() {
+                partial_text.lock().unwrap().push_str(&text);
+                channel.send(ChatEvent::Chunk { delta: text }).ok();
+            }
+            recorder.mark_completed(None, None, Vec::new());
+            let final_text = partial_text.lock().unwrap().clone();
+            context_manager().record_execution(&session_path, &final_text).await;
+            channel.send(ChatEvent::Done { content: final_text }).ok();
+            clear_pending(&app);
+            mark_unread_unless_focused(&app, UnreadKind::Reply);
+            return;
+        }
+        MixLocalFirstIteration::Committed { text, calls, pre_commitment } => {
+            (text, calls, pre_commitment)
+        }
+    };
+
+    // At least one tool call. Classify each sequentially -- no
+    // `buffer_unordered` concurrency: a first-iteration classification
+    // realistically has 0-1 calls, not enough to justify duplicating
+    // `AemeathAgentRuntime::run()`'s own bounded-concurrent execution
+    // pass too.
+    let plans = classify_mix_local_calls(calls, &registry, &ctx);
+
+    let first_action_needs_escalation = first_call_was_pre_commitment
+        && plans.iter().any(|(_, _, tier)| !matches!(tier, PermissionTier::Auto));
+
+    if first_action_needs_escalation {
+        // The turn's very first action, before anything else was shown
+        // or run, would need confirmation or is denied -- treated the
+        // same as a textual `Escalate`: discard everything local and
+        // retry fresh against `default_profile`.
+        drop(stream);
+        drop(provider);
+        recorder.mark_escalated();
+        drop(recorder);
+        run_generation_fallback(
+            app,
+            fallback,
+            execution_id,
+            conversation_id,
+            channel,
+            partial_text,
+            session_path,
+        )
+        .await;
+        return;
+    }
+
+    // Committed: flush any buffered text (the turn's own narration
+    // before this tool call), execute `Auto`-tier calls for real,
+    // silently deny the rest (never a popup), and build the follow-up
+    // turn for `AemeathAgentRuntime::run()` to continue from.
+    if !buffer.is_empty() {
+        partial_text.lock().unwrap().push_str(&buffer);
+        channel.send(ChatEvent::Chunk { delta: buffer.clone() }).ok();
+    }
+
+    let tool_call_records: Vec<ToolCallRecord> = plans
+        .iter()
+        .map(|(call, ..)| ToolCallRecord {
+            id: call.id.clone(),
+            name: call.name.clone(),
+            arguments: call.arguments.clone(),
+        })
+        .collect();
+    let mut next_messages = local_messages;
+    next_messages.push(Message::assistant_with_tool_calls(buffer, tool_call_records));
+
+    let mut trace: Vec<ToolInvocation> = Vec::new();
+    for (call, tool, tier) in plans {
+        match tool {
+            None => {
+                next_messages.push(Message::tool_result(
+                    call.id.clone(),
+                    format!("Error: unknown tool \"{}\"", call.name),
+                ));
+                trace.push(ToolInvocation {
+                    name: call.name.clone(),
+                    outcome: ToolOutcome::Rejected {
+                        arguments_preview: call.arguments.to_string(),
                     },
-                )
-                .await;
-                return;
+                });
             }
-            EscalationDecision::Escalate => {
-                // Nothing in `buffer` was ever shown or logged. Drop
-                // the local stream/provider (dropping a `ChatStream`
-                // built over an HTTP response ends that request on its
-                // own -- no explicit cancellation needed) and retry
-                // fresh against `default_profile`. `Escalated`, not
-                // `Errored`: this is the local model's own content
-                // decision (the `<<ESCALATE>>` marker), not an infra
-                // failure.
-                drop(stream);
-                drop(local_provider);
-                recorder.mark_escalated();
-                drop(recorder);
-                run_generation_fallback(
-                    app,
-                    fallback,
-                    execution_id,
-                    conversation_id,
-                    channel,
-                    partial_text,
-                    session_path,
-                )
-                .await;
-                return;
+            Some(tool) if matches!(tier, PermissionTier::Auto) => {
+                let result = match tool.execute(call.arguments.clone(), &ctx).await {
+                    Ok(result) => result,
+                    Err(err) => ToolResult::error(err.to_string()),
+                };
+                let ok = !result.is_error;
+                let content = if result.is_error {
+                    format!("Error: {}", result.content)
+                } else {
+                    result.content
+                };
+                next_messages.push(Message::tool_result(call.id.clone(), content));
+                trace.push(ToolInvocation {
+                    name: call.name.clone(),
+                    outcome: ToolOutcome::Executed { ok },
+                });
             }
+            Some(_) => {
+                // `Confirm`/`Deny`-tier, already committed -- silently
+                // denied, never a popup.
+                next_messages.push(Message::tool_result(
+                    call.id.clone(),
+                    format!("Error: \"{}\" was not permitted to run", call.name),
+                ));
+                trace.push(ToolInvocation {
+                    name: call.name.clone(),
+                    outcome: ToolOutcome::DeniedByPolicy,
+                });
+            }
+        }
+    }
+
+    let runtime = AemeathAgentRuntime::default();
+    let decider = AlwaysDenyConfirm;
+    let result = {
+        let mut on_text_delta = |delta: &str| {
+            partial_text.lock().unwrap().push_str(delta);
+            channel.send(ChatEvent::Chunk { delta: delta.to_string() }).ok();
+        };
+        runtime
+            .run(provider.as_ref(), next_messages, &registry, &ctx, &decider, &mut on_text_delta)
+            .await
+    };
+
+    match result {
+        Ok(outcome) => {
+            trace.extend(outcome.trace);
+            recorder.mark_completed(None, None, trace);
+            let final_text = partial_text.lock().unwrap().clone();
+            context_manager().record_execution(&session_path, &final_text).await;
+            channel.send(ChatEvent::Done { content: final_text }).ok();
+            clear_pending(&app);
+            mark_unread_unless_focused(&app, UnreadKind::Reply);
+        }
+        Err(err) => {
+            recorder.mark_errored(None, None, trace);
+            finish_with_error(&app, &session_path, &channel, &err.to_string());
         }
     }
 }
@@ -1694,5 +1908,192 @@ mod tests {
         assert_eq!(names.len(), 6);
         assert!(names.contains(&"delegate_task".to_string()));
         assert!(registry.find("delegate_task").is_some());
+    }
+
+    #[test]
+    fn mix_local_tool_registry_excludes_filesystem_tools_without_a_project_root() {
+        let registry = mix_local_tool_registry(None);
+        let names: Vec<String> = registry.definitions().into_iter().map(|d| d.name).collect();
+        assert_eq!(names.len(), 2);
+        assert!(names.contains(&"web_search".to_string()));
+        assert!(names.contains(&"get_system_context".to_string()));
+        assert!(registry.find("read_file").is_none());
+        assert!(registry.find("list_directory").is_none());
+        assert!(registry.find("run_command").is_none());
+        assert!(registry.find("delegate_task").is_none());
+    }
+
+    #[test]
+    fn mix_local_tool_registry_includes_filesystem_tools_with_a_project_root() {
+        let registry = mix_local_tool_registry(Some(Path::new("/some/project")));
+        let names: Vec<String> = registry.definitions().into_iter().map(|d| d.name).collect();
+        assert_eq!(names.len(), 4);
+        assert!(registry.find("read_file").is_some());
+        assert!(registry.find("list_directory").is_some());
+        assert!(registry.find("web_search").is_some());
+        assert!(registry.find("get_system_context").is_some());
+        assert!(registry.find("run_command").is_none());
+        assert!(registry.find("delegate_task").is_none());
+    }
+
+    /// Builds a `ToolCallStream` yielding exactly `items`, in order --
+    /// no `AppHandle` or real provider involved, matching
+    /// `agent_runtime.rs`'s own `ScriptedProvider` test pattern.
+    fn scripted_stream(
+        items: Vec<Result<ToolCallStreamItem, fleet_snowfluff_ai::ProviderError>>,
+    ) -> ToolCallStream {
+        Box::pin(futures_util::stream::iter(items))
+    }
+
+    fn delta(text: &str) -> Result<ToolCallStreamItem, fleet_snowfluff_ai::ProviderError> {
+        Ok(ToolCallStreamItem::TextDelta(text.to_string()))
+    }
+
+    fn call(id: &str, name: &str, arguments: serde_json::Value) -> PendingToolCall {
+        PendingToolCall { id: id.to_string(), name: name.to_string(), arguments }
+    }
+
+    // -- mix-mode-local-tools: read_mix_local_first_iteration --
+
+    #[tokio::test]
+    async fn a_stream_matching_the_marker_with_no_tool_calls_resolves_escalate() {
+        let mut stream = scripted_stream(vec![delta("<<ESCALATE>>")]);
+        let outcome = read_mix_local_first_iteration(&mut stream).await;
+        assert_eq!(outcome, MixLocalFirstIteration::Escalate);
+    }
+
+    #[tokio::test]
+    async fn a_stream_that_diverges_with_no_tool_calls_resolves_simple() {
+        let mut stream = scripted_stream(vec![delta("Rust ownership "), delta("means...")]);
+        let outcome = read_mix_local_first_iteration(&mut stream).await;
+        assert_eq!(
+            outcome,
+            MixLocalFirstIteration::Simple { text: "Rust ownership means...".to_string() }
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_with_no_preceding_text_is_pre_commitment() {
+        let mut stream = scripted_stream(vec![Ok(ToolCallStreamItem::ToolCall {
+            id: "call_0".to_string(),
+            name: "read_file".to_string(),
+            arguments: serde_json::json!({"path": "Cargo.toml"}),
+        })]);
+        let outcome = read_mix_local_first_iteration(&mut stream).await;
+        match outcome {
+            MixLocalFirstIteration::Committed { pre_commitment, calls, text } => {
+                assert!(pre_commitment, "no text preceded the call -- this is the first action");
+                assert_eq!(calls.len(), 1);
+                assert_eq!(text, "");
+            }
+            other => panic!("expected Committed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_tool_call_after_committing_text_is_not_pre_commitment() {
+        let mut stream = scripted_stream(vec![
+            delta("Sure, let me check that file. "),
+            Ok(ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: "read_file".to_string(),
+                arguments: serde_json::json!({"path": "Cargo.toml"}),
+            }),
+        ]);
+        let outcome = read_mix_local_first_iteration(&mut stream).await;
+        match outcome {
+            MixLocalFirstIteration::Committed { pre_commitment, .. } => {
+                assert!(!pre_commitment, "text already diverged before the call arrived");
+            }
+            other => panic!("expected Committed, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_mid_stream_provider_error_is_reported_as_such() {
+        let mut stream = scripted_stream(vec![
+            delta("partial"),
+            Err(fleet_snowfluff_ai::ProviderError::Network("connection reset".to_string())),
+        ]);
+        let outcome = read_mix_local_first_iteration(&mut stream).await;
+        assert_eq!(outcome, MixLocalFirstIteration::ProviderError);
+    }
+
+    #[tokio::test]
+    async fn a_stream_ending_still_undecided_with_no_calls_resolves_simple() {
+        // Shorter than the marker and never diverges -- can't be
+        // escalating if it never finished saying the marker.
+        let mut stream = scripted_stream(vec![delta("<<ESC")]);
+        let outcome = read_mix_local_first_iteration(&mut stream).await;
+        assert_eq!(outcome, MixLocalFirstIteration::Simple { text: "<<ESC".to_string() });
+    }
+
+    // -- mix-mode-local-tools: classify_mix_local_calls --
+
+    /// `required_permission_for_path`'s containment check canonicalizes
+    /// both the root and the candidate path, which requires both to
+    /// actually exist on disk -- a real temp dir with a real file in
+    /// it, not a fictitious path, same reasoning as this module's own
+    /// `log_path` helper.
+    fn project_root_with_a_file(name: &str) -> (PathBuf, PathBuf) {
+        let root = std::env::temp_dir()
+            .join(format!("fleet-snowfluff-chat-commands-test-{}-{name}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("Cargo.toml");
+        std::fs::write(&file, "[package]").unwrap();
+        (root, file)
+    }
+
+    #[test]
+    fn an_in_root_read_file_call_classifies_as_auto() {
+        let (root, file) = project_root_with_a_file("in-root");
+        let registry = mix_local_tool_registry(Some(&root));
+        let ctx = ToolContext {
+            project_root: Some(root.clone()),
+            conversation_id: conversation(&root.join("session.jsonl")),
+        };
+        let plans = classify_mix_local_calls(
+            vec![call("call_0", "read_file", serde_json::json!({"path": file.to_str().unwrap()}))],
+            &registry,
+            &ctx,
+        );
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].1.is_some());
+        assert_eq!(plans[0].2, PermissionTier::Auto);
+    }
+
+    #[test]
+    fn an_out_of_root_read_file_call_classifies_as_confirm() {
+        let (root, _file) = project_root_with_a_file("out-of-root");
+        let registry = mix_local_tool_registry(Some(&root));
+        let ctx = ToolContext {
+            project_root: Some(root.clone()),
+            conversation_id: conversation(&root.join("session.jsonl")),
+        };
+        let plans = classify_mix_local_calls(
+            vec![call("call_0", "read_file", serde_json::json!({"path": "/etc/passwd"}))],
+            &registry,
+            &ctx,
+        );
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].1.is_some());
+        assert_eq!(plans[0].2, PermissionTier::Confirm);
+    }
+
+    #[test]
+    fn an_unknown_tool_name_classifies_as_deny_with_no_tool() {
+        let registry = mix_local_tool_registry(None);
+        let ctx = ToolContext {
+            project_root: None,
+            conversation_id: conversation(Path::new("/project/session.jsonl")),
+        };
+        let plans = classify_mix_local_calls(
+            vec![call("call_0", "run_command", serde_json::json!({"command": "ls"}))],
+            &registry,
+            &ctx,
+        );
+        assert_eq!(plans.len(), 1);
+        assert!(plans[0].1.is_none());
+        assert_eq!(plans[0].2, PermissionTier::Deny);
     }
 }
