@@ -73,6 +73,7 @@ before running:
 | `run_command`        | Runs a shell command.                                                                        |
 | `get_system_context` | Reports the current date/time, OS, and CPU/memory/uptime.                                    |
 | `delegate_task`      | Delegates a focused sub-task to a new, independent agent — see below.                        |
+| `connect_mcp_server` | Connects to a third-party MCP server — see [below](#connecting-to-mcp-servers).               |
 
 `read_file`/`list_directory` are auto-allowed for any path inside your
 configured **project folder** (Settings → AI); a path outside it — or any
@@ -104,6 +105,53 @@ description, and it **cannot itself delegate further** — at most one
 level of delegation. It's invisible in the chat window while running,
 the same as every other tool call; only its final answer (or failure)
 ever surfaces, folded back into the model's own reply.
+
+### Connecting to MCP servers
+
+`connect_mcp_server` lets the model connect to a third-party MCP (Model
+Context Protocol) server from a plain chat request — "connect to the
+GitHub MCP server," or a custom local service you already know the exact
+command for — rather than only through Settings. There's no pre-vetted
+list of known servers: the model resolves a candidate command or URL
+from your request (or its own knowledge) with no allowlist constraining
+it, so a popup always shows you **exactly** what would be connected —
+the resolved command and arguments, or the URL — before anything
+happens, the same confirmation bar `run_command` already uses, not a
+lower one.
+
+Once approved, Fleet Snowfluff supports both kinds of MCP server:
+
+- **Local (stdio)** — a command run as a subprocess (most filesystem,
+  git, and local dev-tool MCP servers work this way). If it needs a
+  credential, that's a plain environment-variable name and value you
+  (or the model, if you told it the value) supply — no browser step.
+- **Remote (HTTP)** — a server reached by URL. If it requires
+  authorization, Fleet Snowfluff runs the OAuth flow itself: it opens
+  your system browser to the server's own consent screen and tells you
+  it's waiting, picking the connection up automatically once you finish
+  there. **This never blocks the rest of the conversation** — you can
+  keep chatting while it waits. If the automatic redirect doesn't work
+  (some browser/network setups), paste the code it gave you into
+  Settings → AI instead.
+
+A newly connected server's tools become available starting your **next**
+message, never mid-turn — the same reasoning `mix` mode's local attempt
+already follows for why tools aren't added to an in-progress turn. Every
+tool a connected server exposes is treated exactly like Fleet Snowfluff's
+own native tools for permission purposes — always **Confirm**-tier, since
+MCP carries no risk metadata of its own to tell a safe call from a
+dangerous one. `connect_mcp_server` itself, and anything a connected
+server exposes, is **never offered** to `mix` mode's own local-first
+attempt (same tier as `run_command`/`delegate_task`, already excluded
+there) — only once a request has actually escalated to your default
+profile does either become reachable.
+
+You can also add a server directly from Settings → AI (the same
+confirm-and-connect flow, just skipping the chat round-trip since
+filling in the form is itself your approval), see every connected
+server's status and discovered tools, refresh a server's tool list on
+demand, or remove one — removing a server deletes its stored credential
+immediately, not just the connection.
 
 ### Web search
 
