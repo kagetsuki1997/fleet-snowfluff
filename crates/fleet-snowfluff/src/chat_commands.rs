@@ -1025,6 +1025,31 @@ async fn run_generation_with_tools(
         );
         ToolRegistry::with_lazy(eager, mcp_tools)
     };
+    {
+        let (eager_count, lazy_count) = registry.tool_counts();
+        // The exact JSON this iteration's own eager definitions (plus
+        // whichever lazy ones, if any, are already unlocked -- none,
+        // on the very first iteration) serialize to, character-counted
+        // as a rough proxy for tokens (roughly 4 chars/token for
+        // English; MCP tool descriptions are often denser than that).
+        // Logged as real measurement, not another guess, after a real
+        // report of persona/language instructions apparently being
+        // lost -- consistent with this content alone pushing the
+        // request past whatever context window the model is actually
+        // honoring.
+        let first_iteration_chars: usize = registry
+            .definitions()
+            .iter()
+            .map(|d| d.name.len() + d.description.len() + d.parameters.to_string().len())
+            .sum();
+        log::info!(
+            "{execution_id:?} offering {eager_count} eager tool(s), {lazy_count} lazy tool(s) \
+             this turn -- eager tool definitions alone are {first_iteration_chars} chars (~{} \
+             tokens at a rough 4 chars/token) before the system prompt or conversation history \
+             are even counted",
+            first_iteration_chars / 4
+        );
+    }
     let runtime = AemeathAgentRuntime::default();
     let permission = crate::tool_confirmation::PopupPermissionDecider {
         app: app.clone(),
@@ -1053,8 +1078,18 @@ async fn run_generation_with_tools(
 
     match result {
         Ok(outcome) => {
-            turn.recorder.mark_completed(None, None, outcome.trace);
+            turn.recorder.mark_completed(None, None, outcome.trace.clone());
             let final_text = partial_text.lock().unwrap().clone();
+            if final_text.is_empty() && outcome.trace.is_empty() {
+                // Diagnostic-only: the model produced neither visible
+                // text nor a single tool call -- a genuinely empty
+                // reply, not an error (this turn still completed
+                // `Ok`), so nothing else would otherwise report it.
+                log::warn!(
+                    "{execution_id:?} completed with a genuinely empty reply -- no text, no tool \
+                     calls, for {profile_key:?}"
+                );
+            }
             context_manager().record_execution(&turn.session_path, &final_text).await;
             channel.send(ChatEvent::Done { content: final_text }).ok();
             clear_pending(&app);

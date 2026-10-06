@@ -438,7 +438,7 @@ async fn start_oauth_flow(
     url: String,
     www_authenticate: Option<String>,
 ) -> McpConnectOutcome {
-    let client = reqwest::Client::new();
+    let client = fleet_snowfluff_ai::mcp_http_client();
     let metadata = match discover(&client, &url, www_authenticate.as_deref()).await {
         Ok(metadata) => metadata,
         Err(err) => return McpConnectOutcome::Failed { reason: err.to_string() },
@@ -577,7 +577,7 @@ pub(crate) async fn attempt_connection(
             credential_value,
         ),
         McpConnectRequest::Http { url } => {
-            match probe_authorization(&reqwest::Client::new(), &url).await {
+            match probe_authorization(&fleet_snowfluff_ai::mcp_http_client(), &url).await {
                 Ok(AuthProbeOutcome::Required { www_authenticate }) => {
                     let config = McpServerConfig {
                         id,

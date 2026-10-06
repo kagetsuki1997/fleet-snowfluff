@@ -19,7 +19,7 @@ pub use config::{
     McpToolSummary,
 };
 pub use error::McpError;
-pub use http_transport::HttpTransport;
+pub use http_transport::{mcp_http_client, HttpTransport};
 pub use oauth::{
     build_authorization_url, discover, exchange_code_for_token, generate_pkce, generate_state,
     probe_authorization, register_client_or_explain, AuthProbeOutcome, AuthorizationServerMetadata,

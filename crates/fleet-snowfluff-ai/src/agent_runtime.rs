@@ -450,6 +450,26 @@ pub const SEARCH_TOOLS_NAME: &str = "search_tools";
 /// purpose (verified via web search during `tool-list-optimization`'s
 /// own exploration): names and short descriptions stay visible every
 /// turn; full schemas don't, until asked for.
+/// How much of each lazy tool's own description gets embedded into
+/// `search_tools`'s own description -- without a cap, a real MCP
+/// server's own (often verbose, example-laden) tool descriptions can
+/// make this single field dominate the whole prompt once more than a
+/// couple of tools are connected, confirmed by a real report (persona/
+/// language instructions silently lost, presumed truncated out of a
+/// context window this field alone was eating into). A name plus a
+/// short hint is enough to make a tool findable by `search_tools`;
+/// nothing here needs the full, unbounded description.
+const LAZY_SUMMARY_MAX_CHARS: usize = 80;
+
+fn truncate_for_summary(text: &str) -> String {
+    if text.chars().count() <= LAZY_SUMMARY_MAX_CHARS {
+        return text.to_string();
+    }
+    let mut truncated: String = text.chars().take(LAZY_SUMMARY_MAX_CHARS).collect();
+    truncated.push('\u{2026}'); // "…"
+    truncated
+}
+
 pub fn search_tools_definition(lazy_summaries: &[(String, String)]) -> ToolDefinition {
     let mut description = String::from(
         "Check here BEFORE connecting to any new MCP server: the following tools already exist \
@@ -459,7 +479,7 @@ pub fn search_tools_definition(lazy_summaries: &[(String, String)]) -> ToolDefin
          fail. The following tools exist but need this call first:\n",
     );
     for (name, summary) in lazy_summaries {
-        description.push_str(&format!("- {name}: {summary}\n"));
+        description.push_str(&format!("- {name}: {}\n", truncate_for_summary(summary)));
     }
     ToolDefinition {
         name: SEARCH_TOOLS_NAME.to_string(),
@@ -611,6 +631,11 @@ impl ToolRegistry {
     fn is_lazy(&self, name: &str) -> bool {
         self.lazy.iter().any(|tool| tool.definition().name == name)
     }
+
+    /// How many eager and lazy tools this registry holds, respectively
+    /// -- diagnostic-only (e.g. logging how large a turn's own tool
+    /// list is), not used by `run()`'s own dispatch.
+    pub fn tool_counts(&self) -> (usize, usize) { (self.eager.len(), self.lazy.len()) }
 
     pub fn find(&self, name: &str) -> Option<Arc<dyn Tool>> {
         self.eager
@@ -1532,6 +1557,37 @@ mod tests {
         assert!(definition.description.contains("search_graph: Finds symbols"));
         assert!(definition.description.contains("trace_path: Traces callers"));
         assert_eq!(definition.parameters["required"], json!(["query"]));
+    }
+
+    #[test]
+    fn search_tools_definition_bounds_a_verbose_real_servers_own_description() {
+        // Grounded in a real report: a connected server's own tool
+        // descriptions (often verbose, example-laden -- real MCP
+        // servers write these to be thorough, not terse) can make this
+        // one field dominate the whole prompt once more than a couple
+        // of tools are connected, confirmed to coincide with the
+        // persona/system prompt apparently being lost. One long
+        // description must not blow past a bounded size.
+        let verbose_description = "x".repeat(500);
+        let definition =
+            search_tools_definition(&[("notion-fetch".to_string(), verbose_description)]);
+        let embedded_line = definition
+            .description
+            .lines()
+            .find(|line| line.starts_with("- notion-fetch:"))
+            .unwrap();
+        assert!(
+            embedded_line.len() < 120,
+            "one tool's embedded summary must stay well short of the verbose original: \
+             {embedded_line}"
+        );
+        assert!(embedded_line.ends_with('…'), "a truncated summary must say so visibly");
+    }
+
+    #[test]
+    fn search_tools_definition_leaves_a_short_summary_untouched() {
+        let definition = search_tools_definition(&[("lazy".to_string(), "short".to_string())]);
+        assert!(definition.description.contains("- lazy: short\n"));
     }
 
     // -- tool-list-optimization: run()'s own lazy-loading dispatch --

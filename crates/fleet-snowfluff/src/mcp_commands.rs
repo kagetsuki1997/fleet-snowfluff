@@ -204,6 +204,19 @@ pub(crate) fn credential_value_for(
 /// A server that's `Pending`, or whose connection fails right now, is
 /// skipped (logged, not fatal) rather than failing the whole turn over
 /// one unreachable server.
+/// Caps how long reconnecting to, and listing tools from, *one*
+/// server may take before this turn gives up on it. `mcp_sourced_tools`
+/// runs unconditionally before every single `ToolCapable` chat turn --
+/// not just MCP-related ones -- so an unbounded hang here (a stale
+/// OAuth token against a slow server, or a stdio subprocess that
+/// stopped responding; `StdioTransport` has no timeout of its own
+/// either) would silently stall *every* message, confirmed by a real
+/// report ("even a new conversation" came back empty). `HttpTransport`
+/// now has its own bounded client too (`mcp_http_client`); this is a
+/// second, transport-agnostic layer that also catches a stdio hang,
+/// which that client-level timeout can't.
+const MCP_PER_SERVER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+
 pub(crate) async fn mcp_sourced_tools(
     app: &AppHandle,
 ) -> Vec<std::sync::Arc<dyn fleet_snowfluff_ai::Tool>> {
@@ -219,18 +232,14 @@ pub(crate) async fn mcp_sourced_tools(
             continue;
         }
         let credential = credential_value_for(&credentials, &record.config.id);
-        let client = match connections.connection_for(&record.config, credential.as_deref()).await {
-            Ok(client) => client,
-            Err(err) => {
-                log::warn!(
-                    "skipping MCP server \"{}\" for this turn -- failed to (re)connect: {err}",
-                    record.config.display_name
-                );
-                continue;
-            }
-        };
-        match client.list_tools().await {
-            Ok(descriptors) => {
+        let attempt = tokio::time::timeout(MCP_PER_SERVER_TIMEOUT, async {
+            let client = connections.connection_for(&record.config, credential.as_deref()).await?;
+            let descriptors = client.list_tools().await?;
+            Ok::<_, fleet_snowfluff_ai::McpError>((client, descriptors))
+        })
+        .await;
+        match attempt {
+            Ok(Ok((client, descriptors))) => {
                 for descriptor in descriptors {
                     if record.disabled_tools.contains(&descriptor.name) {
                         continue;
@@ -238,10 +247,18 @@ pub(crate) async fn mcp_sourced_tools(
                     tools.push(std::sync::Arc::new(McpTool::new(descriptor, (*client).clone())));
                 }
             }
-            Err(err) => {
+            Ok(Err(err)) => {
                 log::warn!(
-                    "skipping MCP server \"{}\" for this turn -- tools/list failed: {err}",
+                    "skipping MCP server \"{}\" for this turn -- failed to (re)connect or list \
+                     tools: {err}",
                     record.config.display_name
+                );
+            }
+            Err(_timed_out) => {
+                log::warn!(
+                    "skipping MCP server \"{}\" for this turn -- timed out after {:?}",
+                    record.config.display_name,
+                    MCP_PER_SERVER_TIMEOUT
                 );
             }
         }

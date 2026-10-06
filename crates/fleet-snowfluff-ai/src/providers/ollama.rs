@@ -290,6 +290,15 @@ mod tests {
     }
 
     #[test]
+    fn build_chat_body_never_sets_num_ctx() {
+        // Deliberately not set -- see limits.rs's own comment on why
+        // this crate must not second-guess Ollama's own VRAM-aware
+        // auto-detected default with a hardcoded value.
+        let body = build_chat_body("llama3.2:3b", &[Message::user("hi")]);
+        assert!(body["options"].get("num_ctx").is_none());
+    }
+
+    #[test]
     fn build_chat_body_disables_thinking() {
         // A "thinking"-capable model (e.g. qwen3) puts its reasoning in
         // a separate field while `content` stays empty for the whole
@@ -342,6 +351,7 @@ mod tests {
         let body = build_chat_with_tools_body("qwen3:8b", &[Message::user("hi")], &tools);
         assert_eq!(body["think"], false);
         assert_eq!(body["tools"][0]["function"]["name"], "get_current_weather");
+        assert!(body["options"].get("num_ctx").is_none());
     }
 
     #[test]

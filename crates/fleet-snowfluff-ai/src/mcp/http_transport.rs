@@ -150,6 +150,23 @@ pub(crate) async fn send_json_rpc_notification(
     Ok(())
 }
 
+/// A bounded-timeout client for every production MCP network call --
+/// `tool-list-optimization`'s own real-world trigger: `mcp_sourced_tools()`
+/// reconnects to every `Ready` server before *every* chat turn, not
+/// just MCP-related ones, and a plain `reqwest::Client::new()` has no
+/// timeout at all. A stale OAuth token, an unreachable server, or just
+/// a slow one would otherwise hang that reconnect indefinitely --
+/// silently stalling every single message, confirmed by a real report
+/// ("even a new conversation" came back empty after a connected
+/// server's own access token had likely expired). 15s is generous for
+/// a local MCP round trip but still bounded.
+pub fn mcp_http_client() -> reqwest::Client {
+    reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .expect("a bounded-timeout reqwest client should always build")
+}
+
 pub struct HttpTransport {
     client: reqwest::Client,
     url: String,
@@ -158,7 +175,7 @@ pub struct HttpTransport {
 
 impl HttpTransport {
     pub fn new(url: impl Into<String>, bearer_token: Option<String>) -> Self {
-        Self { client: reqwest::Client::new(), url: url.into(), bearer_token }
+        Self { client: mcp_http_client(), url: url.into(), bearer_token }
     }
 }
 
@@ -268,5 +285,48 @@ mod tests {
 
         let err = transport.request("tools/list", None).await.unwrap_err();
         assert!(err.to_string().contains("401"));
+    }
+
+    #[tokio::test]
+    async fn request_times_out_against_a_server_that_never_responds() {
+        // The real bug this guards against: `mcp_sourced_tools()` (app
+        // crate) reconnects to every `Ready` server before *every*
+        // chat turn -- a plain `reqwest::Client::new()` has no timeout
+        // at all, so a server that accepts the connection and then
+        // never answers (a stale OAuth token against a slow server,
+        // confirmed by a real report of "even a new conversation"
+        // coming back empty) would hang that reconnect, and so the
+        // whole turn, indefinitely. `HttpTransport` fields are private
+        // but same-module, so this constructs one directly with a
+        // short test timeout rather than waiting out the real 15s
+        // `mcp_http_client()` uses.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            // Accept and then hold the connection open, answering
+            // nothing, for the lifetime of this test process.
+            let _ = listener.accept();
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(60));
+            }
+        });
+
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_millis(300))
+            .build()
+            .unwrap();
+        let transport = HttpTransport { client, url: format!("http://{addr}"), bearer_token: None };
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            transport.request("initialize", None),
+        )
+        .await
+        .expect("the client's own timeout must fire well within 2s, not hang indefinitely");
+
+        assert!(
+            result.is_err(),
+            "a server that never responds must be reported as a failure, not hang forever"
+        );
     }
 }
