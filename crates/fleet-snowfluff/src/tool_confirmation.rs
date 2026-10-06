@@ -21,7 +21,7 @@ use fleet_snowfluff_ai::{
     RedirectListener, Tool, ToolRegistry, CONNECT_MCP_SERVER_TOOL_NAME,
 };
 use serde_json::Value;
-use tauri::{AppHandle, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
+use tauri::{AppHandle, Emitter, Manager, State, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_shell::ShellExt;
 use tokio::sync::oneshot;
 
@@ -367,6 +367,7 @@ pub(crate) async fn finish_oauth(
                 "MCP OAuth token exchange for \"{}\" failed: {err}",
                 attempt.config.display_name
             );
+            notify_mcp_servers_changed(app);
             return McpConnectOutcome::Failed { reason: err.to_string() };
         }
     };
@@ -392,6 +393,7 @@ pub(crate) async fn finish_oauth(
                 app,
                 McpServerRecord { config, status: McpServerStatus::Ready, tools },
             );
+            notify_mcp_servers_changed(app);
             McpConnectOutcome::Connected { display_name, tool_count }
         }
         Err(err) => {
@@ -399,10 +401,24 @@ pub(crate) async fn finish_oauth(
                 "MCP connection for \"{}\" failed right after authorization: {err}",
                 config.display_name
             );
+            notify_mcp_servers_changed(app);
             McpConnectOutcome::Failed { reason: err.to_string() }
         }
     }
 }
+
+/// Broadcasts that connected-MCP-server state changed, so an open
+/// Settings window re-renders -- needed only for `finish_oauth`'s own
+/// *detached* completion path (the redirect listener's background
+/// task; design.md's "does not block the rest of the conversation"
+/// means nothing is awaiting this to know it's done). Every other
+/// mutation (`add_mcp_server`, `remove_mcp_server`,
+/// `refresh_mcp_server_tools`, `submit_mcp_oauth_code`) is already a
+/// synchronous Tauri command whose own frontend caller re-renders
+/// right after `await`ing it -- harmless, not wrong, for this to also
+/// fire on those paths (`finish_oauth` is shared), just redundant with
+/// a render that already happened.
+fn notify_mcp_servers_changed(app: &AppHandle) { app.emit("mcp-servers-changed", ()).ok(); }
 
 /// Runs the full OAuth bootstrap (discovery, Dynamic Client
 /// Registration, PKCE) for an HTTP server that needs it, opens the

@@ -345,6 +345,16 @@ async function main(): Promise<void> {
       activeTab = event.payload;
       applyActiveTab();
     });
+
+    // mcp-client-support: an MCP server's OAuth flow can finish well
+    // after the Settings-UI call that started it already returned --
+    // the redirect listener catches the code in a detached background
+    // task (`finish_oauth`, never awaited by anything), so nothing
+    // already re-renders when it eventually succeeds or fails. This is
+    // the one MCP-server mutation that genuinely needs a push rather
+    // than relying on its own caller's `await renderAi()` -- see
+    // `tool_confirmation::notify_mcp_servers_changed`'s own doc comment.
+    await listen("mcp-servers-changed", () => void renderAi());
   } catch (err) {
     // Nothing above renders anything on its own failure -- without
     // this, a thrown error here (e.g. an invoke() rejection) would
