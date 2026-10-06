@@ -54,6 +54,11 @@ pub(crate) enum HttpAttemptOutcome {
 /// Shared by [`HttpTransport::request`] (steady-state use, once
 /// authorization is resolved) and [`super::oauth`]'s own bootstrapping
 /// probe (which specifically needs the `Unauthorized` case).
+///
+/// **Requests only** -- a JSON-RPC *notification* must carry no `id`
+/// field at all, which is what actually distinguishes it from a
+/// request a server must answer; see [`send_json_rpc_notification`]
+/// for that case, used by [`HttpTransport::notify`].
 pub(crate) async fn send_json_rpc(
     client: &reqwest::Client,
     url: &str,
@@ -109,6 +114,42 @@ pub(crate) async fn send_json_rpc(
     }
 }
 
+/// Sends a JSON-RPC *notification* -- no `id` field, per spec, which is
+/// what tells a compliant server not to treat this as a method it must
+/// look up and answer. No response body is parsed: a server that
+/// follows the spec answers a notification with an empty `202
+/// Accepted` (or similar) and nothing to parse as JSON-RPC; only the
+/// HTTP-level outcome is reported.
+pub(crate) async fn send_json_rpc_notification(
+    client: &reqwest::Client,
+    url: &str,
+    method: &str,
+    params: Option<Value>,
+    bearer_token: Option<&str>,
+) -> Result<(), McpError> {
+    let body = serde_json::json!({
+        "jsonrpc": "2.0",
+        "method": method,
+        "params": params.unwrap_or(Value::Object(Default::default())),
+    });
+    let mut request = client
+        .post(url)
+        .header("Content-Type", "application/json")
+        .header("Accept", "application/json, text/event-stream")
+        .json(&body);
+    if let Some(token) = bearer_token {
+        request = request.bearer_auth(token);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|err| McpError(format!("notification request failed: {err}")))?;
+    if !response.status().is_success() {
+        return Err(McpError(format!("HTTP {}", response.status())));
+    }
+    Ok(())
+}
+
 pub struct HttpTransport {
     client: reqwest::Client,
     url: String,
@@ -136,12 +177,14 @@ impl McpTransport for HttpTransport {
     }
 
     async fn notify(&self, method: &str, params: Option<Value>) -> Result<(), McpError> {
-        match send_json_rpc(&self.client, &self.url, method, params, self.bearer_token.as_deref())
-            .await
-        {
-            HttpAttemptOutcome::Err(err) => Err(err),
-            _ => Ok(()),
-        }
+        send_json_rpc_notification(
+            &self.client,
+            &self.url,
+            method,
+            params,
+            self.bearer_token.as_deref(),
+        )
+        .await
     }
 }
 
@@ -195,6 +238,26 @@ mod tests {
 
         let err = transport.request("no_such_method", None).await.unwrap_err();
         assert!(err.to_string().contains("-32601"));
+    }
+
+    #[tokio::test]
+    async fn notify_sends_no_id_field_unlike_a_request() {
+        // The bug this guards against: reusing the request-framing path
+        // for a notification sends an `id`, making a compliant server
+        // treat it as a real method call it must look up -- which,
+        // for a method name like "notifications/initialized" that's
+        // only ever meaningful as a true notification, correctly comes
+        // back as "Method not found" (confirmed against the real
+        // `mcp.notion.com` server during manual testing).
+        let (base_url, handle) = test_server::serve_once(202, vec![]);
+        let transport = HttpTransport::new(base_url, None);
+
+        transport.notify("notifications/initialized", None).await.unwrap();
+
+        let captured = handle.join().unwrap();
+        let sent: Value = serde_json::from_str(&captured.body).unwrap();
+        assert!(sent.get("id").is_none(), "a notification must carry no id field: {sent}");
+        assert_eq!(sent["method"], "notifications/initialized");
     }
 
     #[tokio::test]

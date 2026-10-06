@@ -11,7 +11,7 @@ use fleet_snowfluff_ai::{
     McpConnectOutcome, McpConnectRequest, McpServerCredential, McpServerRecord, McpServersConfig,
     McpToolSummary, ProviderCredentials,
 };
-use tauri::{AppHandle, State};
+use tauri::{AppHandle, Manager, State};
 
 use crate::{
     mcp_connection::{McpConnectionState, PendingOAuthState},
@@ -107,11 +107,65 @@ fn update_cached_tools(
     }
 }
 
-fn credential_value_for(credentials: &ProviderCredentials, server_id: &str) -> Option<String> {
+pub(crate) fn credential_value_for(
+    credentials: &ProviderCredentials,
+    server_id: &str,
+) -> Option<String> {
     match credentials.mcp_server_credentials.get(server_id)? {
         McpServerCredential::EnvVar { value } => Some(value.clone()),
         McpServerCredential::OAuthToken { access_token, .. } => Some(access_token.clone()),
     }
+}
+
+/// Every tool a connected, `Ready` MCP server currently exposes, built
+/// fresh from a live `tools/list` call each time -- this is the piece
+/// that was actually missing end to end: `McpServerRecord::tools` is
+/// only a *cached* name/description for the Settings UI's own browser
+/// (no JSON Schema in it), so a real chat turn re-fetches the full
+/// descriptor here rather than trying to call a tool from the cache.
+/// A server that's `Pending`, or whose connection fails right now, is
+/// skipped (logged, not fatal) rather than failing the whole turn over
+/// one unreachable server.
+pub(crate) async fn mcp_sourced_tools(
+    app: &AppHandle,
+) -> Vec<std::sync::Arc<dyn fleet_snowfluff_ai::Tool>> {
+    use fleet_snowfluff_ai::{McpServerStatus, McpTool};
+
+    let servers = mcp_servers_store::load(app);
+    let credentials = secrets_store::load(app);
+    let connections = app.state::<McpConnectionState>();
+
+    let mut tools: Vec<std::sync::Arc<dyn fleet_snowfluff_ai::Tool>> = Vec::new();
+    for record in servers.servers {
+        if record.status != McpServerStatus::Ready {
+            continue;
+        }
+        let credential = credential_value_for(&credentials, &record.config.id);
+        let client = match connections.connection_for(&record.config, credential.as_deref()).await {
+            Ok(client) => client,
+            Err(err) => {
+                log::warn!(
+                    "skipping MCP server \"{}\" for this turn -- failed to (re)connect: {err}",
+                    record.config.display_name
+                );
+                continue;
+            }
+        };
+        match client.list_tools().await {
+            Ok(descriptors) => {
+                for descriptor in descriptors {
+                    tools.push(std::sync::Arc::new(McpTool::new(descriptor, (*client).clone())));
+                }
+            }
+            Err(err) => {
+                log::warn!(
+                    "skipping MCP server \"{}\" for this turn -- tools/list failed: {err}",
+                    record.config.display_name
+                );
+            }
+        }
+    }
+    tools
 }
 
 #[tauri::command]

@@ -912,13 +912,15 @@ async fn stream_to_completion(
 }
 
 /// Every native tool a `ToolCapable` profile is offered, including
-/// `delegate_task` (`sub-agent-delegation`). Factored out of
-/// `run_generation_with_tools` so it's directly testable without an
-/// `AppHandle` -- every one of these is a plain, app-handle-free
+/// `delegate_task` (`sub-agent-delegation`) and `connect_mcp_server`
+/// (`mcp-client-support`). Kept as a plain `Vec`, not a `ToolRegistry`,
+/// so `run_generation_with_tools` can extend it with this turn's
+/// MCP-sourced tools (`mcp_commands::mcp_sourced_tools`) before building
+/// the registry -- every one of these is a plain, app-handle-free
 /// `Arc::new(DefaultStruct)` construction already, so pulling the list
 /// itself out costs nothing.
-fn native_tool_registry() -> ToolRegistry {
-    ToolRegistry::new(vec![
+fn native_tool_list() -> Vec<Arc<dyn Tool>> {
+    vec![
         Arc::new(WebSearchTool::default()),
         Arc::new(ReadFileTool),
         Arc::new(ListDirectoryTool),
@@ -926,7 +928,7 @@ fn native_tool_registry() -> ToolRegistry {
         Arc::new(GetSystemContextTool),
         Arc::new(DelegateTool),
         Arc::new(ConnectMcpServerTool),
-    ])
+    ]
 }
 
 /// The local-first mix-mode attempt's own, deliberately narrower
@@ -988,7 +990,9 @@ async fn run_generation_with_tools(
     // below, with the loop's own tool trace -- every turn gets an
     // `Execution` record uniformly, CLI session or not.
     let ctx = ToolContext { project_root, conversation_id: conversation_id.clone() };
-    let registry = native_tool_registry();
+    let mut tools = native_tool_list();
+    tools.extend(crate::mcp_commands::mcp_sourced_tools(&app).await);
+    let registry = ToolRegistry::new(tools);
     let runtime = AemeathAgentRuntime::default();
     let permission = crate::tool_confirmation::PopupPermissionDecider {
         app: app.clone(),
@@ -1921,7 +1925,7 @@ mod tests {
 
     #[test]
     fn native_tool_registry_offers_delegate_task_alongside_the_five_native_tools() {
-        let registry = native_tool_registry();
+        let registry = ToolRegistry::new(native_tool_list());
         let names: Vec<String> = registry.definitions().into_iter().map(|d| d.name).collect();
         assert_eq!(names.len(), 7, "5 native tools, plus delegate_task and connect_mcp_server");
         assert!(names.contains(&"delegate_task".to_string()));
