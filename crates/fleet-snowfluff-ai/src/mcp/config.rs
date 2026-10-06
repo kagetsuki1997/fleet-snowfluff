@@ -10,6 +10,8 @@
 //! already needs it to exist to type its own reconnect-from-config
 //! lookup.
 
+use std::collections::HashSet;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -76,6 +78,14 @@ pub struct McpServerRecord {
     pub status: McpServerStatus,
     #[serde(default)]
     pub tools: Vec<McpToolSummary>,
+    /// Names of this server's own tools the user has turned off --
+    /// explicitly *disabled*, not an allowlist, so a newly discovered
+    /// tool (after a refresh, or a server update) defaults to enabled
+    /// rather than silently hidden. Excluded entirely from a chat
+    /// turn's registry, whether offered eagerly or lazily -- a
+    /// disabled tool never shows up for the model to search for either.
+    #[serde(default)]
+    pub disabled_tools: HashSet<String>,
 }
 
 /// The shape of `mcp-servers.json` -- a sibling of `AiSettings`'s own
@@ -170,6 +180,7 @@ mod tests {
                         description: "Lists a directory".to_string(),
                     },
                 ],
+                disabled_tools: HashSet::new(),
             }],
         };
         let reloaded = load_from_str(&to_json_string(&servers));
@@ -189,11 +200,63 @@ mod tests {
                 },
                 status: McpServerStatus::Pending,
                 tools: Vec::new(),
+                disabled_tools: HashSet::new(),
             }],
         };
         let reloaded = load_from_str(&to_json_string(&servers));
         assert_eq!(reloaded, servers);
         assert_eq!(reloaded.servers[0].status, McpServerStatus::Pending);
         assert!(reloaded.servers[0].tools.is_empty());
+    }
+
+    #[test]
+    fn disabled_tools_round_trips() {
+        let servers = McpServersConfig {
+            servers: vec![McpServerRecord {
+                config: McpServerConfig {
+                    id: "local-fs".to_string(),
+                    display_name: "Local Filesystem".to_string(),
+                    transport: McpServerTransportConfig::Stdio {
+                        command: "npx".to_string(),
+                        args: vec![],
+                        credential_env_var: None,
+                    },
+                },
+                status: McpServerStatus::Ready,
+                tools: vec![McpToolSummary {
+                    name: "delete_everything".to_string(),
+                    description: "Deletes everything".to_string(),
+                }],
+                disabled_tools: HashSet::from(["delete_everything".to_string()]),
+            }],
+        };
+        let reloaded = load_from_str(&to_json_string(&servers));
+        assert_eq!(reloaded, servers);
+        assert!(reloaded.servers[0].disabled_tools.contains("delete_everything"));
+    }
+
+    #[test]
+    fn disabled_tools_defaults_to_empty_when_the_field_is_absent_from_persisted_json() {
+        // Pre-existing persisted JSON written before this field existed
+        // must still load, defaulting to "nothing disabled" rather than
+        // failing to parse -- a literal JSON string here, not a
+        // surgically-edited `to_json_string` output, since removing a
+        // line from pretty-printed JSON would leave a dangling trailing
+        // comma (invalid JSON) rather than a JSON object that's merely
+        // missing one field.
+        let json = r#"{
+            "servers": [{
+                "config": {
+                    "id": "local-fs",
+                    "display_name": "Local Filesystem",
+                    "transport": {"kind": "stdio", "command": "npx", "args": []}
+                },
+                "status": "ready",
+                "tools": []
+            }]
+        }"#;
+        let reloaded = load_from_str(json);
+        assert_eq!(reloaded.servers.len(), 1);
+        assert!(reloaded.servers[0].disabled_tools.is_empty());
     }
 }

@@ -107,6 +107,48 @@ fn update_cached_tools(
     }
 }
 
+/// The pure part of toggling one tool's enabled state for a server:
+/// inserts into or removes from `disabled_tools` depending on
+/// `enabled`. Returns whether a matching server record was found.
+fn set_tool_enabled(
+    servers: &mut McpServersConfig,
+    server_id: &str,
+    tool_name: &str,
+    enabled: bool,
+) -> bool {
+    let Some(record) = servers.servers.iter_mut().find(|record| record.config.id == server_id)
+    else {
+        return false;
+    };
+    if enabled {
+        record.disabled_tools.remove(tool_name);
+    } else {
+        record.disabled_tools.insert(tool_name.to_string());
+    }
+    true
+}
+
+/// Settings-UI-callable (Group: tool-list-optimization's own "static
+/// filtering" option): lets the user turn off individual tools a
+/// connected server exposes, without disconnecting the server itself
+/// or losing the rest of its tools. A disabled tool is excluded
+/// entirely from a chat turn's registry -- `mcp_sourced_tools` never
+/// offers it, eagerly or lazily.
+#[tauri::command]
+pub async fn set_mcp_tool_enabled(
+    app: AppHandle,
+    server_id: String,
+    tool_name: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let mut servers = mcp_servers_store::load(&app);
+    if !set_tool_enabled(&mut servers, &server_id, &tool_name, enabled) {
+        return Err(format!("no connected server with id \"{server_id}\""));
+    }
+    mcp_servers_store::save(&app, &servers);
+    Ok(())
+}
+
 pub(crate) fn credential_value_for(
     credentials: &ProviderCredentials,
     server_id: &str,
@@ -154,6 +196,9 @@ pub(crate) async fn mcp_sourced_tools(
         match client.list_tools().await {
             Ok(descriptors) => {
                 for descriptor in descriptors {
+                    if record.disabled_tools.contains(&descriptor.name) {
+                        continue;
+                    }
                     tools.push(std::sync::Arc::new(McpTool::new(descriptor, (*client).clone())));
                 }
             }
@@ -213,6 +258,7 @@ mod tests {
             },
             status: McpServerStatus::Ready,
             tools: Vec::new(),
+            disabled_tools: std::collections::HashSet::new(),
         }
     }
 
@@ -267,6 +313,23 @@ mod tests {
             servers.servers[0].tools.is_empty(),
             "the known server's own tools must be untouched"
         );
+    }
+
+    #[test]
+    fn set_tool_enabled_disables_and_reenables_a_tool() {
+        let mut servers = McpServersConfig { servers: vec![record("local-fs")] };
+
+        assert!(set_tool_enabled(&mut servers, "local-fs", "delete_file", false));
+        assert!(servers.servers[0].disabled_tools.contains("delete_file"));
+
+        assert!(set_tool_enabled(&mut servers, "local-fs", "delete_file", true));
+        assert!(!servers.servers[0].disabled_tools.contains("delete_file"));
+    }
+
+    #[test]
+    fn set_tool_enabled_reports_false_for_an_unknown_server() {
+        let mut servers = McpServersConfig { servers: vec![record("local-fs")] };
+        assert!(!set_tool_enabled(&mut servers, "never-connected", "any_tool", false));
     }
 
     #[test]

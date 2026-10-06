@@ -111,6 +111,7 @@ pub fn run() {
             mcp_commands::remove_mcp_server,
             mcp_commands::refresh_mcp_server_tools,
             mcp_commands::submit_mcp_oauth_code,
+            mcp_commands::set_mcp_tool_enabled,
         ])
         .setup(|app| {
             // Always on (not just debug builds) -- otherwise a release

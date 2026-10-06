@@ -391,7 +391,12 @@ pub(crate) async fn finish_oauth(
             let display_name = config.display_name.clone();
             upsert_server_record(
                 app,
-                McpServerRecord { config, status: McpServerStatus::Ready, tools },
+                McpServerRecord {
+                    config,
+                    status: McpServerStatus::Ready,
+                    tools,
+                    disabled_tools: std::collections::HashSet::new(),
+                },
             );
             notify_mcp_servers_changed(app);
             McpConnectOutcome::Connected { display_name, tool_count }
@@ -470,6 +475,7 @@ async fn start_oauth_flow(
             config: config.clone(),
             status: McpServerStatus::Pending,
             tools: Vec::new(),
+            disabled_tools: std::collections::HashSet::new(),
         },
     );
 
@@ -579,7 +585,12 @@ pub(crate) async fn attempt_connection(
             let tool_count = tools.len();
             upsert_server_record(
                 app,
-                McpServerRecord { config, status: McpServerStatus::Ready, tools },
+                McpServerRecord {
+                    config,
+                    status: McpServerStatus::Ready,
+                    tools,
+                    disabled_tools: std::collections::HashSet::new(),
+                },
             );
             McpConnectOutcome::Connected { display_name, tool_count }
         }

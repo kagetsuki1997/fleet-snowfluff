@@ -556,8 +556,15 @@ body.bubble-window #app {
 
 .ai-mcp-tools-list {
   margin: 0;
-  padding-left: 1.25rem;
+  padding: 0;
+  list-style: none;
   font-size: 0.9em;
+}
+
+.ai-mcp-tool-row {
+  display: flex;
+  align-items: baseline;
+  gap: 0.4rem;
 }
 
 .ai-mcp-add-row summary {

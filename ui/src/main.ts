@@ -127,6 +127,7 @@ interface McpServerRecord {
   config: McpServerConfig;
   status: McpServerStatus;
   tools: McpToolSummary[];
+  disabled_tools: string[];
 }
 
 // Mirrors `fleet_snowfluff_ai::McpConnectRequest` (`#[serde(tag = "transport",
@@ -726,10 +727,23 @@ function renderMcpServerRow(server: McpServerRecord): string {
           ${
             server.tools.length
               ? server.tools
-                  .map(
-                    (tool) =>
-                      `<li><strong>${escapeHtml(tool.name)}</strong> — ${escapeHtml(tool.description)}</li>`,
-                  )
+                  .map((tool) => {
+                    const enabled = !server.disabled_tools.includes(tool.name);
+                    return `
+                      <li>
+                        <label class="ai-mcp-tool-row">
+                          <input
+                            type="checkbox"
+                            class="ai-mcp-tool-enabled-checkbox"
+                            data-server-id="${escapeHtml(id)}"
+                            data-tool-name="${escapeHtml(tool.name)}"
+                            ${enabled ? "checked" : ""}
+                          />
+                          <span><strong>${escapeHtml(tool.name)}</strong> — ${escapeHtml(tool.description)}</span>
+                        </label>
+                      </li>
+                    `;
+                  })
                   .join("")
               : `<li class="hint">${t("ai.mcp.no_tools")}</li>`
           }
@@ -773,6 +787,24 @@ function renderMcpAddForm(): string {
 }
 
 function wireMcpServersSection(panel: HTMLElement): void {
+  for (const checkbox of panel.querySelectorAll<HTMLInputElement>(
+    ".ai-mcp-tool-enabled-checkbox",
+  )) {
+    checkbox.addEventListener("change", async () => {
+      const serverId = checkbox.dataset.serverId!;
+      const toolName = checkbox.dataset.toolName!;
+      const enabled = checkbox.checked;
+      checkbox.disabled = true;
+      try {
+        await invoke("set_mcp_tool_enabled", { serverId, toolName, enabled });
+      } catch {
+        checkbox.checked = !enabled; // revert on failure, e.g. the server was just removed
+      } finally {
+        checkbox.disabled = false;
+      }
+    });
+  }
+
   for (const button of panel.querySelectorAll<HTMLButtonElement>(".ai-mcp-remove-button")) {
     button.addEventListener("click", async (e) => {
       e.preventDefault();
