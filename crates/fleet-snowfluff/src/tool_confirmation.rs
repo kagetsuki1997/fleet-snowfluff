@@ -543,6 +543,27 @@ pub(crate) async fn attempt_connection(
     app: &AppHandle,
     request: McpConnectRequest,
 ) -> McpConnectOutcome {
+    // Checked before attempting anything: a model asking to connect to
+    // something already connected (confirmed via real usage -- a model
+    // reaching for `connect_mcp_server` out of habit instead of
+    // `search_tools`) gets told so directly, rather than a fresh
+    // connection attempt (or a redundant OAuth dance) running silently
+    // against a server that didn't need either.
+    let existing_servers = crate::mcp_servers_store::load(app);
+    if let Some(existing) = crate::mcp_commands::find_matching_server(&existing_servers, &request) {
+        return match existing.status {
+            fleet_snowfluff_ai::McpServerStatus::Ready => McpConnectOutcome::AlreadyConnected {
+                display_name: existing.config.display_name.clone(),
+                tool_count: existing.tools.len(),
+            },
+            fleet_snowfluff_ai::McpServerStatus::Pending => {
+                McpConnectOutcome::PendingAuthorization {
+                    display_name: existing.config.display_name.clone(),
+                }
+            }
+        };
+    }
+
     let display_name = display_name_for(&request);
     let id = generate_server_id();
 

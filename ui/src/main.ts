@@ -146,6 +146,7 @@ type McpConnectRequest =
 // rename_all = "snake_case")]`).
 type McpConnectOutcome =
   | { status: "connected"; display_name: string; tool_count: number }
+  | { status: "already_connected"; display_name: string; tool_count: number }
   | { status: "pending_authorization"; display_name: string }
   | { status: "declined" }
   | { status: "failed"; reason: string };
@@ -855,7 +856,7 @@ function wireMcpServersSection(panel: HTMLElement): void {
           serverId,
           code: input.value,
         });
-        if (outcome.status === "connected") {
+        if (outcome.status === "connected" || outcome.status === "already_connected") {
           await renderAi();
         } else if (outcome.status === "failed") {
           button.disabled = false;
@@ -919,6 +920,11 @@ function wireMcpServersSection(panel: HTMLElement): void {
             count: outcome.tool_count,
           });
           await renderAi();
+        } else if (outcome.status === "already_connected") {
+          resultEl.textContent = t("ai.mcp.add_already_connected", {
+            name: outcome.display_name,
+            count: outcome.tool_count,
+          });
         } else if (outcome.status === "pending_authorization") {
           resultEl.textContent = t("ai.mcp.add_success_pending", { name: outcome.display_name });
           await renderAi();

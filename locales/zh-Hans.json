@@ -127,6 +127,7 @@
   "ai.mcp.add_connecting": "正在连接…",
   "ai.mcp.add_error": "失败：{error}",
   "ai.mcp.add_success_connected": "已连接到「{name}」— 可使用 {count} 个工具。",
+  "ai.mcp.add_already_connected": "「{name}」已经连接 — 可使用 {count} 个工具。",
   "ai.mcp.add_success_pending": "已开始对「{name}」进行授权 — 请在浏览器中完成。",
   "ai.mcp.add_declined": "未获批准。",
 

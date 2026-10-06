@@ -265,10 +265,30 @@ pub enum McpConnectRequest {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum McpConnectOutcome {
-    Connected { display_name: String, tool_count: usize },
-    PendingAuthorization { display_name: String },
+    Connected {
+        display_name: String,
+        tool_count: usize,
+    },
+    /// The resolved command/URL already matches a connected server --
+    /// returned instead of silently attempting to reconnect (or
+    /// re-running an OAuth dance for something already authorized).
+    /// Exists because a model can, and in real usage did, ask to
+    /// connect to something already connected (`tool-list-optimization`'s
+    /// own real-world trigger: a model reaching for `connect_mcp_server`
+    /// out of habit instead of `search_tools`) -- this turns that wrong
+    /// guess into a corrective signal pointing at `search_tools`,
+    /// rather than a dead end.
+    AlreadyConnected {
+        display_name: String,
+        tool_count: usize,
+    },
+    PendingAuthorization {
+        display_name: String,
+    },
     Declined,
-    Failed { reason: String },
+    Failed {
+        reason: String,
+    },
 }
 
 /// Mirrors [`PermissionDecider`]'s own shape (design.md's chosen
@@ -309,12 +329,17 @@ impl McpConnector for NeverConnectMcp {
 pub fn connect_mcp_server_definition() -> ToolDefinition {
     ToolDefinition {
         name: CONNECT_MCP_SERVER_TOOL_NAME.to_string(),
-        description: "Connects to a third-party MCP (Model Context Protocol) server, making its \
-                      own tools available starting your next message. Resolve the server's exact \
-                      command (for a local/stdio server) or URL (for a remote/HTTP server) from \
-                      the user's request or your own knowledge -- there is no pre-vetted list to \
-                      match against. The user will be shown exactly what you resolved and must \
-                      approve it before anything connects."
+        description: "Connects to a NEW third-party MCP (Model Context Protocol) server, making \
+                      its own tools available starting your next message. Before calling this, \
+                      check whether the capability you actually need already exists among \
+                      already-connected servers' own tools -- call search_tools for that, if it's \
+                      offered; connecting again to something already connected just reports that \
+                      back without doing anything new. Use this tool only when what you need \
+                      genuinely isn't connected yet. Resolve the server's exact command (for a \
+                      local/stdio server) or URL (for a remote/HTTP server) from the user's \
+                      request or your own knowledge -- there is no pre-vetted list to match \
+                      against. The user will be shown exactly what you resolved and must approve \
+                      it before anything connects."
             .to_string(),
         parameters: json!({
             "type": "object",
@@ -427,10 +452,11 @@ pub const SEARCH_TOOLS_NAME: &str = "search_tools";
 /// turn; full schemas don't, until asked for.
 pub fn search_tools_definition(lazy_summaries: &[(String, String)]) -> ToolDefinition {
     let mut description = String::from(
-        "Searches for a tool whose full schema hasn't been loaded yet, by name or keyword, and \
-         loads it so it becomes directly callable starting your very next tool call. The \
-         following tools exist but need this call first -- calling one of them directly before \
-         searching for it will fail:\n",
+        "Check here BEFORE connecting to any new MCP server: the following tools already exist \
+         from servers that are already connected, and may already cover what you need. Call this \
+         with a name or keyword to load one's full schema, making it directly callable starting \
+         your very next tool call -- calling one of them directly before searching for it will \
+         fail. The following tools exist but need this call first:\n",
     );
     for (name, summary) in lazy_summaries {
         description.push_str(&format!("- {name}: {summary}\n"));
@@ -976,6 +1002,19 @@ impl AgentRuntime for AemeathAgentRuntime {
                                          will be available starting your next message."
                                     ),
                                 ),
+                                McpConnectOutcome::AlreadyConnected {
+                                    display_name,
+                                    tool_count,
+                                } => (
+                                    true,
+                                    format!(
+                                        "\"{display_name}\" is already connected, with \
+                                         {tool_count} tool(s) available right now -- call \
+                                         {SEARCH_TOOLS_NAME} to find and use one of them \
+                                         directly; connecting again was not needed and nothing \
+                                         new happened."
+                                    ),
+                                ),
                                 McpConnectOutcome::PendingAuthorization { display_name } => (
                                     true,
                                     format!(
@@ -1293,6 +1332,62 @@ mod tests {
                 credential_env_var: None,
                 credential_value: None,
             }
+        );
+    }
+
+    #[tokio::test]
+    async fn an_already_connected_outcome_tells_the_model_to_use_search_tools_instead() {
+        // Grounded in the same real report: a model reaching for
+        // `connect_mcp_server` for something already connected should
+        // get a corrective message pointing at `search_tools`, not a
+        // silent reconnect attempt and not a dead end.
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: CONNECT_MCP_SERVER_TOOL_NAME.to_string(),
+                arguments: json!({"transport": "http", "url": "https://mcp.notion.com/mcp"}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let registry = ToolRegistry::new(vec![Arc::new(ConnectMcpServerTool)]);
+        let connector = RecordingMcpConnector {
+            requests: Mutex::new(Vec::new()),
+            outcome: McpConnectOutcome::AlreadyConnected {
+                display_name: "Notion".to_string(),
+                tool_count: 5,
+            },
+        };
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &connector,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.trace,
+            vec![ToolInvocation {
+                name: CONNECT_MCP_SERVER_TOOL_NAME.to_string(),
+                outcome: ToolOutcome::Executed { ok: true }
+            }]
+        );
+        let received = provider.received.lock().unwrap();
+        let tool_result = received[1]
+            .iter()
+            .find(|m| m.role == crate::message::Role::Tool)
+            .expect("the connect call's own tool result");
+        assert!(tool_result.content.contains("already connected"));
+        assert!(
+            tool_result.content.contains(SEARCH_TOOLS_NAME),
+            "the corrective message must point at search_tools by name: {}",
+            tool_result.content
         );
     }
 

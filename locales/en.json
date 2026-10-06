@@ -127,6 +127,7 @@
   "ai.mcp.add_connecting": "Connecting…",
   "ai.mcp.add_error": "Failed: {error}",
   "ai.mcp.add_success_connected": "Connected to \"{name}\" — {count} tool(s) available.",
+  "ai.mcp.add_already_connected": "\"{name}\" is already connected, with {count} tool(s) available.",
   "ai.mcp.add_success_pending": "Started authorizing \"{name}\" — finish in your browser.",
   "ai.mcp.add_declined": "Not approved.",
 

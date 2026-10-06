@@ -127,6 +127,7 @@
   "ai.mcp.add_connecting": "연결 중…",
   "ai.mcp.add_error": "실패: {error}",
   "ai.mcp.add_success_connected": "\"{name}\"에 연결되었습니다 — {count}개의 도구를 사용할 수 있습니다.",
+  "ai.mcp.add_already_connected": "\"{name}\"은 이미 연결되어 있습니다 — {count}개의 도구를 사용할 수 있습니다.",
   "ai.mcp.add_success_pending": "\"{name}\" 인증을 시작했습니다 — 브라우저에서 완료하세요.",
   "ai.mcp.add_declined": "승인되지 않았습니다.",
 

@@ -1010,7 +1010,19 @@ async fn run_generation_with_tools(
             })
             .collect();
         let mut eager = native_tool_list();
-        eager.push(Arc::new(fleet_snowfluff_ai::SearchToolsTool::new(lazy_summaries)));
+        // Inserted right before `connect_mcp_server` (always last in
+        // `native_tool_list()`), not appended after it: some models
+        // show a real position bias toward earlier-listed tools, and
+        // real usage showed a model reaching for `connect_mcp_server`
+        // out of habit instead of this one -- putting this one first
+        // is a cheap, low-risk nudge in the right direction, on top of
+        // `connect_mcp_server`'s own description now explicitly
+        // deferring to this tool.
+        let connect_mcp_server_index = eager.len() - 1;
+        eager.insert(
+            connect_mcp_server_index,
+            Arc::new(fleet_snowfluff_ai::SearchToolsTool::new(lazy_summaries)),
+        );
         ToolRegistry::with_lazy(eager, mcp_tools)
     };
     let runtime = AemeathAgentRuntime::default();

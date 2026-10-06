@@ -127,6 +127,7 @@
   "ai.mcp.add_connecting": "接続中…",
   "ai.mcp.add_error": "失敗しました: {error}",
   "ai.mcp.add_success_connected": "「{name}」に接続しました — {count} 個のツールが利用可能です。",
+  "ai.mcp.add_already_connected": "「{name}」は既に接続済みです — {count} 個のツールが利用可能です。",
   "ai.mcp.add_success_pending": "「{name}」の認証を開始しました — ブラウザで完了してください。",
   "ai.mcp.add_declined": "承認されませんでした。",
 

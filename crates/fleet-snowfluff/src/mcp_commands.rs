@@ -8,8 +8,8 @@
 //! `AgentRuntime::run()`'s dispatch at all (design.md's own Decision).
 
 use fleet_snowfluff_ai::{
-    McpConnectOutcome, McpConnectRequest, McpServerCredential, McpServerRecord, McpServersConfig,
-    McpToolSummary, ProviderCredentials,
+    McpConnectOutcome, McpConnectRequest, McpServerConfig, McpServerCredential, McpServerRecord,
+    McpServerTransportConfig, McpServersConfig, McpToolSummary, ProviderCredentials,
 };
 use tauri::{AppHandle, Manager, State};
 
@@ -17,6 +17,42 @@ use crate::{
     mcp_connection::{McpConnectionState, PendingOAuthState},
     mcp_servers_store, secrets_store, tool_confirmation,
 };
+
+/// Whether `request` resolves to the exact same server `config`
+/// already does -- same URL for HTTP, same command+args for stdio.
+/// Credentials and display name deliberately don't factor in: two
+/// requests naming the same address/command are the same server
+/// regardless of what the model happened to call it this time.
+pub(crate) fn resolves_to_same_server(
+    request: &McpConnectRequest,
+    config: &McpServerConfig,
+) -> bool {
+    match (request, &config.transport) {
+        (McpConnectRequest::Http { url }, McpServerTransportConfig::Http { url: existing_url }) => {
+            url == existing_url
+        }
+        (
+            McpConnectRequest::Stdio { command, args, .. },
+            McpServerTransportConfig::Stdio {
+                command: existing_command, args: existing_args, ..
+            },
+        ) => command == existing_command && args == existing_args,
+        _ => false,
+    }
+}
+
+/// The already-connected server (if any) `request` resolves to --
+/// checked *before* attempting anything, so a model asking to connect
+/// to something already connected gets told so directly
+/// (`McpConnectOutcome::AlreadyConnected`) instead of a fresh
+/// connection attempt (or, for HTTP, a redundant OAuth dance) running
+/// silently against a server that didn't need it.
+pub(crate) fn find_matching_server<'a>(
+    servers: &'a McpServersConfig,
+    request: &McpConnectRequest,
+) -> Option<&'a McpServerRecord> {
+    servers.servers.iter().find(|record| resolves_to_same_server(request, &record.config))
+}
 
 #[tauri::command]
 pub fn list_mcp_servers(app: AppHandle) -> Vec<McpServerRecord> {
@@ -330,6 +366,109 @@ mod tests {
     fn set_tool_enabled_reports_false_for_an_unknown_server() {
         let mut servers = McpServersConfig { servers: vec![record("local-fs")] };
         assert!(!set_tool_enabled(&mut servers, "never-connected", "any_tool", false));
+    }
+
+    #[test]
+    fn resolves_to_same_server_matches_http_by_url_only() {
+        let config = McpServerConfig {
+            id: "notion".to_string(),
+            display_name: "Notion".to_string(),
+            transport: McpServerTransportConfig::Http {
+                url: "https://mcp.notion.com/mcp".to_string(),
+            },
+        };
+        assert!(resolves_to_same_server(
+            &McpConnectRequest::Http { url: "https://mcp.notion.com/mcp".to_string() },
+            &config
+        ));
+        assert!(!resolves_to_same_server(
+            &McpConnectRequest::Http { url: "https://mcp.github.com/sse".to_string() },
+            &config
+        ));
+    }
+
+    #[test]
+    fn resolves_to_same_server_matches_stdio_by_command_and_args_not_credentials() {
+        let config = McpServerConfig {
+            id: "local-fs".to_string(),
+            display_name: "Local Filesystem".to_string(),
+            transport: McpServerTransportConfig::Stdio {
+                command: "codebase-memory-mcp".to_string(),
+                args: vec![],
+                credential_env_var: None,
+            },
+        };
+        assert!(
+            resolves_to_same_server(
+                &McpConnectRequest::Stdio {
+                    command: "codebase-memory-mcp".to_string(),
+                    args: vec![],
+                    credential_env_var: Some("SOME_TOKEN".to_string()),
+                    credential_value: Some("different-each-time".to_string()),
+                },
+                &config
+            ),
+            "a differing credential must not prevent recognizing the same server"
+        );
+        assert!(!resolves_to_same_server(
+            &McpConnectRequest::Stdio {
+                command: "codebase-memory-mcp".to_string(),
+                args: vec!["--verbose".to_string()],
+                credential_env_var: None,
+                credential_value: None,
+            },
+            &config
+        ));
+    }
+
+    #[test]
+    fn resolves_to_same_server_never_matches_across_transports() {
+        let config = McpServerConfig {
+            id: "x".to_string(),
+            display_name: "x".to_string(),
+            transport: McpServerTransportConfig::Http { url: "https://x.com".to_string() },
+        };
+        assert!(!resolves_to_same_server(
+            &McpConnectRequest::Stdio {
+                command: "x".to_string(),
+                args: vec![],
+                credential_env_var: None,
+                credential_value: None,
+            },
+            &config
+        ));
+    }
+
+    #[test]
+    fn find_matching_server_locates_the_already_connected_record() {
+        let notion = McpServerRecord {
+            config: McpServerConfig {
+                id: "notion".to_string(),
+                display_name: "Notion".to_string(),
+                transport: McpServerTransportConfig::Http {
+                    url: "https://mcp.notion.com/mcp".to_string(),
+                },
+            },
+            status: McpServerStatus::Ready,
+            tools: vec![McpToolSummary {
+                name: "notion-fetch".to_string(),
+                description: String::new(),
+            }],
+            disabled_tools: std::collections::HashSet::new(),
+        };
+        let servers = McpServersConfig { servers: vec![record("other"), notion] };
+
+        let found = find_matching_server(
+            &servers,
+            &McpConnectRequest::Http { url: "https://mcp.notion.com/mcp".to_string() },
+        );
+        assert_eq!(found.map(|r| r.config.id.as_str()), Some("notion"));
+
+        let not_found = find_matching_server(
+            &servers,
+            &McpConnectRequest::Http { url: "https://never-connected.example.com".to_string() },
+        );
+        assert!(not_found.is_none());
     }
 
     #[test]
