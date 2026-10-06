@@ -990,9 +990,29 @@ async fn run_generation_with_tools(
     // below, with the loop's own tool trace -- every turn gets an
     // `Execution` record uniformly, CLI session or not.
     let ctx = ToolContext { project_root, conversation_id: conversation_id.clone() };
-    let mut tools = native_tool_list();
-    tools.extend(crate::mcp_commands::mcp_sourced_tools(&app).await);
-    let registry = ToolRegistry::new(tools);
+    // MCP-sourced tools ride as *lazy* (`tool-list-optimization`): a
+    // server like codebase-memory-mcp alone can expose a dozen-plus
+    // tools, and sending every one's full schema every iteration is
+    // exactly the "tool list too large, model gets slow and forgets
+    // its own persona" failure mode real usage surfaced. Only offered
+    // in full once the model actually searches for one
+    // (`search_tools`, added as an eager tool alongside the native
+    // ones whenever there's at least one MCP tool to search for).
+    let mcp_tools = crate::mcp_commands::mcp_sourced_tools(&app).await;
+    let registry = if mcp_tools.is_empty() {
+        ToolRegistry::new(native_tool_list())
+    } else {
+        let lazy_summaries = mcp_tools
+            .iter()
+            .map(|tool| {
+                let definition = tool.definition();
+                (definition.name, definition.description)
+            })
+            .collect();
+        let mut eager = native_tool_list();
+        eager.push(Arc::new(fleet_snowfluff_ai::SearchToolsTool::new(lazy_summaries)));
+        ToolRegistry::with_lazy(eager, mcp_tools)
+    };
     let runtime = AemeathAgentRuntime::default();
     let permission = crate::tool_confirmation::PopupPermissionDecider {
         app: app.clone(),

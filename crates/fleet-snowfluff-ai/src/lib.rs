@@ -34,8 +34,8 @@ pub mod tool_provider;
 pub use agent_runtime::{
     AemeathAgentRuntime, AgentError, AgentOutcome, AgentRuntime, ConnectMcpServerTool,
     DelegateTool, McpConnectOutcome, McpConnectRequest, McpConnector, NeverConnectMcp,
-    PendingToolCall, PermissionDecider, ToolInvocation, ToolOutcome, ToolRegistry,
-    CONNECT_MCP_SERVER_TOOL_NAME,
+    PendingToolCall, PermissionDecider, SearchToolsTool, ToolInvocation, ToolOutcome, ToolRegistry,
+    CONNECT_MCP_SERVER_TOOL_NAME, SEARCH_TOOLS_NAME,
 };
 pub use agent_tool::{PermissionTier, Tool, ToolContext, ToolError, ToolResult};
 pub use context_manager::{AemeathContextManager, ContextManager, ExecutionLog, SessionLog};
