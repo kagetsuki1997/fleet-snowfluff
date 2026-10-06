@@ -730,17 +730,18 @@ function renderMcpServerRow(server: McpServerRecord): string {
                   .map((tool) => {
                     const enabled = !server.disabled_tools.includes(tool.name);
                     return `
-                      <li>
-                        <label class="ai-mcp-tool-row">
-                          <input
-                            type="checkbox"
-                            class="ai-mcp-tool-enabled-checkbox"
-                            data-server-id="${escapeHtml(id)}"
-                            data-tool-name="${escapeHtml(tool.name)}"
-                            ${enabled ? "checked" : ""}
-                          />
-                          <span><strong>${escapeHtml(tool.name)}</strong> — ${escapeHtml(tool.description)}</span>
-                        </label>
+                      <li class="ai-mcp-tool-item">
+                        <input
+                          type="checkbox"
+                          class="ai-mcp-tool-enabled-checkbox"
+                          data-server-id="${escapeHtml(id)}"
+                          data-tool-name="${escapeHtml(tool.name)}"
+                          ${enabled ? "checked" : ""}
+                        />
+                        <details class="ai-mcp-tool-details">
+                          <summary>${escapeHtml(tool.name)}</summary>
+                          <p class="hint">${escapeHtml(tool.description)}</p>
+                        </details>
                       </li>
                     `;
                   })

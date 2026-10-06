@@ -1577,6 +1577,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_notion_shaped_fetch_tool_is_discoverable_by_a_query_matching_either_name_or_description(
+    ) {
+        // Grounded in a real user report: connecting Notion's own
+        // hosted MCP server and asking to fetch a page's content, the
+        // model never searched for (and so never called) Notion's own
+        // fetch tool. This proves the *mechanism* -- a reasonably-
+        // chosen query matches the real tool by name alone, even if
+        // its description were empty (`McpTool::definition()`'s own
+        // `unwrap_or_default()` for a server that omits one) -- is not
+        // where the problem is; it can't prove why the model chose not
+        // to search in the first place, which is live model behavior,
+        // not something this test controls.
+        let notion_fetch = Arc::new(CountingTool::new("notion-fetch", PermissionTier::Auto));
+        let notion_search = Arc::new(CountingTool::new("notion-search", PermissionTier::Auto));
+        let search_tool = Arc::new(SearchToolsTool::new(vec![
+            ("notion-fetch".to_string(), String::new()), // empty description, worst case
+            ("notion-search".to_string(), "Searches across pages by query".to_string()),
+        ]));
+        let registry =
+            ToolRegistry::with_lazy(vec![search_tool], vec![notion_fetch.clone(), notion_search]);
+
+        for query in ["notion", "fetch", "NOTION"] {
+            let matches = registry.lazy_tools_matching(query);
+            assert!(
+                matches.iter().any(|tool| tool.definition().name == "notion-fetch"),
+                "query {query:?} should have found notion-fetch among {:?}",
+                matches.iter().map(|t| t.definition().name).collect::<Vec<_>>()
+            );
+        }
+
+        // End-to-end: a model that *does* search for "notion" can then
+        // call notion-fetch directly, same turn.
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: SEARCH_TOOLS_NAME.to_string(),
+                arguments: json!({"query": "notion"}),
+            }],
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_1".to_string(),
+                name: "notion-fetch".to_string(),
+                arguments: json!({"url": "https://app.notion.com/..."}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+
+        AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("print this notion page's content")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &NeverConnectMcp,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *notion_fetch.calls.lock().unwrap(),
+            1,
+            "notion-fetch must actually execute once unlocked"
+        );
+    }
+
+    #[tokio::test]
     async fn a_search_with_no_matches_reports_so_without_unlocking_anything() {
         let provider = ScriptedProvider::new(vec![
             vec![ToolCallStreamItem::ToolCall {

@@ -561,10 +561,35 @@ body.bubble-window #app {
   font-size: 0.9em;
 }
 
-.ai-mcp-tool-row {
+/* Checkbox sits in its own flex item, separate from the <details>
+   disclosure -- a checkbox has no real text baseline, so aligning it
+   against a <summary> that can wrap to multiple lines (a long tool
+   name) or expand to show a multi-line description looked broken
+   under `align-items: baseline`. `flex-start` keeps the checkbox
+   pinned to the first line regardless of how tall the details element
+   grows when opened. */
+.ai-mcp-tool-item {
   display: flex;
-  align-items: baseline;
-  gap: 0.4rem;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.ai-mcp-tool-item input[type="checkbox"] {
+  margin: 0.2rem 0 0 0;
+  flex-shrink: 0;
+}
+
+.ai-mcp-tool-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.ai-mcp-tool-details summary {
+  cursor: pointer;
+}
+
+.ai-mcp-tool-details p {
+  margin: 0.25rem 0 0 0;
 }
 
 .ai-mcp-add-row summary {
