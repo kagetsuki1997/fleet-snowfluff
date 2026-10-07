@@ -37,7 +37,7 @@ For a provider profile that supports tool calling, the application SHALL run an 
 
 ### Requirement: Native tool registry
 
-The application SHALL provide, for tool-calling-capable provider profiles, at least the following native tools: web search, reading a file, listing a directory, running a shell command, and reading basic system information (current date/time, OS, CPU/memory/uptime). Web search SHALL require no user-supplied credential. File and directory tools SHALL operate only within a user-configured project directory or with explicit per-request permission for a location outside it. The read-file tool SHALL bound the size of the content it returns and SHALL indicate when content was cut off. Reading system information SHALL NOT include the active window title, user idle time, or clipboard content.
+The application SHALL provide, for tool-calling-capable provider profiles, at least the following native tools: web search, reading a file, listing a directory, running a shell command, and reading basic system information (current date/time, OS, CPU/memory/uptime). Web search SHALL require no user-supplied credential. File and directory tools SHALL operate only within a user-configured project directory or with explicit per-request permission for a location outside it. The read-file tool SHALL bound the size of the content it returns and SHALL indicate when content was cut off. Reading system information SHALL NOT include the active window title, user idle time, or clipboard content. The same registry MAY also include tools sourced from a connected MCP server (see the `mcp` capability), each one subject to the exact same permission-tier enforcement as a native tool, with no distinction visible to the agent loop between a tool's native or MCP origin.
 
 #### Scenario: Web search requires no credential
 
@@ -63,6 +63,11 @@ The application SHALL provide, for tool-calling-capable provider profiles, at le
 
 - **WHEN** the read-file tool is asked to read a file no larger than its size bound
 - **THEN** it returns the complete content with no truncation marker
+
+#### Scenario: An MCP-sourced tool is dispatched the same way a native tool is
+
+- **WHEN** the model calls a tool that was discovered from a connected MCP server rather than implemented natively
+- **THEN** the agent loop's own dispatch and permission-tier logic treats it exactly as it would a native tool, requiring no code specific to that tool's origin
 
 ### Requirement: Tool permission enforcement
 
