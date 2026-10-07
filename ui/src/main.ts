@@ -1379,7 +1379,7 @@ async function renderChatWindow(): Promise<void> {
       <div id="chat-transcript" class="chat-transcript"></div>
       <div id="chat-status"></div>
       <form id="chat-form" class="chat-form">
-        <input type="text" id="chat-input" autocomplete="off" placeholder="${t("chat.input_placeholder")}" />
+        <input type="text" id="chat-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="${t("chat.input_placeholder")}" />
         <button type="submit" id="chat-send-button">${t("chat.send_button")}</button>
         <button type="button" id="chat-stop-button" class="secondary" hidden>${t("chat.stop_button")}</button>
       </form>
