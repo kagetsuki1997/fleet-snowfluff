@@ -48,10 +48,10 @@ pub use execution::{
 pub use log::{LogEntry, LogRole};
 pub use mcp::{
     build_authorization_url, discover, exchange_code_for_token, generate_pkce, generate_state,
-    mcp_http_client, probe_authorization, register_client_or_explain, AuthProbeOutcome,
-    AuthorizationServerMetadata, HttpTransport, McpClient, McpError, McpServerConfig,
-    McpServerRecord, McpServerStatus, McpServerTransportConfig, McpServersConfig, McpTool,
-    McpToolCallResult, McpToolDescriptor, McpToolSummary, McpTransport, PkceChallenge,
+    mcp_http_client, probe_authorization, refresh_access_token, register_client_or_explain,
+    AuthProbeOutcome, AuthorizationServerMetadata, HttpTransport, McpClient, McpError,
+    McpServerConfig, McpServerRecord, McpServerStatus, McpServerTransportConfig, McpServersConfig,
+    McpTool, McpToolCallResult, McpToolDescriptor, McpToolSummary, McpTransport, PkceChallenge,
     RedirectListener, StdioTransport, TokenResponse,
 };
 pub use message::{

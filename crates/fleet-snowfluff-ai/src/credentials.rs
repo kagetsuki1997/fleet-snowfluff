@@ -24,6 +24,13 @@ pub enum McpServerCredential {
         access_token: String,
         #[serde(default)]
         refresh_token: Option<String>,
+        /// What a refresh needs beyond the refresh token itself; absent
+        /// on a credential saved before refresh existed, which then
+        /// needs one full re-authorization instead.
+        #[serde(default)]
+        token_endpoint: Option<String>,
+        #[serde(default)]
+        client_id: Option<String>,
     },
 }
 
@@ -109,6 +116,24 @@ mod tests {
     }
 
     #[test]
+    fn an_oauth_credential_saved_before_refresh_existed_still_loads() {
+        let credential: McpServerCredential = serde_json::from_str(
+            r#"{"kind":"o_auth_token","access_token":"at","refresh_token":"rt"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            credential,
+            McpServerCredential::OAuthToken {
+                access_token: "at".to_string(),
+                refresh_token: Some("rt".to_string()),
+                token_endpoint: None,
+                client_id: None,
+            }
+        );
+    }
+
+    #[test]
     fn an_oauth_token_mcp_credential_round_trips_with_an_optional_refresh_token() {
         let mut creds = ProviderCredentials::default();
         creds.mcp_server_credentials.insert(
@@ -116,6 +141,8 @@ mod tests {
             McpServerCredential::OAuthToken {
                 access_token: "at-123".to_string(),
                 refresh_token: Some("rt-456".to_string()),
+                token_endpoint: Some("https://auth.example/token".to_string()),
+                client_id: Some("client-1".to_string()),
             },
         );
         let reloaded = load_from_str(&to_json_string(&creds));

@@ -113,6 +113,7 @@
   "ai.mcp.pending_hint": "Finish authorizing in your browser. If the automatic redirect didn't work, paste the code here.",
   "ai.mcp.paste_code_label": "Authorization Code",
   "ai.mcp.submit_code_button": "Submit Code",
+  "ai.mcp.reauthorize_button": "Re-authorize",
   "ai.mcp.submit_code_error": "Failed: {error}",
   "ai.mcp.add_button": "Add Server…",
   "ai.mcp.transport_label": "Type",

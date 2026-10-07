@@ -195,6 +195,83 @@ pub(crate) fn credential_value_for(
     }
 }
 
+/// The server answered 401, i.e. it no longer accepts the credential.
+fn is_unauthorized(err: &fleet_snowfluff_ai::McpError) -> bool { err.0.contains("401") }
+
+/// Exchanges a stored refresh token for a new access token, saving it
+/// and dropping the cached connection (which still holds the old one).
+/// `None` when this credential has nothing to refresh with, or the
+/// authorization server rejects the refresh.
+async fn refresh_stored_credential(app: &AppHandle, server_id: &str) -> Option<String> {
+    let mut credentials = secrets_store::load(app);
+    let McpServerCredential::OAuthToken {
+        refresh_token: Some(refresh_token),
+        token_endpoint: Some(token_endpoint),
+        client_id: Some(client_id),
+        ..
+    } = credentials.mcp_server_credentials.get(server_id)?.clone()
+    else {
+        return None;
+    };
+    match fleet_snowfluff_ai::refresh_access_token(
+        &fleet_snowfluff_ai::mcp_http_client(),
+        &token_endpoint,
+        &refresh_token,
+        &client_id,
+    )
+    .await
+    {
+        Ok(token) => {
+            credentials.mcp_server_credentials.insert(
+                server_id.to_string(),
+                McpServerCredential::OAuthToken {
+                    access_token: token.access_token.clone(),
+                    refresh_token: token.refresh_token.or(Some(refresh_token)),
+                    token_endpoint: Some(token_endpoint),
+                    client_id: Some(client_id),
+                },
+            );
+            secrets_store::save(app, &credentials);
+            app.state::<McpConnectionState>().remove(server_id).await;
+            Some(token.access_token)
+        }
+        Err(err) => {
+            log::warn!("refreshing the credential for MCP server \"{server_id}\" failed: {err}");
+            None
+        }
+    }
+}
+
+/// Connects and lists tools. If the server rejects the credential,
+/// refreshes it once and retries before giving up.
+async fn connect_and_list(
+    app: &AppHandle,
+    config: &McpServerConfig,
+) -> Result<
+    (std::sync::Arc<fleet_snowfluff_ai::McpClient>, Vec<fleet_snowfluff_ai::McpToolDescriptor>),
+    fleet_snowfluff_ai::McpError,
+> {
+    let connections = app.state::<McpConnectionState>();
+    let credential = credential_value_for(&secrets_store::load(app), &config.id);
+    let first = async {
+        let client = connections.connection_for(config, credential.as_deref()).await?;
+        let descriptors = client.list_tools().await?;
+        Ok::<_, fleet_snowfluff_ai::McpError>((client, descriptors))
+    }
+    .await;
+    match first {
+        Err(err) if is_unauthorized(&err) => {
+            let Some(fresh) = refresh_stored_credential(app, &config.id).await else {
+                return Err(err);
+            };
+            let client = connections.connection_for(config, Some(&fresh)).await?;
+            let descriptors = client.list_tools().await?;
+            Ok((client, descriptors))
+        }
+        other => other,
+    }
+}
+
 /// Every tool a connected, `Ready` MCP server currently exposes, built
 /// fresh from a live `tools/list` call each time -- this is the piece
 /// that was actually missing end to end: `McpServerRecord::tools` is
@@ -223,21 +300,15 @@ pub(crate) async fn mcp_sourced_tools(
     use fleet_snowfluff_ai::{McpServerStatus, McpTool};
 
     let servers = mcp_servers_store::load(app);
-    let credentials = secrets_store::load(app);
-    let connections = app.state::<McpConnectionState>();
 
     let mut tools: Vec<std::sync::Arc<dyn fleet_snowfluff_ai::Tool>> = Vec::new();
     for record in servers.servers {
         if record.status != McpServerStatus::Ready {
             continue;
         }
-        let credential = credential_value_for(&credentials, &record.config.id);
-        let attempt = tokio::time::timeout(MCP_PER_SERVER_TIMEOUT, async {
-            let client = connections.connection_for(&record.config, credential.as_deref()).await?;
-            let descriptors = client.list_tools().await?;
-            Ok::<_, fleet_snowfluff_ai::McpError>((client, descriptors))
-        })
-        .await;
+        let attempt =
+            tokio::time::timeout(MCP_PER_SERVER_TIMEOUT, connect_and_list(app, &record.config))
+                .await;
         match attempt {
             Ok(Ok((client, descriptors))) => {
                 for descriptor in descriptors {
@@ -248,6 +319,10 @@ pub(crate) async fn mcp_sourced_tools(
                 }
             }
             Ok(Err(err)) => {
+                if is_unauthorized(&err) {
+                    tool_confirmation::mark_needs_reauthorization(app, &record);
+                    tool_confirmation::offer_reauthorization(app, &record).await;
+                }
                 log::warn!(
                     "skipping MCP server \"{}\" for this turn -- failed to (re)connect or list \
                      tools: {err}",
@@ -269,7 +344,6 @@ pub(crate) async fn mcp_sourced_tools(
 #[tauri::command]
 pub async fn refresh_mcp_server_tools(
     app: AppHandle,
-    connections: State<'_, McpConnectionState>,
     server_id: String,
 ) -> Result<Vec<McpToolSummary>, String> {
     let mut servers = mcp_servers_store::load(&app);
@@ -277,21 +351,29 @@ pub async fn refresh_mcp_server_tools(
         return Err(format!("no connected server with id \"{server_id}\""));
     };
     let config = record.config.clone();
-    let credential = credential_value_for(&secrets_store::load(&app), &server_id);
 
-    let client = connections
-        .connection_for(&config, credential.as_deref())
-        .await
-        .map_err(|err| err.to_string())?;
-    let tools = client
-        .list_tools()
-        .await
-        .map(tool_confirmation::summarize_tools)
-        .map_err(|err| err.to_string())?;
+    let (_client, descriptors) = connect_and_list(&app, &config).await.map_err(|err| {
+        if is_unauthorized(&err) {
+            if let Some(record) =
+                servers.servers.iter().find(|record| record.config.id == server_id)
+            {
+                tool_confirmation::mark_needs_reauthorization(&app, record);
+            }
+        }
+        err.to_string()
+    })?;
+    let tools = tool_confirmation::summarize_tools(descriptors);
 
     update_cached_tools(&mut servers, &server_id, tools.clone());
     mcp_servers_store::save(&app, &servers);
     Ok(tools)
+}
+
+/// Restarts authorization for a server that needs it (the Settings
+/// "Re-authorize" button).
+#[tauri::command]
+pub async fn reauthorize_mcp_server(app: AppHandle, server_id: String) -> McpConnectOutcome {
+    tool_confirmation::reauthorize(&app, &server_id).await
 }
 
 #[cfg(test)]
@@ -320,7 +402,12 @@ mod tests {
         let mut credentials = ProviderCredentials::default();
         credentials.mcp_server_credentials.insert(
             "github".to_string(),
-            McpServerCredential::OAuthToken { access_token: "at".to_string(), refresh_token: None },
+            McpServerCredential::OAuthToken {
+                access_token: "at".to_string(),
+                refresh_token: None,
+                token_endpoint: None,
+                client_id: None,
+            },
         );
         let mut servers = McpServersConfig { servers: vec![record("github"), record("other")] };
 
@@ -500,6 +587,8 @@ mod tests {
             McpServerCredential::OAuthToken {
                 access_token: "at-123".to_string(),
                 refresh_token: Some("rt-456".to_string()),
+                token_endpoint: None,
+                client_id: None,
             },
         );
 

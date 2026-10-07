@@ -129,6 +129,13 @@ impl PendingOAuthState {
     pub async fn take(&self, server_id: &str) -> Option<PendingOAuthAttempt> {
         self.attempts.lock().await.remove(server_id)
     }
+
+    /// Whether an attempt for `server_id` is still waiting on the user
+    /// -- a `Pending` record with no live attempt is stale (expired
+    /// credential, or the app restarted mid-flow) and needs a new one.
+    pub async fn is_in_flight(&self, server_id: &str) -> bool {
+        self.attempts.lock().await.contains_key(server_id)
+    }
 }
 
 #[cfg(test)]
@@ -265,6 +272,18 @@ mod tests {
 
         let second = state.take("github").await;
         assert!(second.is_none(), "whichever finishes second finds nothing left to do");
+    }
+
+    #[tokio::test]
+    async fn an_attempt_is_in_flight_until_it_is_taken() {
+        let state = PendingOAuthState::default();
+        assert!(!state.is_in_flight("srv").await);
+
+        state.insert("srv".to_string(), pending_attempt()).await;
+        assert!(state.is_in_flight("srv").await);
+
+        state.take("srv").await;
+        assert!(!state.is_in_flight("srv").await);
     }
 
     #[tokio::test]

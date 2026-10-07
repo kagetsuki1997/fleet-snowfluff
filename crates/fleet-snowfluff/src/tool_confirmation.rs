@@ -320,8 +320,15 @@ fn generate_server_id() -> String { format!("mcp-{:x}", rand::random::<u64>()) }
 /// `mcp-servers.json`, then writes it back -- every write to this file
 /// goes through here, so "connect", "finish OAuth", and (Group 4.4/4.5)
 /// "remove"/"refresh" all share one read-modify-write shape.
-fn upsert_server_record(app: &AppHandle, record: McpServerRecord) {
+fn upsert_server_record(app: &AppHandle, mut record: McpServerRecord) {
     let mut servers = crate::mcp_servers_store::load(app);
+    // Re-authorizing an existing server must not reset which of its
+    // tools the user turned off.
+    if record.disabled_tools.is_empty() {
+        if let Some(existing) = servers.servers.iter().find(|e| e.config.id == record.config.id) {
+            record.disabled_tools = existing.disabled_tools.clone();
+        }
+    }
     servers.servers.retain(|existing| existing.config.id != record.config.id);
     servers.servers.push(record);
     crate::mcp_servers_store::save(app, &servers);
@@ -379,6 +386,8 @@ pub(crate) async fn finish_oauth(
         McpServerCredential::OAuthToken {
             access_token: token.access_token.clone(),
             refresh_token: token.refresh_token.clone(),
+            token_endpoint: Some(attempt.token_endpoint.clone()),
+            client_id: Some(attempt.client_id.clone()),
         },
     );
     crate::secrets_store::save(app, &creds);
@@ -423,7 +432,64 @@ pub(crate) async fn finish_oauth(
 /// right after `await`ing it -- harmless, not wrong, for this to also
 /// fire on those paths (`finish_oauth` is shared), just redundant with
 /// a render that already happened.
-fn notify_mcp_servers_changed(app: &AppHandle) { app.emit("mcp-servers-changed", ()).ok(); }
+pub(crate) fn notify_mcp_servers_changed(app: &AppHandle) {
+    app.emit("mcp-servers-changed", ()).ok();
+}
+
+/// Flags a `Ready` server whose credential the server now rejects (and
+/// that couldn't be refreshed) as `Pending`, so Settings shows it needs
+/// attention instead of it silently contributing no tools.
+pub(crate) fn mark_needs_reauthorization(app: &AppHandle, record: &McpServerRecord) {
+    log::warn!(
+        "MCP server \"{}\" rejected its credential and could not be refreshed; marking it as \
+         needing re-authorization",
+        record.config.display_name
+    );
+    upsert_server_record(
+        app,
+        McpServerRecord { status: McpServerStatus::Pending, ..record.clone() },
+    );
+    notify_mcp_servers_changed(app);
+}
+
+/// Asks, through the same popup `connect_mcp_server` uses, whether to
+/// sign in to an expired server again, and only opens the browser on
+/// approval. Declining leaves the server Pending (Settings still has
+/// its Re-authorize button) without asking again on later turns.
+pub(crate) async fn offer_reauthorization(app: &AppHandle, record: &McpServerRecord) {
+    let target = match &record.config.transport {
+        McpServerTransportConfig::Http { url } => format!("{} ({url})", record.config.display_name),
+        McpServerTransportConfig::Stdio { .. } => return,
+    };
+    let id = rand::random::<u64>().to_string();
+    let item = PendingConfirmationItem {
+        id: id.clone(),
+        tool_name: "reauthorize_mcp_server".to_string(),
+        summary: format!("Sign in again: {target}"),
+        allows_remember: false,
+    };
+    let responses = confirm_via_popup(app, vec![item]).await;
+    if responses.iter().any(|response| response.id == id && response.approved) {
+        reauthorize(app, &record.config.id).await;
+    }
+}
+
+/// Restarts the OAuth flow for an already-persisted HTTP server.
+pub(crate) async fn reauthorize(app: &AppHandle, server_id: &str) -> McpConnectOutcome {
+    let servers = crate::mcp_servers_store::load(app);
+    let Some(record) = servers.servers.iter().find(|record| record.config.id == server_id) else {
+        return McpConnectOutcome::Failed {
+            reason: format!("no connected server with id \"{server_id}\""),
+        };
+    };
+    let McpServerTransportConfig::Http { url } = &record.config.transport else {
+        return McpConnectOutcome::Failed {
+            reason: "only an HTTP server can be re-authorized".to_string(),
+        };
+    };
+    let (config, url) = (record.config.clone(), url.clone());
+    start_oauth_flow(app, config, url, None).await
+}
 
 /// Runs the full OAuth bootstrap (discovery, Dynamic Client
 /// Registration, PKCE) for an HTTP server that needs it, opens the
@@ -557,6 +623,14 @@ pub(crate) async fn attempt_connection(
                 tool_count: existing.tools.len(),
             },
             fleet_snowfluff_ai::McpServerStatus::Pending => {
+                // A pending record with no live attempt behind it is
+                // stale (credential expired, or the app restarted
+                // mid-flow), so asking to connect again restarts it.
+                let in_flight =
+                    app.state::<PendingOAuthState>().is_in_flight(&existing.config.id).await;
+                if !in_flight {
+                    return reauthorize(app, &existing.config.id).await;
+                }
                 McpConnectOutcome::PendingAuthorization {
                     display_name: existing.config.display_name.clone(),
                 }

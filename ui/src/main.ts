@@ -719,6 +719,7 @@ function renderMcpServerRow(server: McpServerRecord): string {
     server.status === "pending"
       ? `
         <p class="hint">${t("ai.mcp.pending_hint")}</p>
+        <button type="button" class="ai-mcp-reauthorize-button" data-server-id="${escapeHtml(id)}">${t("ai.mcp.reauthorize_button")}</button>
         ${field(t("ai.mcp.paste_code_label"), `<input type="text" class="ai-mcp-paste-code-input" data-server-id="${escapeHtml(id)}" />`)}
         <button type="button" class="ai-mcp-submit-code-button secondary" data-server-id="${escapeHtml(id)}">${t("ai.mcp.submit_code_button")}</button>
         <div class="ai-mcp-submit-code-result" data-server-id="${escapeHtml(id)}"></div>
@@ -838,6 +839,28 @@ function wireMcpServersSection(panel: HTMLElement): void {
     });
   }
 
+  for (const button of panel.querySelectorAll<HTMLButtonElement>(".ai-mcp-reauthorize-button")) {
+    button.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const serverId = button.dataset.serverId!;
+      const resultEl = panel.querySelector<HTMLElement>(
+        `.ai-mcp-submit-code-result[data-server-id="${serverId}"]`,
+      )!;
+      button.disabled = true;
+      try {
+        const outcome = await invoke<McpConnectOutcome>("reauthorize_mcp_server", { serverId });
+        if (outcome.status === "failed") {
+          resultEl.textContent = t("ai.mcp.submit_code_error", { error: outcome.reason });
+        }
+      } catch (err) {
+        resultEl.textContent = t("ai.mcp.submit_code_error", { error: String(err) });
+      } finally {
+        button.disabled = false;
+      }
+    });
+  }
+
   for (const button of panel.querySelectorAll<HTMLButtonElement>(".ai-mcp-submit-code-button")) {
     button.addEventListener("click", async (e) => {
       e.preventDefault();
@@ -905,7 +928,10 @@ function wireMcpServersSection(panel: HTMLElement): void {
                 panel.querySelector<HTMLInputElement>("#ai-mcp-add-credential-value")!.value ||
                 null,
             }
-          : { transport: "http", url: panel.querySelector<HTMLInputElement>("#ai-mcp-add-url")!.value };
+          : {
+              transport: "http",
+              url: panel.querySelector<HTMLInputElement>("#ai-mcp-add-url")!.value,
+            };
 
       if (request.transport === "stdio" && !request.command) return;
       if (request.transport === "http" && !request.url) return;

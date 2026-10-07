@@ -3329,9 +3329,9 @@ Animation / Proactive interaction 兩項在這份文件裡從未真正設計過�
 現成的 state 可以掛。詳細理由與原內容見 §19 Backlog 的 19.1 小節。）
 
 （`mcp-client-support` change 已落地，但只實作了下面四項裡的「消費方向」——
-Aemeath 作為 MCP *client* 連出去第三方 MCP server，對應探索階段定義的 Reading
+Aemeath 作為 MCP _client_ 連出去第三方 MCP server，對應探索階段定義的 Reading
 A。原本模糊的「Aemeath MCP bridge」一詞，在探索時發現其實有兩種讀法：Reading
-A（client/proxy，本次做的）和 Reading B（Aemeath 自己當 MCP *server*，把
+A（client/proxy，本次做的）和 Reading B（Aemeath 自己當 MCP _server_，把
 `delegate_task` 之類的能力反向暴露給 Claude Code / Codex / OpenClaw）。Reading
 B 在程式碼裡沒有任何現成的呼叫方（`claude_code_cli.rs` 目前的註解只提到「不要把
 Aemeath 自己的工具暴露給 CLI」，從未反向成立），依本專案一貫「不替未出現的

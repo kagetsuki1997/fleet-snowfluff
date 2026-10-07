@@ -324,6 +324,34 @@ pub async fn exchange_code_for_token(
     response.json().await.map_err(|err| McpError(format!("invalid token response: {err}")))
 }
 
+/// Trades a refresh token for a fresh access token. A server may rotate
+/// the refresh token too; the caller keeps the new one when present.
+pub async fn refresh_access_token(
+    client: &reqwest::Client,
+    token_endpoint: &str,
+    refresh_token: &str,
+    client_id: &str,
+) -> Result<TokenResponse, McpError> {
+    let form = [
+        ("grant_type", "refresh_token"),
+        ("refresh_token", refresh_token),
+        ("client_id", client_id),
+    ];
+    let response = client
+        .post(token_endpoint)
+        .form(&form)
+        .send()
+        .await
+        .map_err(|err| McpError(format!("token refresh request failed: {err}")))?;
+    if !response.status().is_success() {
+        return Err(McpError(format!(
+            "token refresh failed against {token_endpoint}: HTTP {}",
+            response.status()
+        )));
+    }
+    response.json().await.map_err(|err| McpError(format!("invalid token response: {err}")))
+}
+
 fn percent_decode(value: &str) -> String {
     let bytes = value.as_bytes();
     let mut out = Vec::with_capacity(bytes.len());
@@ -659,6 +687,38 @@ mod tests {
         let captured = handle.join().unwrap();
         assert!(captured.body.contains("code_verifier=the-verifier"));
         assert!(captured.body.contains("grant_type=authorization_code"));
+    }
+
+    #[tokio::test]
+    async fn refresh_access_token_sends_the_refresh_grant_and_parses_the_new_token() {
+        let (base_url, handle) = test_server::serve_once(
+            200,
+            test_server::chunked(
+                &json!({"access_token": "at-new", "refresh_token": "rt-new"}).to_string(),
+                4096,
+            ),
+        );
+
+        let token = refresh_access_token(&reqwest::Client::new(), &base_url, "rt-old", "client-1")
+            .await
+            .unwrap();
+
+        assert_eq!(token.access_token, "at-new");
+        assert_eq!(token.refresh_token, Some("rt-new".to_string()));
+        let captured = handle.join().unwrap();
+        assert!(captured.body.contains("grant_type=refresh_token"));
+        assert!(captured.body.contains("refresh_token=rt-old"));
+    }
+
+    #[tokio::test]
+    async fn refresh_access_token_reports_a_rejected_refresh() {
+        let (base_url, _handle) = test_server::serve_once(400, Vec::new());
+
+        let err = refresh_access_token(&reqwest::Client::new(), &base_url, "rt-old", "client-1")
+            .await
+            .unwrap_err();
+
+        assert!(err.to_string().contains("HTTP 400"));
     }
 
     #[tokio::test]

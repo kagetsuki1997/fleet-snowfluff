@@ -113,6 +113,7 @@
   "ai.mcp.pending_hint": "브라우저에서 인증을 완료하세요. 자동 리디렉션이 작동하지 않으면 여기에 코드를 붙여넣으세요.",
   "ai.mcp.paste_code_label": "인증 코드",
   "ai.mcp.submit_code_button": "코드 제출",
+  "ai.mcp.reauthorize_button": "다시 인증",
   "ai.mcp.submit_code_error": "실패: {error}",
   "ai.mcp.add_button": "서버 추가…",
   "ai.mcp.transport_label": "유형",

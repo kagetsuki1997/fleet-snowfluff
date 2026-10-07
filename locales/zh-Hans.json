@@ -113,6 +113,7 @@
   "ai.mcp.pending_hint": "请在浏览器中完成授权。如果自动跳转未生效，可在此粘贴授权码。",
   "ai.mcp.paste_code_label": "授权码",
   "ai.mcp.submit_code_button": "提交授权码",
+  "ai.mcp.reauthorize_button": "重新授权",
   "ai.mcp.submit_code_error": "失败：{error}",
   "ai.mcp.add_button": "添加服务器…",
   "ai.mcp.transport_label": "类型",

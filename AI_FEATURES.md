@@ -73,7 +73,7 @@ before running:
 | `run_command`        | Runs a shell command.                                                                        |
 | `get_system_context` | Reports the current date/time, OS, and CPU/memory/uptime.                                    |
 | `delegate_task`      | Delegates a focused sub-task to a new, independent agent — see below.                        |
-| `connect_mcp_server` | Connects to a third-party MCP server — see [below](#connecting-to-mcp-servers).               |
+| `connect_mcp_server` | Connects to a third-party MCP server — see [below](#connecting-to-mcp-servers).              |
 
 `read_file`/`list_directory` are auto-allowed for any path inside your
 configured **project folder** (Settings → AI); a path outside it — or any
