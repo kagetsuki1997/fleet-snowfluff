@@ -450,37 +450,24 @@ pub const SEARCH_TOOLS_NAME: &str = "search_tools";
 /// purpose (verified via web search during `tool-list-optimization`'s
 /// own exploration): names and short descriptions stay visible every
 /// turn; full schemas don't, until asked for.
-/// How much of each lazy tool's own description gets embedded into
-/// `search_tools`'s own description -- without a cap, a real MCP
-/// server's own (often verbose, example-laden) tool descriptions can
-/// make this single field dominate the whole prompt once more than a
-/// couple of tools are connected, confirmed by a real report (persona/
-/// language instructions silently lost, presumed truncated out of a
-/// context window this field alone was eating into). A name plus a
-/// short hint is enough to make a tool findable by `search_tools`;
-/// nothing here needs the full, unbounded description.
-const LAZY_SUMMARY_MAX_CHARS: usize = 80;
+const STUB_DESCRIPTION_MAX_CHARS: usize = 60;
 
-fn truncate_for_summary(text: &str) -> String {
-    if text.chars().count() <= LAZY_SUMMARY_MAX_CHARS {
-        return text.to_string();
+fn truncate_for_stub(text: &str) -> String {
+    let mut stub: String = text.chars().take(STUB_DESCRIPTION_MAX_CHARS).collect();
+    if text.chars().count() > STUB_DESCRIPTION_MAX_CHARS {
+        stub.push('\u{2026}');
     }
-    let mut truncated: String = text.chars().take(LAZY_SUMMARY_MAX_CHARS).collect();
-    truncated.push('\u{2026}'); // "…"
-    truncated
+    stub
 }
 
 pub fn search_tools_definition(lazy_summaries: &[(String, String)]) -> ToolDefinition {
-    let mut description = String::from(
-        "Check here BEFORE connecting to any new MCP server: the following tools already exist \
-         from servers that are already connected, and may already cover what you need. Call this \
-         with a name or keyword to load one's full schema, making it directly callable starting \
-         your very next tool call -- calling one of them directly before searching for it will \
-         fail. The following tools exist but need this call first:\n",
+    let description = format!(
+        "Check here BEFORE connecting to any new MCP server: {count} tool(s) from servers that \
+         are already connected appear in the tool list as stubs with no real argument schema. \
+         Call this with a stub's name or a keyword from its purpose to load its full schema \
+         before using it.",
+        count = lazy_summaries.len(),
     );
-    for (name, summary) in lazy_summaries {
-        description.push_str(&format!("- {name}: {}\n", truncate_for_summary(summary)));
-    }
     ToolDefinition {
         name: SEARCH_TOOLS_NAME.to_string(),
         description,
@@ -587,11 +574,26 @@ impl ToolRegistry {
     /// sends the provider for one iteration once some lazy tools have
     /// been searched for.
     fn definitions_for(&self, unlocked: &HashSet<String>) -> Vec<ToolDefinition> {
-        self.eager
-            .iter()
-            .chain(self.lazy.iter().filter(|tool| unlocked.contains(&tool.definition().name)))
-            .map(|tool| tool.definition())
-            .collect()
+        let mut definitions: Vec<ToolDefinition> =
+            self.eager.iter().map(|tool| tool.definition()).collect();
+        // A locked lazy tool still rides along as a stub (name, short
+        // description, permissive schema) rather than being omitted:
+        // once a model has seen a tool's name it may call it directly,
+        // and Ollama silently drops a call to any tool absent from the
+        // request, which surfaced as an empty reply with no error.
+        for tool in &self.lazy {
+            let definition = tool.definition();
+            if unlocked.contains(&definition.name) {
+                definitions.push(definition);
+            } else {
+                definitions.push(ToolDefinition {
+                    name: definition.name,
+                    description: truncate_for_stub(&definition.description),
+                    parameters: json!({"type": "object", "additionalProperties": true}),
+                });
+            }
+        }
+        definitions
     }
 
     /// Every lazy tool's own name and description -- what
@@ -1107,11 +1109,26 @@ impl AgentRuntime for AemeathAgentRuntime {
                         });
                     }
                     CallPlan::ToolNotYetUnlocked => {
+                        // The call used a stub's guessed arguments, so it
+                        // was not run. Unlock the tool and hand back its
+                        // real schema so the model can retry correctly.
+                        let schema_note = match registry.find(&call.name) {
+                            Some(tool) => {
+                                let definition = tool.definition();
+                                unlocked.insert(definition.name.clone());
+                                format!(
+                                    "Parameters schema: {}\nDescription: {}",
+                                    definition.parameters, definition.description
+                                )
+                            }
+                            None => String::new(),
+                        };
                         messages.push(Message::tool_result(
                             call.id.clone(),
                             format!(
-                                "Error: \"{}\" has not been loaded yet -- call \
-                                 {SEARCH_TOOLS_NAME} with its name first",
+                                "\"{}\" was not run: it was only a stub with no real argument \
+                                 schema. It is loaded now -- call it again using this \
+                                 schema.\n{schema_note}",
                                 call.name
                             ),
                         ));
@@ -1473,16 +1490,19 @@ mod tests {
     // -- tool-list-optimization: ToolRegistry's own eager/lazy split --
 
     #[test]
-    fn with_lazy_offers_only_eager_definitions_until_something_is_unlocked() {
+    fn with_lazy_offers_a_stub_for_a_locked_tool_until_it_is_unlocked() {
         let eager = Arc::new(CountingTool::new("eager", PermissionTier::Auto));
         let lazy = Arc::new(CountingTool::new("lazy", PermissionTier::Auto));
         let registry = ToolRegistry::with_lazy(vec![eager], vec![lazy]);
 
-        let names: Vec<String> = registry.definitions().into_iter().map(|d| d.name).collect();
+        let fresh = registry.definitions();
+        let names: Vec<&str> = fresh.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["eager", "lazy"], "a locked lazy tool is offered as a stub");
+        let stub = fresh.iter().find(|d| d.name == "lazy").unwrap();
         assert_eq!(
-            names,
-            vec!["eager".to_string()],
-            "a fresh registry's definitions() must not leak lazy tools"
+            stub.parameters,
+            json!({"type": "object", "additionalProperties": true}),
+            "a stub must not carry the real schema"
         );
 
         let mut unlocked = HashSet::new();
@@ -1548,52 +1568,27 @@ mod tests {
     }
 
     #[test]
-    fn search_tools_definition_embeds_every_lazy_summary_by_name() {
+    fn search_tools_definition_states_the_count_without_listing_names() {
+        // Listing every lazy tool's name made qwen3:14b stop emitting
+        // a parseable search_tools call once the list grew past a few
+        // entries, so the names must stay out of this description.
         let definition = search_tools_definition(&[
             ("search_graph".to_string(), "Finds symbols".to_string()),
             ("trace_path".to_string(), "Traces callers".to_string()),
         ]);
         assert_eq!(definition.name, SEARCH_TOOLS_NAME);
-        assert!(definition.description.contains("search_graph: Finds symbols"));
-        assert!(definition.description.contains("trace_path: Traces callers"));
+        assert!(definition.description.contains("2 tool(s)"));
+        assert!(!definition.description.contains("search_graph"));
+        assert!(!definition.description.contains("trace_path"));
         assert_eq!(definition.parameters["required"], json!(["query"]));
-    }
-
-    #[test]
-    fn search_tools_definition_bounds_a_verbose_real_servers_own_description() {
-        // Grounded in a real report: a connected server's own tool
-        // descriptions (often verbose, example-laden -- real MCP
-        // servers write these to be thorough, not terse) can make this
-        // one field dominate the whole prompt once more than a couple
-        // of tools are connected, confirmed to coincide with the
-        // persona/system prompt apparently being lost. One long
-        // description must not blow past a bounded size.
-        let verbose_description = "x".repeat(500);
-        let definition =
-            search_tools_definition(&[("notion-fetch".to_string(), verbose_description)]);
-        let embedded_line = definition
-            .description
-            .lines()
-            .find(|line| line.starts_with("- notion-fetch:"))
-            .unwrap();
-        assert!(
-            embedded_line.len() < 120,
-            "one tool's embedded summary must stay well short of the verbose original: \
-             {embedded_line}"
-        );
-        assert!(embedded_line.ends_with('…'), "a truncated summary must say so visibly");
-    }
-
-    #[test]
-    fn search_tools_definition_leaves_a_short_summary_untouched() {
-        let definition = search_tools_definition(&[("lazy".to_string(), "short".to_string())]);
-        assert!(definition.description.contains("- lazy: short\n"));
     }
 
     // -- tool-list-optimization: run()'s own lazy-loading dispatch --
 
     #[tokio::test]
     async fn a_lazy_tools_full_schema_is_not_sent_until_it_is_searched_for() {
+        // The tool's *name* is offered from the start (as a stub), so a
+        // direct call is valid; only the real schema is withheld.
         let provider = ScriptedProvider::new(vec![
             vec![ToolCallStreamItem::ToolCall {
                 id: "call_0".to_string(),
@@ -1622,11 +1617,9 @@ mod tests {
         let received_tools = provider.received_tools.lock().unwrap();
         let first_iteration_names: Vec<&str> =
             received_tools[0].iter().map(|d| d.name.as_str()).collect();
-        assert!(
-            !first_iteration_names.contains(&"lazy"),
-            "the lazy tool's full schema must not be sent before it's searched for: \
-             {first_iteration_names:?}"
-        );
+        assert!(first_iteration_names.contains(&"lazy"), "the stub keeps a direct call valid");
+        let stub = received_tools[0].iter().find(|d| d.name == "lazy").unwrap();
+        assert_eq!(stub.parameters, json!({"type": "object", "additionalProperties": true}));
         assert!(first_iteration_names.contains(&SEARCH_TOOLS_NAME));
     }
 
@@ -1665,6 +1658,39 @@ mod tests {
             0,
             "a not-yet-unlocked lazy tool must never execute"
         );
+    }
+
+    #[tokio::test]
+    async fn a_direct_call_to_a_stub_unlocks_its_real_schema_for_the_retry() {
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: "lazy".to_string(),
+                arguments: json!({"guessed": "wrong"}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let lazy = Arc::new(CountingTool::new("lazy", PermissionTier::Auto));
+        let registry = ToolRegistry::with_lazy(vec![], vec![lazy]);
+
+        AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &NeverConnectMcp,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        let received_tools = provider.received_tools.lock().unwrap();
+        let first = received_tools[0].iter().find(|d| d.name == "lazy").unwrap();
+        let second = received_tools[1].iter().find(|d| d.name == "lazy").unwrap();
+        assert_eq!(first.parameters, json!({"type": "object", "additionalProperties": true}));
+        assert_ne!(second.parameters, first.parameters, "the real schema is offered on the retry");
     }
 
     #[tokio::test]
