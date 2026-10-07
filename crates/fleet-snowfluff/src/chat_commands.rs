@@ -550,13 +550,6 @@ pub async fn send_chat_message(
     let history_entries = chat_log_store::read_session(&session_path);
     let context = fleet_snowfluff_ai::log::entries_to_context(&history_entries);
 
-    // Appended immediately -- part of history regardless of what
-    // happens to the reply.
-    chat_log_store::append_entry(
-        &session_path,
-        &LogEntry { role: LogRole::User, content: message.clone(), timestamp: now_rfc3339() },
-    );
-
     let persona = persona_store::load(&app).persona;
     let detected_language = map_ui_language(manager.lock().unwrap().ui_language());
     let language = resolve_language(&persona, detected_language);
@@ -565,9 +558,18 @@ pub async fn send_chat_message(
     // directly to it (Ollama not enabled), or because it's serving as
     // the fallback for a mix-mode local attempt that escalates or fails
     // below. Never has `task-router-rules.md` appended -- only the
-    // local attempt's own message list does.
+    // local attempt's own message list does. Built before the user
+    // entry is appended below, since `build_context` reads the log
+    // itself and appends `message` on its own.
     let default_messages =
         context_manager().build_context(&session_path, &persona, language, &message).await;
+
+    // Appended immediately -- part of history regardless of what
+    // happens to the reply.
+    chat_log_store::append_entry(
+        &session_path,
+        &LogEntry { role: LogRole::User, content: message.clone(), timestamp: now_rfc3339() },
+    );
 
     let partial_text = Arc::new(Mutex::new(String::new()));
     let task_app = app.clone();
