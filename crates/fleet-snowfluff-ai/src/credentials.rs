@@ -1,10 +1,38 @@
-//! `ProviderCredentials`: the shape of `secrets.json` -- API keys
-//! only, kept entirely separate from `AiSettings`/`ai-config.json` so
-//! a config file a user might reasonably hand-edit, screenshot, or
-//! back up never contains a key (`ai-provider`'s "Separate credential
+//! `ProviderCredentials`: the shape of `secrets.json` -- API keys and,
+//! since `mcp-client-support`, connected MCP servers' own credentials
+//! -- kept entirely separate from `AiSettings`/`ai-config.json` so a
+//! config file a user might reasonably hand-edit, screenshot, or back
+//! up never contains a key (`ai-provider`'s "Separate credential
 //! storage").
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
+
+/// One connected MCP server's own credential, shaped by its transport
+/// (design.md's "Credential shape forks by transport"): a stdio server
+/// takes a plain environment-variable value (no pending state -- either
+/// the user has it or they don't); an HTTP server that needed OAuth
+/// gets the resulting token pair instead.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum McpServerCredential {
+    EnvVar {
+        value: String,
+    },
+    OAuthToken {
+        access_token: String,
+        #[serde(default)]
+        refresh_token: Option<String>,
+        /// What a refresh needs beyond the refresh token itself; absent
+        /// on a credential saved before refresh existed, which then
+        /// needs one full re-authorization instead.
+        #[serde(default)]
+        token_endpoint: Option<String>,
+        #[serde(default)]
+        client_id: Option<String>,
+    },
+}
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProviderCredentials {
@@ -13,6 +41,12 @@ pub struct ProviderCredentials {
     #[serde(default)]
     pub anthropic_api_key: Option<String>,
     // Ollama and Mock need no credentials.
+    /// Keyed by the connected MCP server's own id (`McpServerConfig::id`,
+    /// Group 4's persisted config) -- a server with no credential at
+    /// all (an unauthenticated HTTP endpoint, or a stdio server needing
+    /// none) simply has no entry here.
+    #[serde(default)]
+    pub mcp_server_credentials: HashMap<String, McpServerCredential>,
 }
 
 /// Missing/unreadable/corrupt content yields empty credentials rather
@@ -45,6 +79,7 @@ mod tests {
         let creds = ProviderCredentials {
             openai_api_key: Some("sk-test".to_string()),
             anthropic_api_key: None,
+            mcp_server_credentials: HashMap::new(),
         };
         let reloaded = load_from_str(&to_json_string(&creds));
         assert_eq!(reloaded, creds);
@@ -55,10 +90,62 @@ mod tests {
         // Sanity check that a reader hand-inspecting secrets.json (as
         // this project's whole file-transparency ethos assumes they
         // might) sees exactly the two documented key names.
-        let creds =
-            ProviderCredentials { openai_api_key: Some("sk-test".into()), anthropic_api_key: None };
+        let creds = ProviderCredentials {
+            openai_api_key: Some("sk-test".into()),
+            anthropic_api_key: None,
+            mcp_server_credentials: HashMap::new(),
+        };
         let json = to_json_string(&creds);
         assert!(json.contains("openai_api_key"));
         assert!(json.contains("anthropic_api_key"));
+    }
+
+    #[test]
+    fn an_env_var_mcp_credential_round_trips_keyed_by_server_id() {
+        let mut creds = ProviderCredentials::default();
+        creds.mcp_server_credentials.insert(
+            "local-filesystem".to_string(),
+            McpServerCredential::EnvVar { value: "super-secret".to_string() },
+        );
+        let reloaded = load_from_str(&to_json_string(&creds));
+        assert_eq!(reloaded, creds);
+        assert_eq!(
+            reloaded.mcp_server_credentials.get("local-filesystem"),
+            Some(&McpServerCredential::EnvVar { value: "super-secret".to_string() })
+        );
+    }
+
+    #[test]
+    fn an_oauth_credential_saved_before_refresh_existed_still_loads() {
+        let credential: McpServerCredential = serde_json::from_str(
+            r#"{"kind":"o_auth_token","access_token":"at","refresh_token":"rt"}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            credential,
+            McpServerCredential::OAuthToken {
+                access_token: "at".to_string(),
+                refresh_token: Some("rt".to_string()),
+                token_endpoint: None,
+                client_id: None,
+            }
+        );
+    }
+
+    #[test]
+    fn an_oauth_token_mcp_credential_round_trips_with_an_optional_refresh_token() {
+        let mut creds = ProviderCredentials::default();
+        creds.mcp_server_credentials.insert(
+            "github".to_string(),
+            McpServerCredential::OAuthToken {
+                access_token: "at-123".to_string(),
+                refresh_token: Some("rt-456".to_string()),
+                token_endpoint: Some("https://auth.example/token".to_string()),
+                client_id: Some("client-1".to_string()),
+            },
+        );
+        let reloaded = load_from_str(&to_json_string(&creds));
+        assert_eq!(reloaded, creds);
     }
 }

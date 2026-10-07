@@ -526,3 +526,72 @@ body.bubble-window #app {
   padding: 0.2rem 0.6rem;
   font-size: 0.8em;
 }
+
+/* Connected MCP servers (mcp-client-support) -- reuses the
+   `.ai-profile-row`/`.ai-profile-name`/`.ai-profile-body` pattern
+   above, one <details> per connected server, same reasoning:
+   collapsible without needing a separate sub-tab. */
+#ai-mcp-servers {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-bottom: 0.5rem;
+}
+
+.ai-mcp-server-status {
+  font-size: 0.8em;
+  color: var(--pico-muted-color);
+  flex-shrink: 0;
+}
+
+.ai-mcp-remove-button,
+.ai-mcp-refresh-button,
+.ai-mcp-submit-code-button {
+  width: auto;
+  flex-shrink: 0;
+  margin: 0;
+  padding: 0.2rem 0.6rem;
+  font-size: 0.8em;
+}
+
+.ai-mcp-tools-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.9em;
+}
+
+/* Checkbox sits in its own flex item, separate from the <details>
+   disclosure -- a checkbox has no real text baseline, so aligning it
+   against a <summary> that can wrap to multiple lines (a long tool
+   name) or expand to show a multi-line description looked broken
+   under `align-items: baseline`. `flex-start` keeps the checkbox
+   pinned to the first line regardless of how tall the details element
+   grows when opened. */
+.ai-mcp-tool-item {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.5rem;
+}
+
+.ai-mcp-tool-item input[type="checkbox"] {
+  margin: 0.2rem 0 0 0;
+  flex-shrink: 0;
+}
+
+.ai-mcp-tool-details {
+  flex: 1;
+  min-width: 0;
+}
+
+.ai-mcp-tool-details summary {
+  cursor: pointer;
+}
+
+.ai-mcp-tool-details p {
+  margin: 0.25rem 0 0 0;
+}
+
+.ai-mcp-add-row summary {
+  cursor: pointer;
+}

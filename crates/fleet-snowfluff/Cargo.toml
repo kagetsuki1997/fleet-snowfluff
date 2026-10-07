@@ -27,6 +27,7 @@ image                  = { workspace = true }
 log                    = { workspace = true }
 pollster               = { workspace = true }
 rand                   = { workspace = true }
+reqwest                = { workspace = true }
 rodio                  = { workspace = true }
 rust-embed             = { workspace = true }
 serde                  = { workspace = true }

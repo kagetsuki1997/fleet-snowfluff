@@ -133,6 +133,25 @@ enum CallPlan {
     /// preserving the depth-1 cap. Carries the already-parsed task
     /// description.
     Delegate(String),
+    /// `call.name == CONNECT_MCP_SERVER_TOOL_NAME` *and* the registry
+    /// actually offers it -- same registry-gated reasoning as
+    /// `Delegate` above, and for the same purpose: a delegated sub-
+    /// task's own registry also omits this name (see its own
+    /// `child_registry` construction below), so it falls through to
+    /// `UnknownTool` there too. Carries the already-parsed request.
+    ConnectMcp(McpConnectRequest),
+    /// `call.name == SEARCH_TOOLS_NAME` *and* the registry actually
+    /// offers it. Carries the already-parsed query. Unlike `Delegate`/
+    /// `ConnectMcp`, resolved in a plain synchronous pass (matching
+    /// against already-in-memory tool definitions needs no `.await`
+    /// at all), not the concurrent one below.
+    SearchTools(String),
+    /// `name` resolves to a *lazy* tool in this registry that hasn't
+    /// been searched for yet this turn -- rejected the same way an
+    /// unknown tool is (model-visible error, `execute()` never
+    /// reached), mirroring Claude Code's own deferred tools failing a
+    /// direct call before being searched for.
+    ToolNotYetUnlocked,
 }
 
 /// The reserved name `run()` recognizes to dispatch delegation
@@ -204,6 +223,301 @@ impl Tool for DelegateTool {
     }
 }
 
+/// The reserved name `run()` recognizes to dispatch `mcp-client-support`'s
+/// own connect flow specially -- same reason and same mechanism as
+/// [`DELEGATE_TOOL_NAME`]: the model decides to call this mid-turn, so
+/// dispatch is special-cased *inside* `run()`'s own per-iteration loop,
+/// not before `run()` is ever reached.
+pub const CONNECT_MCP_SERVER_TOOL_NAME: &str = "connect_mcp_server";
+
+/// What the model supplied when requesting a connection -- resolved as
+/// given, with no allowlist matching attempted (design.md's "No
+/// curated server list, by explicit choice"). `Serialize`/`Deserialize`
+/// so the Settings UI's own manual "add server" form (Group 5.2) can
+/// build one directly and send it across IPC, feeding the same
+/// `attempt_connection` the chat-triggered path uses.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "transport", rename_all = "snake_case")]
+pub enum McpConnectRequest {
+    Stdio {
+        command: String,
+        args: Vec<String>,
+        /// Both present together, or neither -- the environment
+        /// variable to inject a credential's value under, and the
+        /// value itself. Optional: most stdio servers (filesystem,
+        /// git, local dev tools) need no credential at all.
+        credential_env_var: Option<String>,
+        credential_value: Option<String>,
+    },
+    Http {
+        url: String,
+    },
+}
+
+/// What [`McpConnector::connect`] resolved to -- the three-way branch
+/// design.md's own Decision requires of any implementation: approved
+/// and ready (tools now available, starting the next message), still
+/// waiting on OAuth (must never block the rest of the conversation --
+/// see the `mcp` capability's own "does not block the rest of the
+/// conversation" scenario), or not approved/failed. `Serialize` so the
+/// Settings UI's manual "add server" command (Group 5.2) can return
+/// one directly to the frontend.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum McpConnectOutcome {
+    Connected {
+        display_name: String,
+        tool_count: usize,
+    },
+    /// The resolved command/URL already matches a connected server --
+    /// returned instead of silently attempting to reconnect (or
+    /// re-running an OAuth dance for something already authorized).
+    /// Exists because a model can, and in real usage did, ask to
+    /// connect to something already connected (`tool-list-optimization`'s
+    /// own real-world trigger: a model reaching for `connect_mcp_server`
+    /// out of habit instead of `search_tools`) -- this turns that wrong
+    /// guess into a corrective signal pointing at `search_tools`,
+    /// rather than a dead end.
+    AlreadyConnected {
+        display_name: String,
+        tool_count: usize,
+    },
+    PendingAuthorization {
+        display_name: String,
+    },
+    Declined,
+    Failed {
+        reason: String,
+    },
+}
+
+/// Mirrors [`PermissionDecider`]'s own shape (design.md's chosen
+/// resolution for how `connect_mcp_server`'s dispatch reaches
+/// `AppHandle`-level capability without `agent_runtime.rs` taking on a
+/// `tauri` dependency): defined abstractly here, implemented
+/// concretely with a real `AppHandle` in the app crate, passed into
+/// `run()` the same way `permission: &dyn PermissionDecider` already
+/// is. `connect()` must itself resolve the confirm/connect/OAuth-pending
+/// split -- `run()`'s own dispatch just awaits it in place, the same
+/// way it already awaits `permission.decide(...)` for any other
+/// `Confirm`-tier call; no new control-flow concept is needed here.
+#[async_trait::async_trait]
+pub trait McpConnector: Send + Sync {
+    async fn connect(&self, request: McpConnectRequest) -> McpConnectOutcome;
+}
+
+/// A safe, never-reached default for a call site whose own registry
+/// never actually offers `connect_mcp_server` -- the recursive
+/// `delegate_task` call below, and `mix-mode-local-tools`'s own
+/// continuation call in the app crate -- mirroring `AlwaysDenyConfirm`'s
+/// own shape for the same reason. Reached only if that exclusion ever
+/// regressed, in which case this fails the call safely rather than
+/// doing anything.
+pub struct NeverConnectMcp;
+
+#[async_trait::async_trait]
+impl McpConnector for NeverConnectMcp {
+    async fn connect(&self, _request: McpConnectRequest) -> McpConnectOutcome {
+        McpConnectOutcome::Failed {
+            reason: "connecting to an MCP server is not available here".to_string(),
+        }
+    }
+}
+
+/// `connect_mcp_server`'s own schema -- registered normally so the
+/// model can discover and call it like any other tool.
+pub fn connect_mcp_server_definition() -> ToolDefinition {
+    ToolDefinition {
+        name: CONNECT_MCP_SERVER_TOOL_NAME.to_string(),
+        description: "Connects to a NEW third-party MCP (Model Context Protocol) server, making \
+                      its own tools available starting your next message. Before calling this, \
+                      check whether the capability you actually need already exists among \
+                      already-connected servers' own tools -- call search_tools for that, if it's \
+                      offered; connecting again to something already connected just reports that \
+                      back without doing anything new. Use this tool only when what you need \
+                      genuinely isn't connected yet. Resolve the server's exact command (for a \
+                      local/stdio server) or URL (for a remote/HTTP server) from the user's \
+                      request or your own knowledge -- there is no pre-vetted list to match \
+                      against. The user will be shown exactly what you resolved and must approve \
+                      it before anything connects."
+            .to_string(),
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "transport": {
+                    "type": "string",
+                    "enum": ["stdio", "http"],
+                    "description": "\"stdio\" for a local server run as a subprocess, \"http\" \
+                                     for a remote server reached by URL."
+                },
+                "command": {
+                    "type": "string",
+                    "description": "Required for \"stdio\": the command to run."
+                },
+                "args": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Optional for \"stdio\": the command's own arguments."
+                },
+                "url": {
+                    "type": "string",
+                    "description": "Required for \"http\": the server's own URL."
+                },
+                "credential_env_var": {
+                    "type": "string",
+                    "description": "Optional, \"stdio\" only: the environment variable name a \
+                                     credential should be injected under, if this server needs \
+                                     one. Must be given together with credential_value."
+                },
+                "credential_value": {
+                    "type": "string",
+                    "description": "Optional, \"stdio\" only: the credential's own value. Must \
+                                     be given together with credential_env_var."
+                }
+            },
+            "required": ["transport"],
+        }),
+    }
+}
+
+/// `connect_mcp_server`'s own `Tool` impl exists only so its
+/// `definition()` participates in the normal `ToolRegistry`/model-
+/// discovery machinery, mirroring `DelegateTool`'s own unreachable-
+/// `execute()` shape for the identical reason: `run()`'s own dispatch
+/// intercepts this reserved name before ever reaching the generic
+/// `Tool::execute()` path.
+pub struct ConnectMcpServerTool;
+
+#[async_trait::async_trait]
+impl Tool for ConnectMcpServerTool {
+    fn definition(&self) -> ToolDefinition { connect_mcp_server_definition() }
+
+    fn required_permission(&self, _args: &Value, _ctx: &ToolContext) -> PermissionTier {
+        PermissionTier::Auto
+    }
+
+    async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::error(
+            "connect_mcp_server was dispatched through the generic tool path, which should be \
+             unreachable -- this is an internal bug, not a user-facing failure"
+                .to_string(),
+        ))
+    }
+}
+
+/// Parses `connect_mcp_server`'s own arguments into a request, or
+/// `None` for anything malformed (an unrecognized `transport`, or a
+/// transport missing the field it requires) -- the same "malformed
+/// arguments" bucket every other tool call's bad input already falls
+/// into, not a new error shape.
+fn parse_mcp_connect_request(arguments: &Value) -> Option<McpConnectRequest> {
+    match arguments.get("transport").and_then(Value::as_str) {
+        Some("stdio") => {
+            let command = arguments.get("command").and_then(Value::as_str)?.to_string();
+            let args = arguments
+                .get("args")
+                .and_then(Value::as_array)
+                .map(|values| values.iter().filter_map(Value::as_str).map(str::to_string).collect())
+                .unwrap_or_default();
+            let credential_env_var =
+                arguments.get("credential_env_var").and_then(Value::as_str).map(str::to_string);
+            let credential_value =
+                arguments.get("credential_value").and_then(Value::as_str).map(str::to_string);
+            Some(McpConnectRequest::Stdio { command, args, credential_env_var, credential_value })
+        }
+        Some("http") => {
+            let url = arguments.get("url").and_then(Value::as_str)?.to_string();
+            Some(McpConnectRequest::Http { url })
+        }
+        _ => None,
+    }
+}
+
+/// The reserved name `run()` recognizes to dispatch a lazy-tool search
+/// specially -- same mechanism as [`DELEGATE_TOOL_NAME`]/
+/// [`CONNECT_MCP_SERVER_TOOL_NAME`]: special-cased *inside* `run()`'s
+/// own per-iteration loop, since matching against `registry`'s own
+/// lazy tools and mutating this call's own `unlocked` set both need
+/// things a plain `Tool::execute()` can't reach.
+pub const SEARCH_TOOLS_NAME: &str = "search_tools";
+
+/// `search_tools`'s own schema -- its `description` is generated fresh
+/// each time from `lazy_summaries` (name + description for every lazy
+/// tool in the registry this call is built for), which is what
+/// actually tells the model such tools exist at all and roughly what
+/// they're for, before it has any reason to search for one by name.
+/// Mirrors Claude Code's own deferred-tool reminder for the identical
+/// purpose (verified via web search during `tool-list-optimization`'s
+/// own exploration): names and short descriptions stay visible every
+/// turn; full schemas don't, until asked for.
+const STUB_DESCRIPTION_MAX_CHARS: usize = 60;
+
+fn truncate_for_stub(text: &str) -> String {
+    let mut stub: String = text.chars().take(STUB_DESCRIPTION_MAX_CHARS).collect();
+    if text.chars().count() > STUB_DESCRIPTION_MAX_CHARS {
+        stub.push('\u{2026}');
+    }
+    stub
+}
+
+pub fn search_tools_definition(lazy_summaries: &[(String, String)]) -> ToolDefinition {
+    let description = format!(
+        "Check here BEFORE connecting to any new MCP server: {count} tool(s) from servers that \
+         are already connected appear in the tool list as stubs with no real argument schema. \
+         Call this with a stub's name or a keyword from its purpose to load its full schema \
+         before using it.",
+        count = lazy_summaries.len(),
+    );
+    ToolDefinition {
+        name: SEARCH_TOOLS_NAME.to_string(),
+        description,
+        parameters: json!({
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "A tool's name, or a keyword from its purpose."
+                }
+            },
+            "required": ["query"],
+        }),
+    }
+}
+
+/// `search_tools`'s own `Tool` impl exists only so its `definition()`
+/// participates in the normal `ToolRegistry`/model-discovery machinery
+/// -- mirroring `DelegateTool`'s own unreachable-`execute()` shape,
+/// for the identical reason: `run()`'s own dispatch intercepts this
+/// reserved name before ever reaching the generic `Tool::execute()`
+/// path. Holds the same `lazy_summaries` the registry it's built
+/// alongside was given, purely so `definition()` can regenerate its
+/// own description text on demand without needing registry access
+/// (which a plain `Tool` method has no way to reach anyway).
+pub struct SearchToolsTool {
+    lazy_summaries: Vec<(String, String)>,
+}
+
+impl SearchToolsTool {
+    pub fn new(lazy_summaries: Vec<(String, String)>) -> Self { Self { lazy_summaries } }
+}
+
+#[async_trait::async_trait]
+impl Tool for SearchToolsTool {
+    fn definition(&self) -> ToolDefinition { search_tools_definition(&self.lazy_summaries) }
+
+    fn required_permission(&self, _args: &Value, _ctx: &ToolContext) -> PermissionTier {
+        PermissionTier::Auto
+    }
+
+    async fn execute(&self, _args: Value, _ctx: &ToolContext) -> Result<ToolResult, ToolError> {
+        Ok(ToolResult::error(
+            "search_tools was dispatched through the generic tool path, which should be \
+             unreachable -- this is an internal bug, not a user-facing failure"
+                .to_string(),
+        ))
+    }
+}
+
 /// Decides how every `PermissionTier::Confirm` call from one model
 /// turn actually resolves -- `Auto`/`Deny` need no decision (the tier
 /// itself is the answer); only `Confirm` calls ever reach this. Kept as
@@ -221,19 +535,116 @@ pub trait PermissionDecider: Send + Sync {
 /// immutable lookup -- ownership/lifecycle of the underlying `Tool`
 /// implementations (Group 5's 4 native tools) belongs to whatever
 /// constructs the registry per turn, not to this type.
+///
+/// `eager` tools' full definitions are sent to the provider every
+/// iteration, same as this type has always worked. `lazy` tools
+/// (`tool-list-optimization`'s own "lazy loading" option, mirroring
+/// how Claude Code itself avoids sending every MCP tool's full schema
+/// every turn) are, by default, named only -- via [`SearchToolsTool`]'s
+/// own dynamically-generated description -- not sent in full until the
+/// model actually searches for one (`SEARCH_TOOLS_NAME`'s own
+/// dispatch, inside `run()`). Once unlocked, a lazy tool behaves
+/// exactly like an eager one for the rest of that `run()` call;
+/// nothing persists it past that one call, so the next message's own
+/// `run()` starts the search over -- a deliberate v1 simplification
+/// (per-turn, not per-conversation), not an oversight.
 pub struct ToolRegistry {
-    tools: Vec<Arc<dyn Tool>>,
+    eager: Vec<Arc<dyn Tool>>,
+    lazy: Vec<Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
-    pub fn new(tools: Vec<Arc<dyn Tool>>) -> Self { Self { tools } }
+    /// Every tool here is eager -- the registry behaves exactly as it
+    /// always has for a caller that never uses `with_lazy`.
+    pub fn new(tools: Vec<Arc<dyn Tool>>) -> Self { Self { eager: tools, lazy: Vec::new() } }
 
-    pub fn definitions(&self) -> Vec<ToolDefinition> {
-        self.tools.iter().map(|tool| tool.definition()).collect()
+    /// `lazy` tools are only named (not fully defined) until the model
+    /// searches for one -- see this type's own doc comment.
+    pub fn with_lazy(eager: Vec<Arc<dyn Tool>>, lazy: Vec<Arc<dyn Tool>>) -> Self {
+        Self { eager, lazy }
     }
 
+    /// Every eager tool's definition, unconditionally -- what
+    /// `run()`'s very first iteration (`unlocked` always starts empty)
+    /// and every caller that never uses `with_lazy` both see.
+    pub fn definitions(&self) -> Vec<ToolDefinition> { self.definitions_for(&HashSet::new()) }
+
+    /// Every eager tool's definition, plus any lazy tool's definition
+    /// whose name is already in `unlocked` -- what `run()` actually
+    /// sends the provider for one iteration once some lazy tools have
+    /// been searched for.
+    fn definitions_for(&self, unlocked: &HashSet<String>) -> Vec<ToolDefinition> {
+        let mut definitions: Vec<ToolDefinition> =
+            self.eager.iter().map(|tool| tool.definition()).collect();
+        // A locked lazy tool still rides along as a stub (name, short
+        // description, permissive schema) rather than being omitted:
+        // once a model has seen a tool's name it may call it directly,
+        // and Ollama silently drops a call to any tool absent from the
+        // request, which surfaced as an empty reply with no error.
+        for tool in &self.lazy {
+            let definition = tool.definition();
+            if unlocked.contains(&definition.name) {
+                definitions.push(definition);
+            } else {
+                definitions.push(ToolDefinition {
+                    name: definition.name,
+                    description: truncate_for_stub(&definition.description),
+                    parameters: json!({"type": "object", "additionalProperties": true}),
+                });
+            }
+        }
+        definitions
+    }
+
+    /// Every lazy tool's own name and description -- what
+    /// `SearchToolsTool`'s own dynamically-generated description lists
+    /// (the "these exist, here's roughly what they do" signal the
+    /// model needs before it has any reason to search for one by
+    /// name), and what `lazy_tools_matching` searches over.
+    pub fn lazy_summaries(&self) -> Vec<(String, String)> {
+        self.lazy
+            .iter()
+            .map(|tool| (tool.definition().name, tool.definition().description))
+            .collect()
+    }
+
+    /// Every lazy tool whose name or description contains `query`
+    /// (case-insensitive substring match -- deliberately simple; v1
+    /// has no need for anything fancier, and a query matching nothing
+    /// is reported back to the model as such, not treated as an error).
+    fn lazy_tools_matching(&self, query: &str) -> Vec<Arc<dyn Tool>> {
+        let query = query.to_lowercase();
+        self.lazy
+            .iter()
+            .filter(|tool| {
+                let def = tool.definition();
+                def.name.to_lowercase().contains(&query)
+                    || def.description.to_lowercase().contains(&query)
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// Whether `name` is a *lazy* tool in this registry specifically
+    /// (as opposed to an eager one, or simply absent) -- `run()`'s own
+    /// classification uses this to reject a call to a lazy tool that
+    /// hasn't been unlocked yet, the same way Claude Code's own
+    /// deferred tools fail a direct call before being searched for.
+    fn is_lazy(&self, name: &str) -> bool {
+        self.lazy.iter().any(|tool| tool.definition().name == name)
+    }
+
+    /// How many eager and lazy tools this registry holds, respectively
+    /// -- diagnostic-only (e.g. logging how large a turn's own tool
+    /// list is), not used by `run()`'s own dispatch.
+    pub fn tool_counts(&self) -> (usize, usize) { (self.eager.len(), self.lazy.len()) }
+
     pub fn find(&self, name: &str) -> Option<Arc<dyn Tool>> {
-        self.tools.iter().find(|tool| tool.definition().name == name).cloned()
+        self.eager
+            .iter()
+            .chain(self.lazy.iter())
+            .find(|tool| tool.definition().name == name)
+            .cloned()
     }
 
     /// A copy of this registry excluding the named tool -- used to
@@ -241,15 +652,18 @@ impl ToolRegistry {
     /// (`sub-agent-delegation`'s depth-1 cap: a delegated sub-task's
     /// registry simply omits `DELEGATE_TOOL_NAME`, so recursive
     /// delegation is impossible by construction, not by a
-    /// runtime-checked counter).
+    /// runtime-checked counter). Preserves the eager/lazy split --
+    /// excluding `DELEGATE_TOOL_NAME`/`CONNECT_MCP_SERVER_TOOL_NAME`
+    /// (both always eager) never touches `lazy` at all.
     pub fn without(&self, name: &str) -> Self {
         Self {
-            tools: self
-                .tools
+            eager: self
+                .eager
                 .iter()
                 .filter(|tool| tool.definition().name != name)
                 .cloned()
                 .collect(),
+            lazy: self.lazy.iter().filter(|tool| tool.definition().name != name).cloned().collect(),
         }
     }
 }
@@ -314,6 +728,7 @@ pub struct AgentOutcome {
 /// or any other callback surfaces live.
 #[async_trait::async_trait]
 pub trait AgentRuntime: Send + Sync {
+    #[allow(clippy::too_many_arguments)]
     async fn run(
         &self,
         provider: &dyn ToolCallingProvider,
@@ -321,6 +736,7 @@ pub trait AgentRuntime: Send + Sync {
         registry: &ToolRegistry,
         ctx: &ToolContext,
         permission: &dyn PermissionDecider,
+        mcp_connector: &dyn McpConnector,
         on_text_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> Result<AgentOutcome, AgentError>;
 }
@@ -352,6 +768,7 @@ fn tool_result_content(result: ToolResult) -> String {
 
 #[async_trait::async_trait]
 impl AgentRuntime for AemeathAgentRuntime {
+    #[allow(clippy::too_many_arguments)]
     async fn run(
         &self,
         provider: &dyn ToolCallingProvider,
@@ -359,14 +776,22 @@ impl AgentRuntime for AemeathAgentRuntime {
         registry: &ToolRegistry,
         ctx: &ToolContext,
         permission: &dyn PermissionDecider,
+        mcp_connector: &dyn McpConnector,
         on_text_delta: &mut (dyn for<'a> FnMut(&'a str) + Send),
     ) -> Result<AgentOutcome, AgentError> {
         let mut last_text = String::new();
         let mut trace: Vec<ToolInvocation> = Vec::new();
+        // Which of `registry`'s own lazy tools have been searched for
+        // (`SEARCH_TOOLS_NAME`'s own dispatch, below) during this
+        // `run()` call so far -- starts empty every call, persists
+        // across this call's own iterations, never carried into a
+        // later call (including a delegated child's own recursive
+        // one, which gets its own fresh empty set).
+        let mut unlocked: HashSet<String> = HashSet::new();
 
         for _ in 0..self.max_iterations {
             let mut stream = provider
-                .chat_with_tools(messages.clone(), registry.definitions())
+                .chat_with_tools(messages.clone(), registry.definitions_for(&unlocked))
                 .await
                 .map_err(AgentError::Provider)?;
 
@@ -429,6 +854,29 @@ impl AgentRuntime for AemeathAgentRuntime {
                             None => CallPlan::MalformedArguments,
                         };
                     }
+                    if call.name == CONNECT_MCP_SERVER_TOOL_NAME {
+                        return match parse_mcp_connect_request(&call.arguments) {
+                            Some(request) => CallPlan::ConnectMcp(request),
+                            None => CallPlan::MalformedArguments,
+                        };
+                    }
+                    if call.name == SEARCH_TOOLS_NAME {
+                        return match call.arguments.get("query").and_then(Value::as_str) {
+                            Some(query) => CallPlan::SearchTools(query.to_string()),
+                            None => CallPlan::MalformedArguments,
+                        };
+                    }
+                    // A lazy tool that hasn't been searched for yet
+                    // this turn -- `registry.find()` above already
+                    // succeeded (the tool genuinely exists), but it
+                    // isn't *offered* yet (`definitions_for` above
+                    // never sent its schema this iteration), so a
+                    // direct call to it is rejected the same way
+                    // Claude Code's own deferred tools fail before
+                    // being searched for.
+                    if registry.is_lazy(&call.name) && !unlocked.contains(&call.name) {
+                        return CallPlan::ToolNotYetUnlocked;
+                    }
                     if !call.arguments.is_object() {
                         return CallPlan::MalformedArguments;
                     }
@@ -453,6 +901,42 @@ impl AgentRuntime for AemeathAgentRuntime {
             // writeback pass below, regardless of which finished first.
             let mut auto_results: Vec<Option<(bool, String)>> =
                 calls.iter().map(|_| None).collect();
+
+            // `SearchTools` is resolved synchronously, before the
+            // concurrent pass below -- matching against `registry`'s
+            // own already-in-memory lazy tool definitions needs no
+            // `.await`, and mutating `unlocked` (a plain local
+            // variable, not behind any lock) from inside a future
+            // `buffer_unordered` runs concurrently would need
+            // synchronization this doesn't otherwise need at all.
+            // Writing straight into `auto_results` here, ahead of the
+            // concurrent pass filling in its own entries, is what lets
+            // the writeback pass below treat every one of
+            // `Auto`/`Delegate`/`ConnectMcp`/`SearchTools` uniformly.
+            for (index, plan) in plans.iter().enumerate() {
+                let CallPlan::SearchTools(query) = plan else { continue };
+                let matches = registry.lazy_tools_matching(query);
+                let content = if matches.is_empty() {
+                    format!(
+                        "No not-yet-loaded tools matched \"{query}\". Try a different word, or \
+                         call {SEARCH_TOOLS_NAME} again with a broader query."
+                    )
+                } else {
+                    let mut text = String::new();
+                    for tool in &matches {
+                        let definition = tool.definition();
+                        unlocked.insert(definition.name.clone());
+                        text.push_str(&format!(
+                            "\"{}\" is now available to call directly: {}\nParameters schema: \
+                             {}\n\n",
+                            definition.name, definition.description, definition.parameters
+                        ));
+                    }
+                    text
+                };
+                auto_results[index] = Some((true, content));
+            }
+
             // Built via a plain loop, not `.filter_map(closure)` -- a
             // closure returning `impl Future` here hits rustc's HRTB
             // inference limit (it cannot unify the borrowed-`call`
@@ -491,7 +975,17 @@ impl AgentRuntime for AemeathAgentRuntime {
                         // same `MAX_CONCURRENT_TOOL_CALLS` bound as
                         // every other tool call, not a separate limit.
                         let task = task.clone();
-                        let child_registry = registry.without(DELEGATE_TOOL_NAME);
+                        // Also excludes `CONNECT_MCP_SERVER_TOOL_NAME`,
+                        // for the same reason it excludes itself:
+                        // opening a browser/showing a real confirmation
+                        // popup from inside an invisible, no-history
+                        // delegated sub-task is the same category of
+                        // blast-radius concern `run_command`/`delegate_task`
+                        // are already kept out of a child's own registry
+                        // for.
+                        let child_registry = registry
+                            .without(DELEGATE_TOOL_NAME)
+                            .without(CONNECT_MCP_SERVER_TOOL_NAME);
                         auto_futures.push(Box::pin(async move {
                             let child_messages = vec![
                                 Message::system(crate::prompt::delegated_task_system_prompt()),
@@ -504,6 +998,7 @@ impl AgentRuntime for AemeathAgentRuntime {
                                     &child_registry,
                                     ctx,
                                     permission,
+                                    &NeverConnectMcp,
                                     &mut |_: &str| {},
                                 )
                                 .await;
@@ -513,6 +1008,54 @@ impl AgentRuntime for AemeathAgentRuntime {
                                     (index, false, format!("delegated sub-task failed: {err}"))
                                 }
                             }
+                        }));
+                    }
+                    CallPlan::ConnectMcp(request) => {
+                        // `mcp_connector.connect()` is awaited in place,
+                        // the same way `permission.decide(...)` already
+                        // is for any other `Confirm`-tier call -- its
+                        // own implementation resolves the confirm/
+                        // connect/OAuth-pending split and must never
+                        // itself block on OAuth completion (design.md's
+                        // own Decision); there is no new control-flow
+                        // concept for `run()` to learn here.
+                        let request = request.clone();
+                        auto_futures.push(Box::pin(async move {
+                            let (ok, content) = match mcp_connector.connect(request).await {
+                                McpConnectOutcome::Connected { display_name, tool_count } => (
+                                    true,
+                                    format!(
+                                        "Connected to \"{display_name}\" -- {tool_count} tool(s) \
+                                         will be available starting your next message."
+                                    ),
+                                ),
+                                McpConnectOutcome::AlreadyConnected {
+                                    display_name,
+                                    tool_count,
+                                } => (
+                                    true,
+                                    format!(
+                                        "\"{display_name}\" is already connected, with \
+                                         {tool_count} tool(s) available right now -- call \
+                                         {SEARCH_TOOLS_NAME} to find and use one of them \
+                                         directly; connecting again was not needed and nothing \
+                                         new happened."
+                                    ),
+                                ),
+                                McpConnectOutcome::PendingAuthorization { display_name } => (
+                                    true,
+                                    format!(
+                                        "Started authorizing \"{display_name}\" -- the user needs \
+                                         to finish in their browser; its tools will be available \
+                                         once that's done."
+                                    ),
+                                ),
+                                McpConnectOutcome::Declined => {
+                                    (false, "the user did not approve this connection".to_string())
+                                }
+                                McpConnectOutcome::Failed { reason } => (false, reason),
+                            };
+                            (index, ok, content)
                         }));
                     }
                     _ => {}
@@ -565,16 +1108,53 @@ impl AgentRuntime for AemeathAgentRuntime {
                             outcome: ToolOutcome::DeniedByPolicy,
                         });
                     }
-                    // A delegated sub-task's result folds into this
-                    // turn's own trace as an ordinary `Executed`
-                    // `ToolInvocation` -- no persisted child `Execution`
-                    // record (design.md's Decision 4); the tool-activity
-                    // note `execution-log-and-context` already built
-                    // picks this up for free on the next turn, same as
-                    // any other tool.
-                    CallPlan::Auto(_) | CallPlan::Delegate(_) => {
+                    CallPlan::ToolNotYetUnlocked => {
+                        // The call used a stub's guessed arguments, so it
+                        // was not run. Unlock the tool and hand back its
+                        // real schema so the model can retry correctly.
+                        let schema_note = match registry.find(&call.name) {
+                            Some(tool) => {
+                                let definition = tool.definition();
+                                unlocked.insert(definition.name.clone());
+                                format!(
+                                    "Parameters schema: {}\nDescription: {}",
+                                    definition.parameters, definition.description
+                                )
+                            }
+                            None => String::new(),
+                        };
+                        messages.push(Message::tool_result(
+                            call.id.clone(),
+                            format!(
+                                "\"{}\" was not run: it was only a stub with no real argument \
+                                 schema. It is loaded now -- call it again using this \
+                                 schema.\n{schema_note}",
+                                call.name
+                            ),
+                        ));
+                        trace.push(ToolInvocation {
+                            name: call.name.clone(),
+                            outcome: ToolOutcome::Rejected {
+                                arguments_preview: capped_arguments_preview(&call.arguments),
+                            },
+                        });
+                    }
+                    // A delegated sub-task's result, a
+                    // `connect_mcp_server` outcome, and a `search_tools`
+                    // result all fold into this turn's own trace as an
+                    // ordinary `Executed` `ToolInvocation` -- no
+                    // persisted child `Execution` record (design.md's
+                    // Decision 4); the tool-activity note
+                    // `execution-log-and-context` already built picks
+                    // this up for free on the next turn, same as any
+                    // other tool.
+                    CallPlan::Auto(_)
+                    | CallPlan::Delegate(_)
+                    | CallPlan::ConnectMcp(_)
+                    | CallPlan::SearchTools(_) => {
                         let (ok, content) = auto_results[index].take().expect(
-                            "every Auto-tier/Delegate call has a result by the writeback pass",
+                            "every Auto-tier/Delegate/ConnectMcp/SearchTools call has a result by \
+                             the writeback pass",
                         );
                         messages.push(Message::tool_result(call.id.clone(), content));
                         trace.push(ToolInvocation {
@@ -665,6 +1245,234 @@ mod tests {
     }
 
     #[test]
+    fn connect_mcp_server_definition_has_the_reserved_name_and_a_valid_schema() {
+        let definition = connect_mcp_server_definition();
+        assert_eq!(definition.name, CONNECT_MCP_SERVER_TOOL_NAME);
+        assert_eq!(definition.parameters["type"], "object");
+        assert_eq!(definition.parameters["required"], json!(["transport"]));
+        assert_eq!(
+            definition.parameters["properties"]["transport"]["enum"],
+            json!(["stdio", "http"])
+        );
+    }
+
+    #[test]
+    fn connect_mcp_server_tool_matches_the_reserved_definition() {
+        let tool = ConnectMcpServerTool;
+        assert_eq!(tool.definition().name, CONNECT_MCP_SERVER_TOOL_NAME);
+    }
+
+    #[test]
+    fn parse_mcp_connect_request_handles_both_transports() {
+        assert_eq!(
+            parse_mcp_connect_request(
+                &json!({"transport": "stdio", "command": "npx", "args": ["-y", "pkg"]})
+            ),
+            Some(McpConnectRequest::Stdio {
+                command: "npx".to_string(),
+                args: vec!["-y".to_string(), "pkg".to_string()],
+                credential_env_var: None,
+                credential_value: None,
+            })
+        );
+        assert_eq!(
+            parse_mcp_connect_request(&json!({"transport": "stdio", "command": "cat"})),
+            Some(McpConnectRequest::Stdio {
+                command: "cat".to_string(),
+                args: vec![],
+                credential_env_var: None,
+                credential_value: None,
+            }),
+            "args is optional, defaulting to empty"
+        );
+        assert_eq!(
+            parse_mcp_connect_request(
+                &json!({"transport": "http", "url": "https://example.com/sse"})
+            ),
+            Some(McpConnectRequest::Http { url: "https://example.com/sse".to_string() })
+        );
+    }
+
+    #[test]
+    fn parse_mcp_connect_request_picks_up_a_stdio_credential() {
+        let request = parse_mcp_connect_request(&json!({
+            "transport": "stdio",
+            "command": "github-mcp-server",
+            "credential_env_var": "GITHUB_TOKEN",
+            "credential_value": "ghp_secret",
+        }));
+        assert_eq!(
+            request,
+            Some(McpConnectRequest::Stdio {
+                command: "github-mcp-server".to_string(),
+                args: vec![],
+                credential_env_var: Some("GITHUB_TOKEN".to_string()),
+                credential_value: Some("ghp_secret".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn parse_mcp_connect_request_rejects_malformed_or_unknown_transports() {
+        assert_eq!(
+            parse_mcp_connect_request(&json!({"transport": "stdio"})),
+            None,
+            "missing command"
+        );
+        assert_eq!(parse_mcp_connect_request(&json!({"transport": "http"})), None, "missing url");
+        assert_eq!(parse_mcp_connect_request(&json!({"transport": "carrier_pigeon"})), None);
+        assert_eq!(parse_mcp_connect_request(&json!({})), None);
+    }
+
+    #[tokio::test]
+    async fn connect_mcp_server_dispatch_is_reached_with_the_parsed_request() {
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: CONNECT_MCP_SERVER_TOOL_NAME.to_string(),
+                arguments: json!({"transport": "stdio", "command": "npx", "args": ["-y", "server-fs"]}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let registry = ToolRegistry::new(vec![Arc::new(ConnectMcpServerTool)]);
+        let connector = RecordingMcpConnector {
+            requests: Mutex::new(Vec::new()),
+            outcome: McpConnectOutcome::Connected {
+                display_name: "Local FS".to_string(),
+                tool_count: 3,
+            },
+        };
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &connector,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            result.trace,
+            vec![ToolInvocation {
+                name: CONNECT_MCP_SERVER_TOOL_NAME.to_string(),
+                outcome: ToolOutcome::Executed { ok: true }
+            }]
+        );
+        let requests = connector.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1, "dispatch must reach the connector exactly once");
+        assert_eq!(
+            requests[0],
+            McpConnectRequest::Stdio {
+                command: "npx".to_string(),
+                args: vec!["-y".to_string(), "server-fs".to_string()],
+                credential_env_var: None,
+                credential_value: None,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn an_already_connected_outcome_tells_the_model_to_use_search_tools_instead() {
+        // Grounded in the same real report: a model reaching for
+        // `connect_mcp_server` for something already connected should
+        // get a corrective message pointing at `search_tools`, not a
+        // silent reconnect attempt and not a dead end.
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: CONNECT_MCP_SERVER_TOOL_NAME.to_string(),
+                arguments: json!({"transport": "http", "url": "https://mcp.notion.com/mcp"}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let registry = ToolRegistry::new(vec![Arc::new(ConnectMcpServerTool)]);
+        let connector = RecordingMcpConnector {
+            requests: Mutex::new(Vec::new()),
+            outcome: McpConnectOutcome::AlreadyConnected {
+                display_name: "Notion".to_string(),
+                tool_count: 5,
+            },
+        };
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &connector,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.trace,
+            vec![ToolInvocation {
+                name: CONNECT_MCP_SERVER_TOOL_NAME.to_string(),
+                outcome: ToolOutcome::Executed { ok: true }
+            }]
+        );
+        let received = provider.received.lock().unwrap();
+        let tool_result = received[1]
+            .iter()
+            .find(|m| m.role == crate::message::Role::Tool)
+            .expect("the connect call's own tool result");
+        assert!(tool_result.content.contains("already connected"));
+        assert!(
+            tool_result.content.contains(SEARCH_TOOLS_NAME),
+            "the corrective message must point at search_tools by name: {}",
+            tool_result.content
+        );
+    }
+
+    #[tokio::test]
+    async fn a_malformed_connect_request_never_reaches_the_connector() {
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: CONNECT_MCP_SERVER_TOOL_NAME.to_string(),
+                arguments: json!({"transport": "stdio"}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let registry = ToolRegistry::new(vec![Arc::new(ConnectMcpServerTool)]);
+        let connector = RecordingMcpConnector {
+            requests: Mutex::new(Vec::new()),
+            outcome: McpConnectOutcome::Declined,
+        };
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &connector,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            result.trace.as_slice(),
+            [ToolInvocation { outcome: ToolOutcome::Rejected { .. }, .. }]
+        ));
+        assert!(
+            connector.requests.lock().unwrap().is_empty(),
+            "a malformed request must never reach the connector"
+        );
+    }
+
+    #[test]
     fn registry_without_excludes_only_the_named_tool() {
         let alpha = Arc::new(CountingTool::new("alpha", PermissionTier::Auto));
         let registry =
@@ -677,6 +1485,436 @@ mod tests {
         assert_eq!(names, vec!["alpha".to_string()]);
         assert!(without_delegate.find(DELEGATE_TOOL_NAME).is_none());
         assert!(without_delegate.find("alpha").is_some(), "every other tool is kept unchanged");
+    }
+
+    // -- tool-list-optimization: ToolRegistry's own eager/lazy split --
+
+    #[test]
+    fn with_lazy_offers_a_stub_for_a_locked_tool_until_it_is_unlocked() {
+        let eager = Arc::new(CountingTool::new("eager", PermissionTier::Auto));
+        let lazy = Arc::new(CountingTool::new("lazy", PermissionTier::Auto));
+        let registry = ToolRegistry::with_lazy(vec![eager], vec![lazy]);
+
+        let fresh = registry.definitions();
+        let names: Vec<&str> = fresh.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, vec!["eager", "lazy"], "a locked lazy tool is offered as a stub");
+        let stub = fresh.iter().find(|d| d.name == "lazy").unwrap();
+        assert_eq!(
+            stub.parameters,
+            json!({"type": "object", "additionalProperties": true}),
+            "a stub must not carry the real schema"
+        );
+
+        let mut unlocked = HashSet::new();
+        unlocked.insert("lazy".to_string());
+        let mut names: Vec<String> =
+            registry.definitions_for(&unlocked).into_iter().map(|d| d.name).collect();
+        names.sort();
+        assert_eq!(names, vec!["eager".to_string(), "lazy".to_string()]);
+    }
+
+    #[test]
+    fn find_and_is_lazy_see_both_eager_and_lazy_tools() {
+        let eager = Arc::new(CountingTool::new("eager", PermissionTier::Auto));
+        let lazy = Arc::new(CountingTool::new("lazy", PermissionTier::Auto));
+        let registry = ToolRegistry::with_lazy(vec![eager], vec![lazy]);
+
+        assert!(registry.find("eager").is_some());
+        assert!(
+            registry.find("lazy").is_some(),
+            "find() must still see a not-yet-unlocked lazy tool"
+        );
+        assert!(!registry.is_lazy("eager"));
+        assert!(registry.is_lazy("lazy"));
+        assert!(!registry.is_lazy("never_heard_of_it"));
+    }
+
+    #[test]
+    fn without_preserves_the_eager_lazy_split() {
+        let eager_keep = Arc::new(CountingTool::new("eager_keep", PermissionTier::Auto));
+        let eager_drop = Arc::new(CountingTool::new("eager_drop", PermissionTier::Auto));
+        let lazy_keep = Arc::new(CountingTool::new("lazy_keep", PermissionTier::Auto));
+        let lazy_drop = Arc::new(CountingTool::new("lazy_drop", PermissionTier::Auto));
+        let registry =
+            ToolRegistry::with_lazy(vec![eager_keep, eager_drop], vec![lazy_keep, lazy_drop]);
+
+        let filtered = registry.without("eager_drop").without("lazy_drop");
+
+        assert!(filtered.find("eager_keep").is_some());
+        assert!(filtered.find("lazy_keep").is_some());
+        assert!(filtered.is_lazy("lazy_keep"), "lazy_keep must still be classified as lazy");
+        assert!(filtered.find("eager_drop").is_none());
+        assert!(filtered.find("lazy_drop").is_none());
+    }
+
+    #[test]
+    fn lazy_tools_matching_is_a_case_insensitive_substring_match_over_name_or_description() {
+        let searchable = Arc::new(CountingTool::new("search_graph", PermissionTier::Auto));
+        let other = Arc::new(CountingTool::new("get_system_context", PermissionTier::Auto));
+        let registry = ToolRegistry::with_lazy(vec![], vec![searchable, other]);
+
+        let names: Vec<String> =
+            registry.lazy_tools_matching("GRAPH").iter().map(|t| t.definition().name).collect();
+        assert_eq!(names, vec!["search_graph".to_string()]);
+
+        assert!(registry.lazy_tools_matching("no such thing").is_empty());
+    }
+
+    #[test]
+    fn lazy_summaries_lists_every_lazy_tools_name_and_description() {
+        let lazy = Arc::new(CountingTool::new("lazy", PermissionTier::Auto));
+        let registry = ToolRegistry::with_lazy(vec![], vec![lazy]);
+        assert_eq!(registry.lazy_summaries(), vec![("lazy".to_string(), String::new())]);
+    }
+
+    #[test]
+    fn search_tools_definition_states_the_count_without_listing_names() {
+        // Listing every lazy tool's name made qwen3:14b stop emitting
+        // a parseable search_tools call once the list grew past a few
+        // entries, so the names must stay out of this description.
+        let definition = search_tools_definition(&[
+            ("search_graph".to_string(), "Finds symbols".to_string()),
+            ("trace_path".to_string(), "Traces callers".to_string()),
+        ]);
+        assert_eq!(definition.name, SEARCH_TOOLS_NAME);
+        assert!(definition.description.contains("2 tool(s)"));
+        assert!(!definition.description.contains("search_graph"));
+        assert!(!definition.description.contains("trace_path"));
+        assert_eq!(definition.parameters["required"], json!(["query"]));
+    }
+
+    // -- tool-list-optimization: run()'s own lazy-loading dispatch --
+
+    #[tokio::test]
+    async fn a_lazy_tools_full_schema_is_not_sent_until_it_is_searched_for() {
+        // The tool's *name* is offered from the start (as a stub), so a
+        // direct call is valid; only the real schema is withheld.
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: SEARCH_TOOLS_NAME.to_string(),
+                arguments: json!({"query": "lazy"}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let lazy = Arc::new(CountingTool::new("lazy", PermissionTier::Auto));
+        let search_tool = Arc::new(SearchToolsTool::new(vec![("lazy".to_string(), String::new())]));
+        let registry = ToolRegistry::with_lazy(vec![search_tool], vec![lazy.clone()]);
+
+        AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &NeverConnectMcp,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        let received_tools = provider.received_tools.lock().unwrap();
+        let first_iteration_names: Vec<&str> =
+            received_tools[0].iter().map(|d| d.name.as_str()).collect();
+        assert!(first_iteration_names.contains(&"lazy"), "the stub keeps a direct call valid");
+        let stub = received_tools[0].iter().find(|d| d.name == "lazy").unwrap();
+        assert_eq!(stub.parameters, json!({"type": "object", "additionalProperties": true}));
+        assert!(first_iteration_names.contains(&SEARCH_TOOLS_NAME));
+    }
+
+    #[tokio::test]
+    async fn calling_a_lazy_tool_before_searching_for_it_is_rejected() {
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: "lazy".to_string(),
+                arguments: json!({}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let lazy = Arc::new(CountingTool::new("lazy", PermissionTier::Auto));
+        let registry = ToolRegistry::with_lazy(vec![], vec![lazy.clone()]);
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &NeverConnectMcp,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert!(matches!(
+            result.trace.as_slice(),
+            [ToolInvocation { name, outcome: ToolOutcome::Rejected { .. } }] if name == "lazy"
+        ));
+        assert_eq!(
+            *lazy.calls.lock().unwrap(),
+            0,
+            "a not-yet-unlocked lazy tool must never execute"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_direct_call_to_a_stub_unlocks_its_real_schema_for_the_retry() {
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: "lazy".to_string(),
+                arguments: json!({"guessed": "wrong"}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let lazy = Arc::new(CountingTool::new("lazy", PermissionTier::Auto));
+        let registry = ToolRegistry::with_lazy(vec![], vec![lazy]);
+
+        AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &NeverConnectMcp,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        let received_tools = provider.received_tools.lock().unwrap();
+        let first = received_tools[0].iter().find(|d| d.name == "lazy").unwrap();
+        let second = received_tools[1].iter().find(|d| d.name == "lazy").unwrap();
+        assert_eq!(first.parameters, json!({"type": "object", "additionalProperties": true}));
+        assert_ne!(second.parameters, first.parameters, "the real schema is offered on the retry");
+    }
+
+    #[tokio::test]
+    async fn searching_then_calling_a_lazy_tool_in_the_same_turn_works() {
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: SEARCH_TOOLS_NAME.to_string(),
+                arguments: json!({"query": "lazy"}),
+            }],
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_1".to_string(),
+                name: "lazy".to_string(),
+                arguments: json!({}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let lazy = Arc::new(CountingTool::new("lazy", PermissionTier::Auto));
+        let search_tool = Arc::new(SearchToolsTool::new(vec![("lazy".to_string(), String::new())]));
+        let registry = ToolRegistry::with_lazy(vec![search_tool], vec![lazy.clone()]);
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &NeverConnectMcp,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.text, "done");
+        assert_eq!(
+            *lazy.calls.lock().unwrap(),
+            1,
+            "once unlocked, the lazy tool must actually execute"
+        );
+        assert_eq!(
+            result.trace,
+            vec![
+                ToolInvocation {
+                    name: SEARCH_TOOLS_NAME.to_string(),
+                    outcome: ToolOutcome::Executed { ok: true }
+                },
+                ToolInvocation {
+                    name: "lazy".to_string(),
+                    outcome: ToolOutcome::Executed { ok: true }
+                },
+            ]
+        );
+
+        // The second iteration's own tool list must now include the
+        // unlocked tool's full definition.
+        let received_tools = provider.received_tools.lock().unwrap();
+        let second_iteration_names: Vec<&str> =
+            received_tools[1].iter().map(|d| d.name.as_str()).collect();
+        assert!(second_iteration_names.contains(&"lazy"));
+    }
+
+    #[tokio::test]
+    async fn a_notion_shaped_fetch_tool_is_discoverable_by_a_query_matching_either_name_or_description(
+    ) {
+        // Grounded in a real user report: connecting Notion's own
+        // hosted MCP server and asking to fetch a page's content, the
+        // model never searched for (and so never called) Notion's own
+        // fetch tool. This proves the *mechanism* -- a reasonably-
+        // chosen query matches the real tool by name alone, even if
+        // its description were empty (`McpTool::definition()`'s own
+        // `unwrap_or_default()` for a server that omits one) -- is not
+        // where the problem is; it can't prove why the model chose not
+        // to search in the first place, which is live model behavior,
+        // not something this test controls.
+        let notion_fetch = Arc::new(CountingTool::new("notion-fetch", PermissionTier::Auto));
+        let notion_search = Arc::new(CountingTool::new("notion-search", PermissionTier::Auto));
+        let search_tool = Arc::new(SearchToolsTool::new(vec![
+            ("notion-fetch".to_string(), String::new()), // empty description, worst case
+            ("notion-search".to_string(), "Searches across pages by query".to_string()),
+        ]));
+        let registry =
+            ToolRegistry::with_lazy(vec![search_tool], vec![notion_fetch.clone(), notion_search]);
+
+        for query in ["notion", "fetch", "NOTION"] {
+            let matches = registry.lazy_tools_matching(query);
+            assert!(
+                matches.iter().any(|tool| tool.definition().name == "notion-fetch"),
+                "query {query:?} should have found notion-fetch among {:?}",
+                matches.iter().map(|t| t.definition().name).collect::<Vec<_>>()
+            );
+        }
+
+        // End-to-end: a model that *does* search for "notion" can then
+        // call notion-fetch directly, same turn.
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: SEARCH_TOOLS_NAME.to_string(),
+                arguments: json!({"query": "notion"}),
+            }],
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_1".to_string(),
+                name: "notion-fetch".to_string(),
+                arguments: json!({"url": "https://app.notion.com/..."}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+
+        AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("print this notion page's content")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &NeverConnectMcp,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            *notion_fetch.calls.lock().unwrap(),
+            1,
+            "notion-fetch must actually execute once unlocked"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_search_with_no_matches_reports_so_without_unlocking_anything() {
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: SEARCH_TOOLS_NAME.to_string(),
+                arguments: json!({"query": "no such thing"}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let lazy = Arc::new(CountingTool::new("lazy", PermissionTier::Auto));
+        let search_tool = Arc::new(SearchToolsTool::new(vec![("lazy".to_string(), String::new())]));
+        let registry = ToolRegistry::with_lazy(vec![search_tool], vec![lazy]);
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &NeverConnectMcp,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            result.trace,
+            vec![ToolInvocation {
+                name: SEARCH_TOOLS_NAME.to_string(),
+                outcome: ToolOutcome::Executed { ok: true }
+            }]
+        );
+        let received = provider.received.lock().unwrap();
+        let tool_result = received[1]
+            .iter()
+            .find(|m| m.role == crate::message::Role::Tool)
+            .expect("the search call's own tool result");
+        assert!(tool_result.content.contains("No not-yet-loaded tools matched"));
+    }
+
+    #[tokio::test]
+    async fn a_delegated_sub_task_starts_with_its_own_fresh_unlocked_set() {
+        // The child's own run() call gets a brand-new `unlocked`, never
+        // inherited from the parent -- proven indirectly: the child
+        // hallucinating a direct call to a lazy tool it never searched
+        // for (even though the *parent* already unlocked that same
+        // tool name earlier in the test) must still be rejected.
+        let provider = ScriptedProvider::new(vec![
+            // Parent searches and unlocks "lazy" for itself.
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: SEARCH_TOOLS_NAME.to_string(),
+                arguments: json!({"query": "lazy"}),
+            }],
+            // Parent delegates.
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_1".to_string(),
+                name: DELEGATE_TOOL_NAME.to_string(),
+                arguments: json!({"task": "try the lazy tool directly"}),
+            }],
+            // Child tries the lazy tool directly, without searching.
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_2".to_string(),
+                name: "lazy".to_string(),
+                arguments: json!({}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("child done".to_string())],
+            vec![ToolCallStreamItem::TextDelta("parent done".to_string())],
+        ]);
+        let lazy = Arc::new(CountingTool::new("lazy", PermissionTier::Auto));
+        let search_tool = Arc::new(SearchToolsTool::new(vec![("lazy".to_string(), String::new())]));
+        let registry =
+            ToolRegistry::with_lazy(vec![search_tool, Arc::new(DelegateTool)], vec![lazy.clone()]);
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &NeverConnectMcp,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.text, "parent done");
+        assert_eq!(
+            *lazy.calls.lock().unwrap(),
+            0,
+            "the child must never reach the lazy tool's own execute()"
+        );
     }
 
     // -- execution-log-and-context: ToolOutcome/ToolInvocation/AgentOutcome --
@@ -773,6 +2011,22 @@ mod tests {
         async fn decide(&self, _calls: &[PendingToolCall]) -> HashSet<String> { HashSet::new() }
     }
 
+    /// Records every request it's asked to connect, and returns the
+    /// same canned `outcome` each time -- a scripted `McpConnector`
+    /// double, same purpose as `ScriptedProvider`.
+    struct RecordingMcpConnector {
+        requests: Mutex<Vec<McpConnectRequest>>,
+        outcome: McpConnectOutcome,
+    }
+
+    #[async_trait::async_trait]
+    impl McpConnector for RecordingMcpConnector {
+        async fn connect(&self, request: McpConnectRequest) -> McpConnectOutcome {
+            self.requests.lock().unwrap().push(request);
+            self.outcome.clone()
+        }
+    }
+
     /// A tool that records how many times it actually ran, so tests can
     /// assert a denied/unpermitted call never reached `execute`.
     struct CountingTool {
@@ -819,11 +2073,20 @@ mod tests {
         /// The message list handed to each `chat_with_tools` call, in
         /// order -- what the model actually receives on each round trip.
         received: Mutex<Vec<Vec<Message>>>,
+        /// The tool *definitions* offered on each call, in order --
+        /// what the model could actually see/call that iteration; used
+        /// by the lazy-loading tests to confirm a lazy tool's full
+        /// schema isn't sent until it's been searched for.
+        received_tools: Mutex<Vec<Vec<ToolDefinition>>>,
     }
 
     impl ScriptedProvider {
         fn new(responses: Vec<Vec<ToolCallStreamItem>>) -> Self {
-            Self { responses: Mutex::new(responses.into()), received: Mutex::new(Vec::new()) }
+            Self {
+                responses: Mutex::new(responses.into()),
+                received: Mutex::new(Vec::new()),
+                received_tools: Mutex::new(Vec::new()),
+            }
         }
 
         /// Never runs out -- every call gets the same tool-call
@@ -834,7 +2097,11 @@ mod tests {
             for _ in 0..100 {
                 queue.push_back(response.clone());
             }
-            Self { responses: Mutex::new(queue), received: Mutex::new(Vec::new()) }
+            Self {
+                responses: Mutex::new(queue),
+                received: Mutex::new(Vec::new()),
+                received_tools: Mutex::new(Vec::new()),
+            }
         }
     }
 
@@ -854,9 +2121,10 @@ mod tests {
         async fn chat_with_tools(
             &self,
             messages: Vec<Message>,
-            _tools: Vec<ToolDefinition>,
+            tools: Vec<ToolDefinition>,
         ) -> Result<ToolCallStream, ProviderError> {
             self.received.lock().unwrap().push(messages);
+            self.received_tools.lock().unwrap().push(tools);
             let response = self
                 .responses
                 .lock()
@@ -898,6 +2166,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -954,6 +2223,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysDeny,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1024,6 +2294,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysDeny,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1138,6 +2409,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1209,6 +2481,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1260,6 +2533,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &PanicsIfAskedToDecide,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1291,6 +2565,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1348,6 +2623,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1379,6 +2655,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_delegated_sub_task_cannot_call_connect_mcp_server() {
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: DELEGATE_TOOL_NAME.to_string(),
+                arguments: json!({"task": "try to connect"}),
+            }],
+            // Child hallucinates connect_mcp_server anyway -- its own
+            // registry (built via `.without(CONNECT_MCP_SERVER_TOOL_NAME)`
+            // too) does not have it.
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_1".to_string(),
+                name: CONNECT_MCP_SERVER_TOOL_NAME.to_string(),
+                arguments: json!({"transport": "http", "url": "https://example.com"}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("child done despite trying to connect".to_string())],
+            vec![ToolCallStreamItem::TextDelta("parent done".to_string())],
+        ]);
+        let registry =
+            ToolRegistry::new(vec![Arc::new(DelegateTool), Arc::new(ConnectMcpServerTool)]);
+        let connector = RecordingMcpConnector {
+            requests: Mutex::new(Vec::new()),
+            outcome: McpConnectOutcome::Declined,
+        };
+
+        let result = AemeathAgentRuntime::default()
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &connector,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(result.text, "parent done");
+        assert!(
+            connector.requests.lock().unwrap().is_empty(),
+            "the outer (real) connector must never be reached by a delegated child"
+        );
+
+        let received = provider.received.lock().unwrap();
+        let childs_second_turn = &received[2];
+        let rejection = childs_second_turn
+            .iter()
+            .find(|m| m.role == crate::message::Role::Tool)
+            .expect("the child's own connect attempt got a tool result");
+        assert!(
+            rejection.content.contains("unknown tool"),
+            "rejected the same way a call to any other unknown tool is: {}",
+            rejection.content
+        );
+    }
+
+    #[tokio::test]
     async fn a_delegated_sub_tasks_narration_never_reaches_the_parents_callback() {
         let provider = ScriptedProvider::new(vec![
             vec![ToolCallStreamItem::ToolCall {
@@ -1402,6 +2736,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |delta: &str| streamed_in_callback.lock().unwrap().push_str(delta),
             )
             .await
@@ -1460,6 +2795,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1496,6 +2832,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             ),
         )
@@ -1527,6 +2864,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1564,6 +2902,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysDeny,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1585,6 +2924,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1616,6 +2956,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |_: &str| {},
             )
             .await
@@ -1656,6 +2997,7 @@ mod tests {
                 &registry,
                 &ctx(),
                 &AlwaysApprove,
+                &NeverConnectMcp,
                 &mut |delta: &str| streamed_in_callback.lock().unwrap().push_str(delta),
             )
             .await

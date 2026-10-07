@@ -18,13 +18,13 @@ use std::{
 use fleet_snowfluff_ai::{
     detect_escalation, log::LogRole, with_task_router_rules, AemeathAgentRuntime,
     AemeathContextManager, AgentRuntime, AiProvider, AiSettings, AuthMethod, ChatStream,
-    ClaudeCodeToolAccess, CliContext, ContextManager, DefaultTaskRouter, DelegateTool,
-    EscalationDecision, ExecutionPath, GetSystemContextTool, Language, ListDirectoryTool, LogEntry,
-    Message, PendingToolCall, PermissionDecider, PermissionTier, Persona, ProfileKey,
-    ProviderCredentials, ProviderKind, ProviderProfile, ReadFileTool, ResponseLanguage,
-    RoutingContext, RunCommandTool, Task, TaskRouter, TaskRouterMode, Tool, ToolCallRecord,
-    ToolCallStream, ToolCallStreamItem, ToolCallingProvider, ToolContext, ToolInvocation,
-    ToolOutcome, ToolRegistry, ToolResult, WebSearchTool,
+    ClaudeCodeToolAccess, CliContext, ConnectMcpServerTool, ContextManager, DefaultTaskRouter,
+    DelegateTool, EscalationDecision, ExecutionPath, GetSystemContextTool, Language,
+    ListDirectoryTool, LogEntry, Message, NeverConnectMcp, PendingToolCall, PermissionDecider,
+    PermissionTier, Persona, ProfileKey, ProviderCredentials, ProviderKind, ProviderProfile,
+    ReadFileTool, ResponseLanguage, RoutingContext, RunCommandTool, Task, TaskRouter,
+    TaskRouterMode, Tool, ToolCallRecord, ToolCallStream, ToolCallStreamItem, ToolCallingProvider,
+    ToolContext, ToolInvocation, ToolOutcome, ToolRegistry, ToolResult, WebSearchTool,
 };
 use futures_util::StreamExt;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
@@ -550,13 +550,6 @@ pub async fn send_chat_message(
     let history_entries = chat_log_store::read_session(&session_path);
     let context = fleet_snowfluff_ai::log::entries_to_context(&history_entries);
 
-    // Appended immediately -- part of history regardless of what
-    // happens to the reply.
-    chat_log_store::append_entry(
-        &session_path,
-        &LogEntry { role: LogRole::User, content: message.clone(), timestamp: now_rfc3339() },
-    );
-
     let persona = persona_store::load(&app).persona;
     let detected_language = map_ui_language(manager.lock().unwrap().ui_language());
     let language = resolve_language(&persona, detected_language);
@@ -565,9 +558,18 @@ pub async fn send_chat_message(
     // directly to it (Ollama not enabled), or because it's serving as
     // the fallback for a mix-mode local attempt that escalates or fails
     // below. Never has `task-router-rules.md` appended -- only the
-    // local attempt's own message list does.
+    // local attempt's own message list does. Built before the user
+    // entry is appended below, since `build_context` reads the log
+    // itself and appends `message` on its own.
     let default_messages =
         context_manager().build_context(&session_path, &persona, language, &message).await;
+
+    // Appended immediately -- part of history regardless of what
+    // happens to the reply.
+    chat_log_store::append_entry(
+        &session_path,
+        &LogEntry { role: LogRole::User, content: message.clone(), timestamp: now_rfc3339() },
+    );
 
     let partial_text = Arc::new(Mutex::new(String::new()));
     let task_app = app.clone();
@@ -912,20 +914,23 @@ async fn stream_to_completion(
 }
 
 /// Every native tool a `ToolCapable` profile is offered, including
-/// `delegate_task` (`sub-agent-delegation`). Factored out of
-/// `run_generation_with_tools` so it's directly testable without an
-/// `AppHandle` -- every one of these is a plain, app-handle-free
+/// `delegate_task` (`sub-agent-delegation`) and `connect_mcp_server`
+/// (`mcp-client-support`). Kept as a plain `Vec`, not a `ToolRegistry`,
+/// so `run_generation_with_tools` can extend it with this turn's
+/// MCP-sourced tools (`mcp_commands::mcp_sourced_tools`) before building
+/// the registry -- every one of these is a plain, app-handle-free
 /// `Arc::new(DefaultStruct)` construction already, so pulling the list
 /// itself out costs nothing.
-fn native_tool_registry() -> ToolRegistry {
-    ToolRegistry::new(vec![
+fn native_tool_list() -> Vec<Arc<dyn Tool>> {
+    vec![
         Arc::new(WebSearchTool::default()),
         Arc::new(ReadFileTool),
         Arc::new(ListDirectoryTool),
         Arc::new(RunCommandTool::default()),
         Arc::new(GetSystemContextTool),
         Arc::new(DelegateTool),
-    ])
+        Arc::new(ConnectMcpServerTool),
+    ]
 }
 
 /// The local-first mix-mode attempt's own, deliberately narrower
@@ -987,13 +992,73 @@ async fn run_generation_with_tools(
     // below, with the loop's own tool trace -- every turn gets an
     // `Execution` record uniformly, CLI session or not.
     let ctx = ToolContext { project_root, conversation_id: conversation_id.clone() };
-    let registry = native_tool_registry();
+    // MCP-sourced tools ride as *lazy* (`tool-list-optimization`): a
+    // server like codebase-memory-mcp alone can expose a dozen-plus
+    // tools, and sending every one's full schema every iteration is
+    // exactly the "tool list too large, model gets slow and forgets
+    // its own persona" failure mode real usage surfaced. Only offered
+    // in full once the model actually searches for one
+    // (`search_tools`, added as an eager tool alongside the native
+    // ones whenever there's at least one MCP tool to search for).
+    let mcp_tools = crate::mcp_commands::mcp_sourced_tools(&app).await;
+    let registry = if mcp_tools.is_empty() {
+        ToolRegistry::new(native_tool_list())
+    } else {
+        let lazy_summaries = mcp_tools
+            .iter()
+            .map(|tool| {
+                let definition = tool.definition();
+                (definition.name, definition.description)
+            })
+            .collect();
+        let mut eager = native_tool_list();
+        // Inserted right before `connect_mcp_server` (always last in
+        // `native_tool_list()`), not appended after it: some models
+        // show a real position bias toward earlier-listed tools, and
+        // real usage showed a model reaching for `connect_mcp_server`
+        // out of habit instead of this one -- putting this one first
+        // is a cheap, low-risk nudge in the right direction, on top of
+        // `connect_mcp_server`'s own description now explicitly
+        // deferring to this tool.
+        let connect_mcp_server_index = eager.len() - 1;
+        eager.insert(
+            connect_mcp_server_index,
+            Arc::new(fleet_snowfluff_ai::SearchToolsTool::new(lazy_summaries)),
+        );
+        ToolRegistry::with_lazy(eager, mcp_tools)
+    };
+    {
+        let (eager_count, lazy_count) = registry.tool_counts();
+        // The exact JSON this iteration's own eager definitions (plus
+        // whichever lazy ones, if any, are already unlocked -- none,
+        // on the very first iteration) serialize to, character-counted
+        // as a rough proxy for tokens (roughly 4 chars/token for
+        // English; MCP tool descriptions are often denser than that).
+        // Logged as real measurement, not another guess, after a real
+        // report of persona/language instructions apparently being
+        // lost -- consistent with this content alone pushing the
+        // request past whatever context window the model is actually
+        // honoring.
+        let first_iteration_chars: usize = registry
+            .definitions()
+            .iter()
+            .map(|d| d.name.len() + d.description.len() + d.parameters.to_string().len())
+            .sum();
+        log::info!(
+            "{execution_id:?} offering {eager_count} eager tool(s), {lazy_count} lazy tool(s) \
+             this turn -- eager tool definitions alone are {first_iteration_chars} chars (~{} \
+             tokens at a rough 4 chars/token) before the system prompt or conversation history \
+             are even counted",
+            first_iteration_chars / 4
+        );
+    }
     let runtime = AemeathAgentRuntime::default();
     let permission = crate::tool_confirmation::PopupPermissionDecider {
         app: app.clone(),
         conversation_id: conversation_id.clone(),
         registry: &registry,
     };
+    let mcp_connector = crate::tool_confirmation::PopupMcpConnector { app: app.clone() };
 
     let result = {
         let mut on_text_delta = |delta: &str| {
@@ -1001,14 +1066,32 @@ async fn run_generation_with_tools(
             channel.send(ChatEvent::Chunk { delta: delta.to_string() }).ok();
         };
         runtime
-            .run(provider.as_ref(), messages, &registry, &ctx, &permission, &mut on_text_delta)
+            .run(
+                provider.as_ref(),
+                messages,
+                &registry,
+                &ctx,
+                &permission,
+                &mcp_connector,
+                &mut on_text_delta,
+            )
             .await
     };
 
     match result {
         Ok(outcome) => {
-            turn.recorder.mark_completed(None, None, outcome.trace);
+            turn.recorder.mark_completed(None, None, outcome.trace.clone());
             let final_text = partial_text.lock().unwrap().clone();
+            if final_text.is_empty() && outcome.trace.is_empty() {
+                // Diagnostic-only: the model produced neither visible
+                // text nor a single tool call -- a genuinely empty
+                // reply, not an error (this turn still completed
+                // `Ok`), so nothing else would otherwise report it.
+                log::warn!(
+                    "{execution_id:?} completed with a genuinely empty reply -- no text, no tool \
+                     calls, for {profile_key:?}"
+                );
+            }
             context_manager().record_execution(&turn.session_path, &final_text).await;
             channel.send(ChatEvent::Done { content: final_text }).ok();
             clear_pending(&app);
@@ -1404,7 +1487,15 @@ async fn run_generation_mix_local(
             channel.send(ChatEvent::Chunk { delta: delta.to_string() }).ok();
         };
         runtime
-            .run(provider.as_ref(), next_messages, &registry, &ctx, &decider, &mut on_text_delta)
+            .run(
+                provider.as_ref(),
+                next_messages,
+                &registry,
+                &ctx,
+                &decider,
+                &NeverConnectMcp,
+                &mut on_text_delta,
+            )
             .await
     };
 
@@ -1903,11 +1994,13 @@ mod tests {
 
     #[test]
     fn native_tool_registry_offers_delegate_task_alongside_the_five_native_tools() {
-        let registry = native_tool_registry();
+        let registry = ToolRegistry::new(native_tool_list());
         let names: Vec<String> = registry.definitions().into_iter().map(|d| d.name).collect();
-        assert_eq!(names.len(), 6);
+        assert_eq!(names.len(), 7, "5 native tools, plus delegate_task and connect_mcp_server");
         assert!(names.contains(&"delegate_task".to_string()));
         assert!(registry.find("delegate_task").is_some());
+        assert!(names.contains(&"connect_mcp_server".to_string()));
+        assert!(registry.find("connect_mcp_server").is_some());
     }
 
     #[test]
@@ -1921,6 +2014,10 @@ mod tests {
         assert!(registry.find("list_directory").is_none());
         assert!(registry.find("run_command").is_none());
         assert!(registry.find("delegate_task").is_none());
+        assert!(
+            registry.find("connect_mcp_server").is_none(),
+            "mix-mode's own local attempt must never offer connect_mcp_server (4.6)"
+        );
     }
 
     #[test]
@@ -1934,6 +2031,10 @@ mod tests {
         assert!(registry.find("get_system_context").is_some());
         assert!(registry.find("run_command").is_none());
         assert!(registry.find("delegate_task").is_none());
+        assert!(
+            registry.find("connect_mcp_server").is_none(),
+            "mix-mode's own local attempt must never offer connect_mcp_server (4.6)"
+        );
     }
 
     /// Builds a `ToolCallStream` yielding exactly `items`, in order --

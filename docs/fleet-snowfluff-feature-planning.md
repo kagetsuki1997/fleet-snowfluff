@@ -1737,11 +1737,11 @@ symlink 會繞過去）
 「彈出視窗升級」機制——shell 執行的風險層級比唯讀的檔案存取高一截，
 不應該讓使用者在確認視窗上隨手就把執行目錄换到範圍外。
 
-#### `get_system_context`：Stage 3 範圍比 §9 的 Context Awareness 小很多
+#### `get_system_context`：Stage 3 範圍比 Context Awareness（backlog，§19）小很多
 
 先查過現有程式碼：`device_query` 已經是既有依賴，但那是給滑鼠追蹤用的
-（跟隨滑鼠功能），不是系統情境感知。§9 那張資料來源表（CPU/記憶體/電量、
-作用中視窗、閒置時間、剪貼簿）**一行都還沒做**——全部是 Stage 6 的工作，
+（跟隨滑鼠功能），不是系統情境感知。§19.1 那張資料來源表（CPU/記憶體/電量、
+作用中視窗、閒置時間、剪貼簿）**一行都還沒做**——全部還沒排進任何 Stage，
 不是 Stage 3 可以直接「整合既有情境感知」的東西（§6.3 原本那句話講得像已經
 有東西可以接，實際上沒有）。
 
@@ -1752,11 +1752,12 @@ Stage 3 的 `get_system_context` 只做不需要任何特殊權限、跨平台�
 - 目前日期時間（`chrono`，既有 workspace 依賴）
 - OS 平台（`std::env::consts::OS`）
 
-**明確排除、留到 Stage 6 才做**：作用中視窗標題、閒置時間、剪貼簿內容——
-這三個都是 §9 自己已經點名有真正落地成本的訊號（Wayland 沒有標準 API 讀
-作用中視窗、macOS 需要輔助使用權限、閒置時間需要另外的平台 API/crate，
-剪貼簿隱私敏感度最高本來就預設要關）。Stage 3 提前做這幾個，等於把 Stage 6
-的工作提前又做得比較隨便，不如就留在原本規劃的階段做好。
+**明確排除、留到 Context Awareness（backlog，§19）排入某個 Stage 時才做**：
+作用中視窗標題、閒置時間、剪貼簿內容——這三個都是 §19.1 自己已經點名有真正
+落地成本的訊號（Wayland 沒有標準 API 讀作用中視窗、macOS 需要輔助使用權限、
+閒置時間需要另外的平台 API/crate，剪貼簿隱私敏感度最高本來就預設要關）。
+Stage 3 提前做這幾個，等於把還沒設計成熟的 backlog 工作提前又做得比較隨便，
+不如等真的排入 Stage 時再做好。
 
 ### 6.4 MCP 的位置
 
@@ -2842,83 +2843,12 @@ MCP server 的 filesystem / network / shell capability 仍需經過 Aemeath perm
 
 ## 9. Context Awareness
 
-> 核心原則：**本地規則引擎決定「要不要講」，AI 只負責「怎麼講」。**
-
-### 5.1 資料來源與抓取方式
-
----
-
-資料來源 建議作法 平台差異 / 注意事項
-
----
-
-作用中視窗標題/程式名稱 `active-win-pos-rs` Windows 用
-等跨平台 crate `GetForegroundWindow`；macOS
-需要輔助使用權限；Linux
-Wayland 目前沒有標準 API
-
-CPU / 記憶體 / 電量 / `sysinfo` 三平台支援
-開機時間
-
-閒置時間 平台 API 或 `user-idle` 平台實作不同
-
-剪貼簿內容 `arboard` 隱私敏感度最高，預設關閉
-
----
-
-### 5.2 規則引擎
-
-1.  所有資料來源彙整成 `ContextSnapshot`
-2.  定期輪詢
-3.  規則決定是否觸發
-4.  每條規則有 cooldown
-5.  再加全域 cooldown
-6.  規則觸發後才呼叫 AI 生成內容
-
-### 5.3 Context 與 Agent 的關係
-
-情境感知不要直接把整個 snapshot 塞給模型。
-
-應該：
-
-```text
-Context Snapshot
-      ↓
-Rule Engine
-      ↓
-Event
-      ↓
-Relevant Context
-      ↓
-Persona + Prompt
-      ↓
-LLM
-```
-
-例如：
-
-```text
-Event:
-user_worked_90_minutes_without_break
-
-Context:
-continuous_work_minutes = 90
-```
-
-而不是：
-
-```json
-{
-  "cpu": 17,
-  "memory": 42,
-  "battery": 78,
-  "active_window": "...",
-  "idle": 0,
-  ...
-}
-```
-
----
+**本節原本的內容已移至 §19 Backlog 的 19.1 小節**——`/opsx:explore stage6`
+討論後決定：這組能力的觸發模型（系統訊號驅動，不需要使用者主動說話）跟
+Stage 6 其餘內容（MCP，訊息驅動）沒有依賴關係，且 Emotion → Animation /
+Proactive interaction 兩項從未真正設計過，兩端也都沒有現成的 state 可以掛。
+移到 backlog 不代表「不會做」，只代表現在不排入任何 Stage；移出理由與完整
+原始內容見 §19.1。
 
 ---
 
@@ -3390,25 +3320,32 @@ design.md）：
   不同 runtime 的能力（child 永遠重用 parent 當下的 profile）——`TaskRouter`
   從來沒有 capability-aware 的邏輯，不只 delegation 沒有
 
-### Stage 6 — MCP + Context Awareness
+### Stage 6 — MCP
 
-（原 Stage 4。此處「Context Awareness」是環境情境感知——CPU / 視窗 / 閒置時間等
-系統訊號（見第 9 節），與下面 Stage 7 提到的 Context Engine〔對話 / 執行的語意
-context lifecycle，見第 10 節〕是兩個不同概念，只是中英文命名相近，不要混淆。
-作用中視窗標題、閒置時間、剪貼簿內容——這三個 Stage 3 的 `get_system_context`
-明確不做，留到這裡才做，見 §6.3 的 `get_system_context` 小節。）
+（原 Stage 4，原名「MCP + Context Awareness」。`/opsx:explore stage6` 討論後把
+Context Awareness 整個移出：觸發模型是「系統訊號驅動」，跟 MCP（訊息驅動、
+Tool Registry 的擴充）完全沒有依賴關係，不必綁在同一個 Stage；Emotion →
+Animation / Proactive interaction 兩項在這份文件裡從未真正設計過，兩端也都沒有
+現成的 state 可以掛。詳細理由與原內容見 §19 Backlog 的 19.1 小節。）
+
+（`mcp-client-support` change 已落地，但只實作了下面四項裡的「消費方向」——
+Aemeath 作為 MCP _client_ 連出去第三方 MCP server，對應探索階段定義的 Reading
+A。原本模糊的「Aemeath MCP bridge」一詞，在探索時發現其實有兩種讀法：Reading
+A（client/proxy，本次做的）和 Reading B（Aemeath 自己當 MCP _server_，把
+`delegate_task` 之類的能力反向暴露給 Claude Code / Codex / OpenClaw）。Reading
+B 在程式碼裡沒有任何現成的呼叫方（`claude_code_cli.rs` 目前的註解只提到「不要把
+Aemeath 自己的工具暴露給 CLI」，從未反向成立），依本專案一貫「不替未出現的
+consumer 先建基礎設施」的原則維持未建，不是遺漏。）
 
 建立：
 
-- MCP Client
-- MCP discovery / invocation
-- MCP server lifecycle
-- Aemeath MCP bridge
-- Context Snapshot（含作用中視窗、閒置時間、剪貼簿——Stage 3 的
-  `get_system_context` 沒有的那三個訊號）
-- Rule Engine
-- Emotion → Animation
-- Proactive interaction
+- MCP Client（stdio + HTTP/SSE 兩種 transport，HTTP 含 401 觸發的 OAuth 2.1 +
+  PKCE + Dynamic Client Registration）
+- MCP discovery / invocation（`initialize`/`tools/list`/`tools/call`，討論出的
+  tools/list 快取與 Settings UI 的 collapsible 展示也一併做了）
+- MCP server lifecycle（app 生命週期內的連線快取，新增時 eager、之後 lazy 重連）
+- ~~Aemeath MCP bridge~~（上面括號說明：只做了 Reading A；Reading B 仍是未來
+  work，未建）
 
 ### Stage 7 — Memory / Knowledge
 
@@ -3476,7 +3413,6 @@ Sub-agent / Delegation
         ▼
 Stage 6
 MCP
-+ Context Awareness
         │
         ▼
 Stage 7
@@ -3487,6 +3423,8 @@ Memory / Knowledge
 Stage 8
 Voice / Browser / Automation
 ```
+
+Backlog（不綁任何 Stage，見 §19）：Context Awareness（原 Stage 6 的一半）
 
 ---
 
@@ -3805,7 +3743,6 @@ Sub-agent / Delegation
         ▼
 Stage 6
 MCP
-+ Context Awareness
         │
         ▼
 Stage 7
@@ -3815,6 +3752,9 @@ Memory / Knowledge
         ▼
 Stage 8
 Voice / Browser / Automation
+
+Backlog（不綁任何 Stage，見 §19）
+Context Awareness
 ```
 
 > **先讓 Aemeath 自己擁有完整 Agent 基礎，再用 MCP 擴充 capability，最後才編排已經自帶 Agent Loop 的 external runtimes。**
@@ -3822,3 +3762,105 @@ Voice / Browser / Automation
 如此可以避免把 Aemeath Core 同時綁定 Conversation、Agent Loop、MCP protocol、
 Claude Code、Codex、OpenClaw 與 Session lifecycle，並保留未來替換 Model、
 Provider、Runtime、MCP server 與 external Agent backend 的空間。
+
+## 19. Backlog
+
+尚未排入任何 Stage 的構想。移入這裡的項目理由各自記錄在條目內，不代表
+「不會做」，只代表現在排不進任何 Stage 的依賴鏈，或設計還不夠成熟，先不綁
+在 roadmap 上卡位。
+
+### 19.1 Context Awareness（原 Stage 6 的一半，`/opsx:explore stage6` 移出）
+
+**移出理由**：
+
+- 觸發模型跟目前整個 roadmap 完全不同——目前所有東西都是「訊息驅動」
+  （使用者傳訊息才會有 Agent Loop 跑起來），這組能力是「系統訊號驅動」
+  （不需要使用者主動說話，Aemeath 自己會發起互動）。跟 MCP（原本綁在同一個
+  Stage 6 的另一半）之間沒有任何依賴關係，沒有理由綁在同一個 Stage 上。
+- Emotion → Animation、Proactive interaction 兩項只在 roadmap 條目（原
+  Stage 6 的 bullet list）被點名，這份文件裡從未真正設計過，沒有專屬小節。
+- 兩端都沒有現成的 state 可以掛：情緒/好感度數值要等 §10.3（原排在 Stage
+  7），`pet-rendering`/`pet-behavior` 目前的動畫完全由 `MotionState`
+  （wander / follow / rest...）驅動，沒有表情/反應層。等於是兩個獨立的
+  greenfield 工作共用一個 roadmap 名字，不是一個已經設計好、只是暫緩的功能。
+- 「idle」這個詞在既有程式碼裡已經另有用途（`pause.rs`/`motion.rs` 的寵物
+  自身待機動畫計時器，跟使用者是否離開電腦無關）——真的要做這個之前，命名
+  要先避開衝突。
+
+**原 §9 內容（原封不動搬移過來）**：
+
+> 核心原則：**本地規則引擎決定「要不要講」，AI 只負責「怎麼講」。**
+
+#### 資料來源與抓取方式
+
+---
+
+資料來源 建議作法 平台差異 / 注意事項
+
+---
+
+作用中視窗標題/程式名稱 `active-win-pos-rs` Windows 用
+等跨平台 crate `GetForegroundWindow`；macOS
+需要輔助使用權限；Linux
+Wayland 目前沒有標準 API
+
+CPU / 記憶體 / 電量 / `sysinfo` 三平台支援
+開機時間
+
+閒置時間 平台 API 或 `user-idle` 平台實作不同
+
+剪貼簿內容 `arboard` 隱私敏感度最高，預設關閉
+
+---
+
+#### 規則引擎
+
+1.  所有資料來源彙整成 `ContextSnapshot`
+2.  定期輪詢
+3.  規則決定是否觸發
+4.  每條規則有 cooldown
+5.  再加全域 cooldown
+6.  規則觸發後才呼叫 AI 生成內容
+
+#### Context 與 Agent 的關係
+
+情境感知不要直接把整個 snapshot 塞給模型。
+
+應該：
+
+```text
+Context Snapshot
+      ↓
+Rule Engine
+      ↓
+Event
+      ↓
+Relevant Context
+      ↓
+Persona + Prompt
+      ↓
+LLM
+```
+
+例如：
+
+```text
+Event:
+user_worked_90_minutes_without_break
+
+Context:
+continuous_work_minutes = 90
+```
+
+而不是：
+
+```json
+{
+  "cpu": 17,
+  "memory": 42,
+  "battery": 78,
+  "active_window": "...",
+  "idle": 0,
+  ...
+}
+```

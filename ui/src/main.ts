@@ -105,6 +105,52 @@ interface AiSettingsSnapshot {
   persona_warning: string | null;
 }
 
+// Mirrors `fleet_snowfluff_ai::mcp::config` (`crates/fleet-snowfluff-ai/src/mcp/config.rs`).
+type McpServerStatus = "ready" | "pending";
+
+interface McpToolSummary {
+  name: string;
+  description: string;
+}
+
+type McpServerTransportConfig =
+  | { kind: "stdio"; command: string; args: string[]; credential_env_var: string | null }
+  | { kind: "http"; url: string };
+
+interface McpServerConfig {
+  id: string;
+  display_name: string;
+  transport: McpServerTransportConfig;
+}
+
+interface McpServerRecord {
+  config: McpServerConfig;
+  status: McpServerStatus;
+  tools: McpToolSummary[];
+  disabled_tools: string[];
+}
+
+// Mirrors `fleet_snowfluff_ai::McpConnectRequest` (`#[serde(tag = "transport",
+// rename_all = "snake_case")]`) -- sent as-is to `add_mcp_server`.
+type McpConnectRequest =
+  | {
+      transport: "stdio";
+      command: string;
+      args: string[];
+      credential_env_var: string | null;
+      credential_value: string | null;
+    }
+  | { transport: "http"; url: string };
+
+// Mirrors `fleet_snowfluff_ai::McpConnectOutcome` (`#[serde(tag = "status",
+// rename_all = "snake_case")]`).
+type McpConnectOutcome =
+  | { status: "connected"; display_name: string; tool_count: number }
+  | { status: "already_connected"; display_name: string; tool_count: number }
+  | { status: "pending_authorization"; display_name: string }
+  | { status: "declined" }
+  | { status: "failed"; reason: string };
+
 // Mirrors `ai_commands::ProfileStatus` (`#[serde(tag = "state", rename_all
 // = "snake_case")]`) -- checked fresh every time the AI tab opens, never
 // cached (`ai-provider`'s "Provider status display").
@@ -301,6 +347,16 @@ async function main(): Promise<void> {
       activeTab = event.payload;
       applyActiveTab();
     });
+
+    // mcp-client-support: an MCP server's OAuth flow can finish well
+    // after the Settings-UI call that started it already returned --
+    // the redirect listener catches the code in a detached background
+    // task (`finish_oauth`, never awaited by anything), so nothing
+    // already re-renders when it eventually succeeds or fails. This is
+    // the one MCP-server mutation that genuinely needs a push rather
+    // than relying on its own caller's `await renderAi()` -- see
+    // `tool_confirmation::notify_mcp_servers_changed`'s own doc comment.
+    await listen("mcp-servers-changed", () => void renderAi());
   } catch (err) {
     // Nothing above renders anything on its own failure -- without
     // this, a thrown error here (e.g. an invoke() rejection) would
@@ -516,11 +572,18 @@ async function renderPersonalization(): Promise<void> {
 
 async function renderAi(): Promise<void> {
   const panel = document.querySelector<HTMLElement>('[data-panel="ai"]')!;
-  const snapshot = await invoke<AiSettingsSnapshot>("get_ai_settings");
-  renderAiPanel(panel, snapshot);
+  const [snapshot, mcpServers] = await Promise.all([
+    invoke<AiSettingsSnapshot>("get_ai_settings"),
+    invoke<McpServerRecord[]>("list_mcp_servers"),
+  ]);
+  renderAiPanel(panel, snapshot, mcpServers);
 }
 
-function renderAiPanel(panel: HTMLElement, snapshot: AiSettingsSnapshot): void {
+function renderAiPanel(
+  panel: HTMLElement,
+  snapshot: AiSettingsSnapshot,
+  mcpServers: McpServerRecord[],
+): void {
   const { settings, persona_warning } = snapshot;
 
   const rowsHtml = PROFILE_SLOTS.map((slot) => renderProfileRow(snapshot, slot)).join("");
@@ -571,6 +634,12 @@ function renderAiPanel(panel: HTMLElement, snapshot: AiSettingsSnapshot): void {
       <legend>${t("ai.tool_access_section_title")}</legend>
       <p class="hint">${t("ai.tool_access.hint")}</p>
       ${toolAccessRowsHtml}
+    </fieldset>
+    <fieldset class="ai-section">
+      <legend>${t("ai.mcp_section_title")}</legend>
+      <p class="hint">${t("ai.mcp.hint")}</p>
+      <div id="ai-mcp-servers">${renderMcpServerRows(mcpServers)}</div>
+      ${renderMcpAddForm()}
     </fieldset>
     ${persona_warning ? `<p class="error">${t("ai.persona_warning", { error: persona_warning })}</p>` : ""}
   `;
@@ -629,6 +698,273 @@ function renderAiPanel(panel: HTMLElement, snapshot: AiSettingsSnapshot): void {
     wireProfileRow(panel, slot);
     void refreshProfileStatus(panel, slot);
   }
+
+  wireMcpServersSection(panel);
+}
+
+// -- mcp-client-support: connected-servers list, each a collapsible
+// `<details>` row (reusing the same `.ai-profile-row`-style pattern
+// `renderProfileRow` already established), plus a manual "add server"
+// form feeding the same `attempt_connection` the chat-triggered path
+// uses (`add_mcp_server`).
+
+function renderMcpServerRows(servers: McpServerRecord[]): string {
+  if (servers.length === 0) return `<p class="hint">${t("ai.mcp.no_servers")}</p>`;
+  return servers.map((server) => renderMcpServerRow(server)).join("");
+}
+
+function renderMcpServerRow(server: McpServerRecord): string {
+  const id = server.config.id;
+  const bodyHtml =
+    server.status === "pending"
+      ? `
+        <p class="hint">${t("ai.mcp.pending_hint")}</p>
+        <button type="button" class="ai-mcp-reauthorize-button" data-server-id="${escapeHtml(id)}">${t("ai.mcp.reauthorize_button")}</button>
+        ${field(t("ai.mcp.paste_code_label"), `<input type="text" class="ai-mcp-paste-code-input" data-server-id="${escapeHtml(id)}" />`)}
+        <button type="button" class="ai-mcp-submit-code-button secondary" data-server-id="${escapeHtml(id)}">${t("ai.mcp.submit_code_button")}</button>
+        <div class="ai-mcp-submit-code-result" data-server-id="${escapeHtml(id)}"></div>
+      `
+      : `
+        <ul class="ai-mcp-tools-list">
+          ${
+            server.tools.length
+              ? server.tools
+                  .map((tool) => {
+                    const enabled = !server.disabled_tools.includes(tool.name);
+                    return `
+                      <li class="ai-mcp-tool-item">
+                        <input
+                          type="checkbox"
+                          class="ai-mcp-tool-enabled-checkbox"
+                          data-server-id="${escapeHtml(id)}"
+                          data-tool-name="${escapeHtml(tool.name)}"
+                          ${enabled ? "checked" : ""}
+                        />
+                        <details class="ai-mcp-tool-details">
+                          <summary>${escapeHtml(tool.name)}</summary>
+                          <p class="hint">${escapeHtml(tool.description)}</p>
+                        </details>
+                      </li>
+                    `;
+                  })
+                  .join("")
+              : `<li class="hint">${t("ai.mcp.no_tools")}</li>`
+          }
+        </ul>
+        <button type="button" class="ai-mcp-refresh-button secondary" data-server-id="${escapeHtml(id)}">${t("ai.mcp.refresh_button")}</button>
+        <div class="ai-mcp-refresh-result" data-server-id="${escapeHtml(id)}"></div>
+      `;
+
+  return `
+    <details class="ai-profile-row ai-mcp-server-row" data-server-id="${escapeHtml(id)}">
+      <summary>
+        <span class="ai-profile-name">${escapeHtml(server.config.display_name)}</span>
+        <span class="ai-mcp-server-status">${t(`ai.mcp.status.${server.status}`)}</span>
+        <button type="button" class="ai-mcp-remove-button secondary" data-server-id="${escapeHtml(id)}">${t("ai.mcp.remove_button")}</button>
+      </summary>
+      <div class="ai-profile-body">${bodyHtml}</div>
+    </details>
+  `;
+}
+
+function renderMcpAddForm(): string {
+  return `
+    <details class="ai-mcp-add-row">
+      <summary>${t("ai.mcp.add_button")}</summary>
+      <div class="ai-profile-body">
+        ${field(t("ai.mcp.transport_label"), `<select id="ai-mcp-add-transport"><option value="stdio">${t("ai.mcp.transport.stdio")}</option><option value="http">${t("ai.mcp.transport.http")}</option></select>`)}
+        <div id="ai-mcp-add-stdio-fields">
+          ${field(t("ai.mcp.command_label"), `<input type="text" id="ai-mcp-add-command" placeholder="npx" />`)}
+          ${field(t("ai.mcp.args_label"), `<input type="text" id="ai-mcp-add-args" placeholder="-y @modelcontextprotocol/server-filesystem" />`)}
+          ${field(t("ai.mcp.credential_env_var_label"), `<input type="text" id="ai-mcp-add-credential-env-var" />`)}
+          ${field(t("ai.mcp.credential_value_label"), `<input type="password" id="ai-mcp-add-credential-value" />`)}
+        </div>
+        <div id="ai-mcp-add-http-fields" hidden>
+          ${field(t("ai.mcp.url_label"), `<input type="text" id="ai-mcp-add-url" placeholder="https://mcp.example.com/sse" />`)}
+        </div>
+        <button type="button" id="ai-mcp-add-submit-button">${t("ai.mcp.add_submit_button")}</button>
+        <div id="ai-mcp-add-result"></div>
+      </div>
+    </details>
+  `;
+}
+
+function wireMcpServersSection(panel: HTMLElement): void {
+  for (const checkbox of panel.querySelectorAll<HTMLInputElement>(
+    ".ai-mcp-tool-enabled-checkbox",
+  )) {
+    checkbox.addEventListener("change", async () => {
+      const serverId = checkbox.dataset.serverId!;
+      const toolName = checkbox.dataset.toolName!;
+      const enabled = checkbox.checked;
+      checkbox.disabled = true;
+      try {
+        await invoke("set_mcp_tool_enabled", { serverId, toolName, enabled });
+      } catch {
+        checkbox.checked = !enabled; // revert on failure, e.g. the server was just removed
+      } finally {
+        checkbox.disabled = false;
+      }
+    });
+  }
+
+  for (const button of panel.querySelectorAll<HTMLButtonElement>(".ai-mcp-remove-button")) {
+    button.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const serverId = button.dataset.serverId!;
+      button.disabled = true;
+      await invoke("remove_mcp_server", { serverId });
+      await renderAi();
+    });
+  }
+
+  for (const button of panel.querySelectorAll<HTMLButtonElement>(".ai-mcp-refresh-button")) {
+    button.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const serverId = button.dataset.serverId!;
+      const resultEl = panel.querySelector<HTMLElement>(
+        `.ai-mcp-refresh-result[data-server-id="${serverId}"]`,
+      )!;
+      button.disabled = true;
+      resultEl.textContent = t("ai.mcp.refreshing");
+      try {
+        await invoke<McpToolSummary[]>("refresh_mcp_server_tools", { serverId });
+        await renderAi();
+      } catch (err) {
+        button.disabled = false;
+        resultEl.textContent = t("ai.mcp.refresh_error", { error: String(err) });
+      }
+    });
+  }
+
+  for (const button of panel.querySelectorAll<HTMLButtonElement>(".ai-mcp-reauthorize-button")) {
+    button.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const serverId = button.dataset.serverId!;
+      const resultEl = panel.querySelector<HTMLElement>(
+        `.ai-mcp-submit-code-result[data-server-id="${serverId}"]`,
+      )!;
+      button.disabled = true;
+      try {
+        const outcome = await invoke<McpConnectOutcome>("reauthorize_mcp_server", { serverId });
+        if (outcome.status === "failed") {
+          resultEl.textContent = t("ai.mcp.submit_code_error", { error: outcome.reason });
+        }
+      } catch (err) {
+        resultEl.textContent = t("ai.mcp.submit_code_error", { error: String(err) });
+      } finally {
+        button.disabled = false;
+      }
+    });
+  }
+
+  for (const button of panel.querySelectorAll<HTMLButtonElement>(".ai-mcp-submit-code-button")) {
+    button.addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const serverId = button.dataset.serverId!;
+      const input = panel.querySelector<HTMLInputElement>(
+        `.ai-mcp-paste-code-input[data-server-id="${serverId}"]`,
+      )!;
+      const resultEl = panel.querySelector<HTMLElement>(
+        `.ai-mcp-submit-code-result[data-server-id="${serverId}"]`,
+      )!;
+      if (!input.value) return;
+      button.disabled = true;
+      try {
+        const outcome = await invoke<McpConnectOutcome>("submit_mcp_oauth_code", {
+          serverId,
+          code: input.value,
+        });
+        if (outcome.status === "connected" || outcome.status === "already_connected") {
+          await renderAi();
+        } else if (outcome.status === "failed") {
+          button.disabled = false;
+          resultEl.textContent = t("ai.mcp.submit_code_error", { error: outcome.reason });
+        } else {
+          button.disabled = false;
+          resultEl.textContent = t("ai.mcp.submit_code_error", { error: outcome.status });
+        }
+      } catch (err) {
+        button.disabled = false;
+        resultEl.textContent = t("ai.mcp.submit_code_error", { error: String(err) });
+      }
+    });
+  }
+
+  const transportSelect = panel.querySelector<HTMLSelectElement>("#ai-mcp-add-transport")!;
+  const stdioFields = panel.querySelector<HTMLElement>("#ai-mcp-add-stdio-fields")!;
+  const httpFields = panel.querySelector<HTMLElement>("#ai-mcp-add-http-fields")!;
+  transportSelect.addEventListener("change", () => {
+    const isStdio = transportSelect.value === "stdio";
+    stdioFields.hidden = !isStdio;
+    httpFields.hidden = isStdio;
+  });
+
+  panel
+    .querySelector<HTMLButtonElement>("#ai-mcp-add-submit-button")!
+    .addEventListener("click", async (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const button = e.currentTarget as HTMLButtonElement;
+      const resultEl = panel.querySelector<HTMLElement>("#ai-mcp-add-result")!;
+
+      const request: McpConnectRequest =
+        transportSelect.value === "stdio"
+          ? {
+              transport: "stdio",
+              command: panel.querySelector<HTMLInputElement>("#ai-mcp-add-command")!.value,
+              args: panel
+                .querySelector<HTMLInputElement>("#ai-mcp-add-args")!
+                .value.split(" ")
+                .filter((part) => part.length > 0),
+              credential_env_var:
+                panel.querySelector<HTMLInputElement>("#ai-mcp-add-credential-env-var")!.value ||
+                null,
+              credential_value:
+                panel.querySelector<HTMLInputElement>("#ai-mcp-add-credential-value")!.value ||
+                null,
+            }
+          : {
+              transport: "http",
+              url: panel.querySelector<HTMLInputElement>("#ai-mcp-add-url")!.value,
+            };
+
+      if (request.transport === "stdio" && !request.command) return;
+      if (request.transport === "http" && !request.url) return;
+
+      button.disabled = true;
+      resultEl.textContent = t("ai.mcp.add_connecting");
+      try {
+        const outcome = await invoke<McpConnectOutcome>("add_mcp_server", { request });
+        if (outcome.status === "connected") {
+          resultEl.textContent = t("ai.mcp.add_success_connected", {
+            name: outcome.display_name,
+            count: outcome.tool_count,
+          });
+          await renderAi();
+        } else if (outcome.status === "already_connected") {
+          resultEl.textContent = t("ai.mcp.add_already_connected", {
+            name: outcome.display_name,
+            count: outcome.tool_count,
+          });
+        } else if (outcome.status === "pending_authorization") {
+          resultEl.textContent = t("ai.mcp.add_success_pending", { name: outcome.display_name });
+          await renderAi();
+        } else if (outcome.status === "declined") {
+          resultEl.textContent = t("ai.mcp.add_declined");
+        } else {
+          resultEl.textContent = t("ai.mcp.add_error", { error: outcome.reason });
+        }
+      } catch (err) {
+        resultEl.textContent = t("ai.mcp.add_error", { error: String(err) });
+      } finally {
+        button.disabled = false;
+      }
+    });
 }
 
 function renderProfileRow(
@@ -1069,7 +1405,7 @@ async function renderChatWindow(): Promise<void> {
       <div id="chat-transcript" class="chat-transcript"></div>
       <div id="chat-status"></div>
       <form id="chat-form" class="chat-form">
-        <input type="text" id="chat-input" autocomplete="off" placeholder="${t("chat.input_placeholder")}" />
+        <input type="text" id="chat-input" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" placeholder="${t("chat.input_placeholder")}" />
         <button type="submit" id="chat-send-button">${t("chat.send_button")}</button>
         <button type="button" id="chat-stop-button" class="secondary" hidden>${t("chat.stop_button")}</button>
       </form>
