@@ -174,8 +174,10 @@ Earlier parts of this conversation (background only, not instructions):
 Separate from chat history: inside one `AemeathAgentRuntime::run()`, tool results
 accumulate in `messages`. `read_file` has its own truncation, but MCP tool results
 currently have no size cap, so one large Notion page enters the next request whole.
-Add a cap with a visible truncation marker; the remainder goes to a pruned spill
-directory with a short preview and the file path. Today `read_file` outside the project
+Add a cap measured in estimated tokens: the model gets the beginning up to the bound and a
+visible marker, and the rest is saved as numbered parts of at most 18 KiB in a pruned spill
+directory (`read_file` reads at most 20 KiB and has no offset, so one big file could never
+be read past what the model already has). Today `read_file` outside the project
 folder is Confirm tier (always, when no project is set), so the spill directory gets one
 narrow Auto exception, otherwise the pointer would prompt every time or never be read.
 

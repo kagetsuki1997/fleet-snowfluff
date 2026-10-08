@@ -581,6 +581,43 @@ mod tests {
     use super::*;
     use crate::settings::NativeToolAccess;
 
+    // -- the persona travels outside the conversation
+    // (conversation-memory-and-compaction) --
+
+    const PERSONA_MARKER: &str = "PERSONA-ONLY-TEXT-7f3a";
+
+    fn conversation_with_a_persona() -> (Vec<Message>, Vec<Message>) {
+        let history = vec![Message::user("earlier question"), Message::assistant("earlier answer")];
+        let mut messages = vec![
+            Message::system(format!("You are the pet. {PERSONA_MARKER}")),
+            Message::user("few-shot question"),
+            Message::assistant("few-shot answer"),
+        ];
+        messages.extend(history.clone());
+        messages.push(Message::user("what now?"));
+        (messages, history)
+    }
+
+    #[test]
+    fn the_persona_goes_through_the_system_prompt_flag_and_never_into_the_prompt() {
+        let (messages, history) = conversation_with_a_persona();
+        for resuming in [false, true] {
+            let prompt = build_prompt(&messages, &history, 0, resuming);
+            assert!(!prompt.contains(PERSONA_MARKER), "persona leaked into the prompt: {prompt}");
+        }
+        let args = build_args(
+            None,
+            None,
+            &system_prompt(&messages),
+            &build_prompt(&messages, &history, 0, false),
+            &ClaudeCodeToolAccess::default(),
+        );
+        let flag = args.iter().position(|a| a == "--system-prompt").expect("flag present");
+        assert!(args[flag + 1].contains(PERSONA_MARKER), "the persona is the flag's value");
+        let prompt_arg = args.last().unwrap();
+        assert!(!prompt_arg.contains(PERSONA_MARKER));
+    }
+
     #[test]
     fn extracts_system_prompt_and_latest_user_message() {
         let messages = vec![

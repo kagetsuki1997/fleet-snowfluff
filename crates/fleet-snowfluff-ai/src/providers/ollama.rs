@@ -21,11 +21,19 @@ pub struct Ollama {
     pub base_url: String,
     pub model: String,
     client: reqwest::Client,
+    /// Tokens a reply may use. The usual cap, unless the fit check lowered it
+    /// for a small window.
+    reply_allowance: u32,
 }
 
 impl Ollama {
     pub fn new(base_url: impl Into<String>, model: impl Into<String>) -> Self {
-        Self { base_url: base_url.into(), model: model.into(), client: reqwest::Client::new() }
+        Self {
+            base_url: base_url.into(),
+            model: model.into(),
+            client: reqwest::Client::new(),
+            reply_allowance: MAX_RESPONSE_TOKENS,
+        }
     }
 }
 
@@ -69,6 +77,17 @@ pub fn build_chat_with_tools_body(
     messages: &[Message],
     tools: &[ToolDefinition],
 ) -> Value {
+    build_chat_with_tools_body_with(model, messages, tools, MAX_RESPONSE_TOKENS)
+}
+
+/// [`build_chat_with_tools_body`] with an explicit reply allowance
+/// (`num_predict`).
+pub fn build_chat_with_tools_body_with(
+    model: &str,
+    messages: &[Message],
+    tools: &[ToolDefinition],
+    reply_allowance: u32,
+) -> Value {
     // Ollama pairs a tool result with its call by order and has no
     // `tool_call_id`; `Message` now carries one for the APIs that need
     // it (OpenAI, Anthropic), so drop it here to keep Ollama's request
@@ -87,7 +106,7 @@ pub fn build_chat_with_tools_body(
         "messages": messages_json,
         "stream": true,
         "think": false,
-        "options": { "num_predict": MAX_RESPONSE_TOKENS },
+        "options": { "num_predict": reply_allowance },
     });
     if !tools.is_empty() {
         let tools_json: Vec<Value> = tools
@@ -111,6 +130,70 @@ pub fn build_chat_with_tools_body(
 pub fn chat_url(base_url: &str) -> String { format!("{}/api/chat", base_url.trim_end_matches('/')) }
 
 pub fn tags_url(base_url: &str) -> String { format!("{}/api/tags", base_url.trim_end_matches('/')) }
+
+pub fn ps_url(base_url: &str) -> String { format!("{}/api/ps", base_url.trim_end_matches('/')) }
+
+pub fn generate_url(base_url: &str) -> String {
+    format!("{}/api/generate", base_url.trim_end_matches('/'))
+}
+
+/// How long to wait for a model to load and report its window before giving up
+/// on knowing it.
+const WINDOW_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+/// How long a looked-up window is reused. It can change if the server is
+/// restarted with another setting, so it is not kept indefinitely.
+const WINDOW_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+
+type WindowKey = (String, String);
+
+fn window_cache(
+) -> &'static std::sync::Mutex<std::collections::HashMap<WindowKey, (usize, std::time::Instant)>> {
+    static CACHE: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<WindowKey, (usize, std::time::Instant)>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn cached_window(key: &WindowKey) -> Option<usize> {
+    let cache = window_cache().lock().ok()?;
+    let (window, stored_at) = cache.get(key)?;
+    (stored_at.elapsed() < WINDOW_CACHE_TTL).then_some(*window)
+}
+
+fn remember_window(key: WindowKey, window: usize) {
+    if let Ok(mut cache) = window_cache().lock() {
+        cache.insert(key, (window, std::time::Instant::now()));
+    }
+}
+
+/// The context window the running model `model` was loaded with, from
+/// `/api/ps`'s body. `/api/show` reports only the trained maximum, which is
+/// larger than what the server actually loaded.
+pub fn parse_running_window(body: &str, model: &str) -> Option<usize> {
+    #[derive(Deserialize)]
+    struct Running {
+        #[serde(default)]
+        models: Vec<RunningModel>,
+    }
+    #[derive(Deserialize)]
+    struct RunningModel {
+        #[serde(default)]
+        name: String,
+        #[serde(default)]
+        model: String,
+        #[serde(default)]
+        context_length: Option<usize>,
+    }
+    fn base(name: &str) -> &str { name.strip_suffix(":latest").unwrap_or(name) }
+    let wanted = base(model);
+    let running: Running = serde_json::from_str(body).ok()?;
+    running
+        .models
+        .into_iter()
+        .find(|m| base(&m.name) == wanted || base(&m.model) == wanted)?
+        .context_length
+        .filter(|window| *window > 0)
+}
 
 /// Ollama's error body is `{"error": "<message>"}`, not a nested
 /// envelope like OpenAI/Anthropic's.
@@ -181,6 +264,10 @@ pub fn parse_ndjson_tool_line(line: &str) -> Result<Vec<ToolCallStreamItem>, Pro
     struct ChatToolChunk {
         #[serde(default)]
         message: Option<ToolMessageDelta>,
+        #[serde(default)]
+        done: bool,
+        #[serde(default)]
+        prompt_eval_count: Option<usize>,
     }
     #[derive(Deserialize)]
     struct ToolMessageDelta {
@@ -205,11 +292,14 @@ pub fn parse_ndjson_tool_line(line: &str) -> Result<Vec<ToolCallStreamItem>, Pro
     let chunk: ChatToolChunk = serde_json::from_str(line)
         .map_err(|e| ProviderError::InvalidResponse(format!("malformed chunk: {e}")))?;
 
+    let mut items = Vec::new();
+    // The server's own count of the prompt it processed arrives on the final line.
+    let prompt_tokens = chunk.done.then_some(chunk.prompt_eval_count).flatten();
     let Some(message) = chunk.message else {
-        return Ok(vec![]);
+        items.extend(prompt_tokens.map(ToolCallStreamItem::PromptTokens));
+        return Ok(items);
     };
 
-    let mut items = Vec::new();
     if !message.content.is_empty() {
         items.push(ToolCallStreamItem::TextDelta(message.content));
     }
@@ -221,6 +311,7 @@ pub fn parse_ndjson_tool_line(line: &str) -> Result<Vec<ToolCallStreamItem>, Pro
             arguments: call.function.arguments,
         });
     }
+    items.extend(prompt_tokens.map(ToolCallStreamItem::PromptTokens));
     Ok(items)
 }
 
@@ -268,12 +359,45 @@ impl ToolCallingProvider for Ollama {
         messages: Vec<Message>,
         tools: Vec<ToolDefinition>,
     ) -> Result<ToolCallStream, ProviderError> {
-        let request = self.client.post(chat_url(&self.base_url)).json(&build_chat_with_tools_body(
-            &self.model,
-            &messages,
-            &tools,
-        ));
+        let request = self.client.post(chat_url(&self.base_url)).json(
+            &build_chat_with_tools_body_with(&self.model, &messages, &tools, self.reply_allowance),
+        );
         http_stream::stream_lines_multi(request, parse_ndjson_tool_line, parse_error_response).await
+    }
+
+    fn set_reply_allowance(&mut self, tokens: u32) { self.reply_allowance = tokens; }
+
+    async fn context_window(&self) -> Option<usize> {
+        let key = (self.base_url.clone(), self.model.clone());
+        if let Some(window) = cached_window(&key) {
+            return Some(window);
+        }
+        let window = tokio::time::timeout(WINDOW_LOOKUP_TIMEOUT, self.load_and_read_window())
+            .await
+            .ok()
+            .flatten()?;
+        remember_window(key, window);
+        Some(window)
+    }
+}
+
+impl Ollama {
+    async fn running_window(&self) -> Option<usize> {
+        let body = self.client.get(ps_url(&self.base_url)).send().await.ok()?.text().await.ok()?;
+        parse_running_window(&body, &self.model)
+    }
+
+    /// The window of the loaded model. If it is not loaded yet, loads it with
+    /// an empty generate call (which Ollama documents as a load-only
+    /// request) and asks again. A model load the first chat request would
+    /// have needed anyway.
+    async fn load_and_read_window(&self) -> Option<usize> {
+        if let Some(window) = self.running_window().await {
+            return Some(window);
+        }
+        let load = json!({ "model": self.model, "prompt": "", "stream": false });
+        self.client.post(generate_url(&self.base_url)).json(&load).send().await.ok()?;
+        self.running_window().await
     }
 }
 
@@ -287,6 +411,86 @@ mod tests {
         assert_eq!(body["model"], "llama3.2:3b");
         assert_eq!(body["options"]["num_predict"], MAX_RESPONSE_TOKENS);
         assert!(body.get("max_tokens").is_none(), "Ollama has no top-level max_tokens field");
+    }
+
+    #[test]
+    fn the_reply_allowance_is_what_the_request_asks_the_model_for() {
+        let body = build_chat_with_tools_body_with("m", &[Message::user("hi")], &[], 1_024);
+        assert_eq!(body["options"]["num_predict"], 1_024);
+        let default = build_chat_with_tools_body("m", &[Message::user("hi")], &[]);
+        assert_eq!(default["options"]["num_predict"], MAX_RESPONSE_TOKENS);
+    }
+
+    #[test]
+    fn a_provider_remembers_a_lowered_reply_allowance() {
+        let mut provider = Ollama::new("http://localhost:11434", "m");
+        provider.set_reply_allowance(700);
+        assert_eq!(provider.reply_allowance, 700);
+    }
+
+    #[test]
+    fn the_running_window_comes_from_the_loaded_model_not_the_trained_maximum() {
+        let body = r#"{"models":[{"name":"qwen3:14b","model":"qwen3:14b","size":14424117083,"context_length":32768}]}"#;
+        assert_eq!(parse_running_window(body, "qwen3:14b"), Some(32768));
+    }
+
+    #[test]
+    fn a_model_name_without_a_tag_matches_its_latest_build() {
+        let body = r#"{"models":[{"name":"llama3.2:latest","model":"llama3.2:latest","context_length":4096}]}"#;
+        assert_eq!(parse_running_window(body, "llama3.2"), Some(4096));
+    }
+
+    #[test]
+    fn no_window_is_reported_when_the_model_is_not_loaded_or_the_field_is_missing() {
+        assert_eq!(parse_running_window(r#"{"models":[]}"#, "qwen3:14b"), None);
+        assert_eq!(
+            parse_running_window(
+                r#"{"models":[{"name":"other:1b","context_length":2048}]}"#,
+                "qwen3:14b"
+            ),
+            None
+        );
+        assert_eq!(parse_running_window(r#"{"models":[{"name":"qwen3:14b"}]}"#, "qwen3:14b"), None);
+        assert_eq!(parse_running_window("not json", "qwen3:14b"), None);
+    }
+
+    #[test]
+    fn the_final_stream_line_reports_the_prompt_size() {
+        let line = r#"{"model":"m","message":{"role":"assistant","content":""},"done":true,"done_reason":"stop","prompt_eval_count":3334,"eval_count":21}"#;
+        let items = parse_ndjson_tool_line(line).unwrap();
+        assert_eq!(items, vec![ToolCallStreamItem::PromptTokens(3334)]);
+    }
+
+    #[test]
+    fn a_done_line_without_a_prompt_count_adds_nothing() {
+        let line = r#"{"model":"m","message":{"role":"assistant","content":""},"done":true}"#;
+        assert_eq!(parse_ndjson_tool_line(line).unwrap(), vec![]);
+    }
+
+    #[test]
+    fn an_ordinary_mid_stream_line_never_reports_a_prompt_size() {
+        let line = r#"{"model":"m","message":{"role":"assistant","content":"hi"},"done":false,"prompt_eval_count":99}"#;
+        assert_eq!(
+            parse_ndjson_tool_line(line).unwrap(),
+            vec![ToolCallStreamItem::TextDelta("hi".to_string())]
+        );
+    }
+
+    #[tokio::test]
+    async fn context_window_reads_a_loaded_models_window_and_reuses_it() {
+        let (base_url, handle) = crate::providers::test_server::serve_once(
+            200,
+            crate::providers::test_server::chunked(
+                r#"{"models":[{"name":"qwen3:14b","model":"qwen3:14b","context_length":32768}]}"#,
+                4096,
+            ),
+        );
+        let provider = Ollama::new(base_url, "qwen3:14b");
+
+        assert_eq!(provider.context_window().await, Some(32768));
+        handle.join().unwrap();
+        // The server has stopped; a second ask is answered from the cache.
+        assert_eq!(provider.context_window().await, Some(32768));
     }
 
     #[test]

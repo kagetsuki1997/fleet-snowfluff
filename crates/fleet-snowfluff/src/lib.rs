@@ -8,6 +8,7 @@ pub mod chat_pause;
 pub mod chat_window;
 pub mod cli_workdir;
 pub mod commands;
+pub mod compaction_runtime;
 pub mod config_store;
 pub mod execution_log_store;
 pub mod execution_recorder;
@@ -232,6 +233,7 @@ pub fn run() {
             app.manage(tool_confirmation::ToolConfirmationState::default());
             app.manage(mcp_connection::McpConnectionState::default());
             app.manage(mcp_connection::PendingOAuthState::default());
+            compaction_runtime::start(app.handle());
             app.manage(Mutex::<Option<tauri_plugin_updater::Update>>::new(None));
             tray::build(&app_handle)?;
             updater::spawn_startup_check(app_handle.clone());

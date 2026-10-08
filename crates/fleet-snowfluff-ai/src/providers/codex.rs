@@ -536,6 +536,32 @@ impl AiProvider for Codex {
 mod tests {
     use super::*;
 
+    // -- the persona travels outside the conversation
+    // (conversation-memory-and-compaction) --
+
+    const PERSONA_MARKER: &str = "PERSONA-ONLY-TEXT-7f3a";
+
+    #[test]
+    fn the_persona_is_the_instructions_text_and_never_part_of_the_conversation_prompt() {
+        let history = vec![Message::user("earlier question"), Message::assistant("earlier answer")];
+        let mut messages = vec![
+            Message::system(format!("You are the pet. {PERSONA_MARKER}")),
+            Message::user("few-shot question"),
+            Message::assistant("few-shot answer"),
+        ];
+        messages.extend(history.clone());
+        messages.push(Message::user("what now?"));
+
+        assert!(
+            system_prompt(&messages).contains(PERSONA_MARKER),
+            "it becomes the instructions file"
+        );
+        for resuming in [false, true] {
+            let prompt = build_prompt(&messages, &history, 0, resuming);
+            assert!(!prompt.contains(PERSONA_MARKER), "persona leaked into the prompt: {prompt}");
+        }
+    }
+
     // -- cli-session-continuity: `chat()` driven against a fake `codex` --
 
     /// A `codex` stand-in that rejects any `resume` like a thread the CLI

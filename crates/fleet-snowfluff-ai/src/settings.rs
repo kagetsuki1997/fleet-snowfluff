@@ -403,7 +403,23 @@ pub struct AiSettings {
     pub claude_code_tool_access: ClaudeCodeToolAccess,
 }
 
+/// The one local profile: Ollama running on this machine. It is the only
+/// profile whose requests never leave the machine, which is what the memory and
+/// compaction features key their privacy rules on.
+pub const LOCAL_PROFILE_KEY: ProfileKey =
+    ProfileKey { provider: ProviderKind::Ollama, auth_method: AuthMethod::Local };
+
 impl AiSettings {
+    /// The profile that does background work on the user's conversation
+    /// (writing summaries and deriving memories): the enabled local profile
+    /// when there is one, so the text stays on this machine, otherwise the
+    /// default profile. A CLI-backed profile can be returned; the caller builds
+    /// it as a fresh provider with no session to resume, so it never touches
+    /// the chat's own CLI session.
+    pub fn background_profile(&self) -> Option<&ProviderProfile> {
+        self.profile(LOCAL_PROFILE_KEY).or_else(|| self.default_profile())
+    }
+
     /// The profile currently handling chat requests, if any.
     pub fn default_profile(&self) -> Option<&ProviderProfile> {
         let key = self.default_profile?;
@@ -789,6 +805,35 @@ mod tests {
         assert_eq!(settings.default_profile, Some(default_key));
         assert_eq!(settings.default_profile().unwrap().model, None);
         assert!(settings.disclosure_acknowledged(default_key));
+    }
+
+    #[test]
+    fn the_background_profile_prefers_an_enabled_local_profile_over_the_default() {
+        let raw = json!({
+            "enabled_profiles": [
+                { "provider": "anthropic", "auth_method": "api_key" },
+                { "provider": "ollama", "auth_method": "local" },
+            ],
+            "default_profile": { "provider": "anthropic", "auth_method": "api_key" },
+        });
+        let settings = sanitize(&raw);
+        assert_eq!(settings.background_profile().unwrap().key(), LOCAL_PROFILE_KEY);
+    }
+
+    #[test]
+    fn the_background_profile_falls_back_to_the_default_without_a_local_one() {
+        let raw = json!({
+            "enabled_profiles": [{ "provider": "anthropic", "auth_method": "subscription" }],
+            "default_profile": { "provider": "anthropic", "auth_method": "subscription" },
+        });
+        let settings = sanitize(&raw);
+        let profile = settings.background_profile().unwrap();
+        assert!(profile.uses_cli(), "a CLI-backed default is allowed for background work");
+    }
+
+    #[test]
+    fn there_is_no_background_profile_when_nothing_is_enabled() {
+        assert!(AiSettings::default().background_profile().is_none());
     }
 
     #[test]

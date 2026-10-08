@@ -43,12 +43,17 @@ The application SHALL provide, for tool-calling-capable provider profiles, at le
 
 ### Requirement: Tool output is bounded within a run
 
-Within a single agent run, the application SHALL bound the size of each tool result added to the conversation, whatever the tool's origin (native or from a connected MCP server). A result over the bound SHALL be cut off with a visible marker saying so, and the full output SHALL be kept in the application's directory of spilled tool output, where the read-file tool can read it. The model SHALL be told the result was shortened and where the full output is.
+Within a single agent run, the application SHALL bound the size of each tool result added to the conversation, whatever the tool's origin (native or from a connected MCP server). A result over the bound SHALL be cut off with a visible marker saying so, and the rest of the output SHALL be kept in the application's directory of spilled tool output, in pieces each small enough for the read-file tool to return whole, so that all of it can be read. The model SHALL be told the result was shortened and where the rest is.
 
 #### Scenario: A very large tool result is shortened
 
 - **WHEN** a tool returns more output than the bound
-- **THEN** the model receives the first portion followed by a marker stating the result was cut off and naming where the full output is kept, not the whole output
+- **THEN** the model receives the first portion followed by a marker stating the result was cut off and naming where the rest is kept, not the whole output
+
+#### Scenario: Everything that was cut off can be read back
+
+- **WHEN** a tool returned far more than the bound
+- **THEN** the shown portion plus the saved pieces together reproduce the original output exactly, and each saved piece can be read in full with the read-file tool
 
 #### Scenario: A result within the bound is unchanged
 

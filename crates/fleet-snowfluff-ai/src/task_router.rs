@@ -218,6 +218,40 @@ mod tests {
         ProviderProfile { provider, auth_method, model: None, base_url: None }
     }
 
+    // -- conversation-memory-and-compaction: mixed mode's two message sets both
+    // carry the summary --
+
+    #[test]
+    fn the_local_attempts_message_set_carries_the_same_summary_as_the_default_profiles() {
+        use crate::{
+            persona::{parse_persona, Language},
+            prompt::{assemble_messages_with, HistoryLimits, HistoryPlan},
+        };
+        let persona = parse_persona(
+            "name: \"T\"\nresponse_language: \"auto\"\npersonality: \"p\"\nspeech_style: \"s\"\n",
+        )
+        .unwrap();
+        let history = vec![Message::user("earlier"), Message::assistant("answer")];
+        let plan = HistoryPlan {
+            covered_through: 0,
+            limits: HistoryLimits::default(),
+            summary: Some("The user has a cat named Mochi.".to_string()),
+        };
+        let default_messages =
+            assemble_messages_with(&persona, Language::En, &history, "latest", &plan);
+
+        let local_messages = with_task_router_rules(default_messages.clone(), "ROUTING RULES");
+
+        let carries_summary = |messages: &[Message]| {
+            messages.iter().filter(|m| m.content.contains("<conversation_summary>")).count()
+        };
+        assert_eq!(carries_summary(&default_messages), 1);
+        assert_eq!(carries_summary(&local_messages), 1, "the local attempt sees the summary too");
+        assert_eq!(default_messages[1..], local_messages[1..], "only the system prompt differs");
+        assert!(local_messages[0].content.ends_with("ROUTING RULES"));
+        assert!(!local_messages[0].content.contains("<conversation_summary>"));
+    }
+
     // -- 2.3: rules get appended to the leading system message only --
 
     #[test]

@@ -4,6 +4,7 @@
 //! its own `Tool` implementation in its own file; nothing here beyond
 //! module wiring.
 
+pub mod compact_context;
 pub mod file_tools;
 pub mod run_command;
 pub mod system_context;

@@ -44,16 +44,24 @@ pub fn parse_log(contents: &str) -> Vec<LogEntry> {
         .collect()
 }
 
+/// The log entries that become conversation context, in order: everything
+/// except `Error` entries. A conversation summary's `covered_through` counts
+/// positions in this list, so it lines up with [`entries_to_context`]'s output
+/// one for one.
+pub fn context_visible(entries: &[LogEntry]) -> Vec<&LogEntry> {
+    entries.iter().filter(|entry| entry.role != LogRole::Error).collect()
+}
+
 /// Converts persisted log entries into the `Message` list
 /// `prompt::assemble_messages` expects as history, excluding `Error`
 /// entries.
 pub fn entries_to_context(entries: &[LogEntry]) -> Vec<Message> {
-    entries
-        .iter()
-        .filter_map(|entry| match entry.role {
-            LogRole::User => Some(Message::user(entry.content.clone())),
-            LogRole::Assistant => Some(Message::assistant(entry.content.clone())),
-            LogRole::Error => None,
+    context_visible(entries)
+        .into_iter()
+        .map(|entry| match entry.role {
+            LogRole::User => Message::user(entry.content.clone()),
+            LogRole::Assistant => Message::assistant(entry.content.clone()),
+            LogRole::Error => unreachable!("filtered out by context_visible"),
         })
         .collect()
 }

@@ -2,9 +2,26 @@
 //! length" and "Bounded conversation context"), fixed constants rather
 //! than user-configurable settings by deliberate design decision.
 
-/// Maximum number of most-recent conversation turns sent as context on
-/// each request -- not the full session history.
-pub const CONTEXT_WINDOW_TURNS: usize = 20;
+/// How much recent conversation history one request may carry, measured in
+/// estimated tokens (`token_estimate`), not in a count of messages: many short
+/// chat messages fit, one pasted page does not crowd out the rest. The budget
+/// actually used is the smaller of this and [`HISTORY_WINDOW_PERCENT`] of the
+/// active model's context window.
+pub const HISTORY_TOKEN_BUDGET: usize = 3_000;
+
+/// Share of a model's context window that history may use, so history cannot
+/// crowd out the persona, the tool definitions, and the reply on a small
+/// window.
+pub const HISTORY_WINDOW_PERCENT: usize = 40;
+
+/// Older messages that fell outside the budget but are not yet covered by a
+/// conversation summary keep being sent, up to this many extra tokens, so
+/// nothing is missing while a summary is pending.
+pub const HISTORY_UNCOVERED_EXTRA_TOKENS: usize = 1_500;
+
+/// Upper bound on the number of history messages, whatever their size: a
+/// backstop against a flood of tiny messages.
+pub const HISTORY_MAX_MESSAGES: usize = 60;
 
 /// Maximum output tokens requested per reply, across every provider.
 pub const MAX_RESPONSE_TOKENS: u32 = 4096;
