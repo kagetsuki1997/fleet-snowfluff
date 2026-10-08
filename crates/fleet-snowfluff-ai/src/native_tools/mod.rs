@@ -6,6 +6,7 @@
 
 pub mod compact_context;
 pub mod file_tools;
+pub mod memory_tools;
 pub mod run_command;
 pub mod system_context;
 pub mod web_search;

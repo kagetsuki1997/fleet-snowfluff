@@ -286,6 +286,7 @@ impl Default for AiSettings {
             project_root: None,
             claude_code_tool_access: ClaudeCodeToolAccess::default(),
             disclosure_version: CURRENT_DISCLOSURE_VERSION,
+            memory_enabled: true,
         }
     }
 }
@@ -401,7 +402,16 @@ pub struct AiSettings {
     /// profile slot today (mirrors `project_root`'s own reasoning).
     #[serde(default)]
     pub claude_code_tool_access: ClaudeCodeToolAccess,
+    /// Master switch for conversation memory: the remembered-facts block in
+    /// requests, the memory tools, the explicit-remember backstop, and
+    /// extraction at compaction. On by default (also for a config written
+    /// before this field existed). Turning it off leaves saved memories
+    /// untouched; they are used again when it is turned back on.
+    #[serde(default = "default_memory_enabled")]
+    pub memory_enabled: bool,
 }
+
+fn default_memory_enabled() -> bool { true }
 
 /// The one local profile: Ollama running on this machine. It is the only
 /// profile whose requests never leave the machine, which is what the memory and
@@ -472,6 +482,7 @@ fn migrate_legacy_active_provider(obj: &serde_json::Map<String, Value>) -> AiSet
             project_root: None,
             claude_code_tool_access: ClaudeCodeToolAccess::default(),
             disclosure_version: 0,
+            memory_enabled: true,
         };
     };
 
@@ -507,6 +518,7 @@ fn migrate_legacy_active_provider(obj: &serde_json::Map<String, Value>) -> AiSet
         claude_code_tool_access: ClaudeCodeToolAccess::default(),
         // A Stage 1 acknowledgement predates every disclosure revision.
         disclosure_version: 0,
+        memory_enabled: true,
     }
 }
 
@@ -578,6 +590,10 @@ pub fn sanitize(raw: &Value) -> AiSettings {
         .and_then(Value::as_u64)
         .map_or(0, |v| u32::try_from(v).unwrap_or(u32::MAX));
 
+    // Missing, or not a boolean: on, as for a config from before the switch
+    // existed.
+    let memory_enabled = obj.get("memory_enabled").and_then(Value::as_bool).unwrap_or(true);
+
     migrate_disclosures(AiSettings {
         ai_enabled,
         enabled_profiles,
@@ -587,6 +603,7 @@ pub fn sanitize(raw: &Value) -> AiSettings {
         project_root,
         claude_code_tool_access,
         disclosure_version,
+        memory_enabled,
     })
 }
 
@@ -886,6 +903,7 @@ mod tests {
             project_root: Some(PathBuf::from("/home/user/my-project")),
             claude_code_tool_access: ClaudeCodeToolAccess::default(),
             disclosure_version: CURRENT_DISCLOSURE_VERSION,
+            memory_enabled: false,
         };
 
         let json_str = to_json_string(&settings);
@@ -1192,5 +1210,16 @@ mod tests {
             loaded.acknowledged_disclosures
         );
         assert_eq!(loaded.disclosure_version, CURRENT_DISCLOSURE_VERSION);
+    }
+
+    #[test]
+    fn memory_is_on_by_default_and_for_a_config_without_the_field() {
+        assert!(AiSettings::default().memory_enabled);
+        assert!(load_from_str(r#"{"ai_enabled": true}"#).memory_enabled);
+        assert!(!load_from_str(r#"{"memory_enabled": false}"#).memory_enabled);
+        assert!(
+            load_from_str(r#"{"memory_enabled": "no"}"#).memory_enabled,
+            "junk reads as the default"
+        );
     }
 }

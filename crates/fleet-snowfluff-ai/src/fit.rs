@@ -90,35 +90,50 @@ pub struct Fit {
     pub shed: Vec<Shed>,
 }
 
-/// Splits a leading `open ... close` block off `content`. `None` unless the
-/// block is at the very start, which is where every feature that adds one puts
-/// it, so text a user typed that happens to contain the tag is never taken for
-/// a block.
+/// Splits a leading `open ... close` block off `content`, returning what
+/// precedes it (other recognised blocks only), the block, and the rest. `None`
+/// unless the block is at the very start or behind other recognised blocks,
+/// which is where every feature that adds one puts it, so text a user typed
+/// that happens to contain the tag is never taken for a block.
 fn split_leading_block<'a>(
     content: &'a str,
     (open, close): (&str, &str),
-) -> Option<(&'a str, &'a str)> {
-    if !content.starts_with(open) {
-        return None;
+) -> Option<(&'a str, &'a str, &'a str)> {
+    let mut offset = 0;
+    loop {
+        let here = &content[offset..];
+        if here.starts_with(open) {
+            let end = offset + here.find(close)? + close.len();
+            return Some((
+                &content[..offset],
+                &content[offset..end],
+                content[end..].trim_start_matches('\n'),
+            ));
+        }
+        let other = [SUMMARY_TAG, MEMORY_TAG].into_iter().find(|tag| here.starts_with(tag.0))?;
+        offset += here.find(other.1)? + other.1.len();
+        offset += content[offset..].len() - content[offset..].trim_start_matches('\n').len();
     }
-    let end = content.find(close)? + close.len();
-    Some((&content[..end], content[end..].trim_start_matches('\n')))
 }
 
 fn strip_leading_block(content: &str, tag: (&str, &str)) -> Option<String> {
-    split_leading_block(content, tag).map(|(_, rest)| rest.to_string())
+    split_leading_block(content, tag).map(|(before, _, rest)| format!("{before}{rest}"))
 }
 
 /// Removes the `<section>...</section>` part inside the memory block, leaving
 /// the rest of it. When nothing is left inside the block, the whole block goes.
 fn strip_memory_section(content: &str, section: (&str, &str)) -> Option<String> {
-    let (block, rest) = split_leading_block(content, MEMORY_TAG)?;
+    let (before, block, rest) = split_leading_block(content, MEMORY_TAG)?;
     let start = block.find(section.0)?;
     let end = block.find(section.1)? + section.1.len();
     let trimmed = format!("{}{}", &block[..start], block[end..].trim_start_matches('\n'));
     // Keep the block only while a section remains inside it.
     let has_other_section = trimmed.contains(DIGEST_TAG.0) || trimmed.contains(MATCHES_TAG.0);
-    Some(if has_other_section { format!("{trimmed}\n\n{rest}") } else { rest.to_string() })
+    Some(if has_other_section {
+        format!("{before}{trimmed}\n\n{rest}")
+    } else {
+        format!("{before}{rest}")
+    })
 }
 
 fn map_first_user_with<F>(messages: &mut [Message], from: usize, mut change: F) -> bool
@@ -174,10 +189,11 @@ fn drop_oldest_history(messages: &mut Vec<Message>, history_start: usize) -> usi
         let removed = messages.remove(history_start);
         dropped += 1;
         let mut content = removed.content.as_str();
-        while let Some((block, rest)) = split_leading_block(content, SUMMARY_TAG)
+        while let Some((before, block, rest)) = split_leading_block(content, SUMMARY_TAG)
             .or_else(|| split_leading_block(content, MEMORY_TAG))
         {
             carried.push(block.to_string());
+            carried.extend((!before.is_empty()).then(|| before.trim_end().to_string()));
             content = rest;
         }
         let next_is_assistant = messages[history_start].role != Role::User;
@@ -503,5 +519,31 @@ mod tests {
         let original = messages[last].content.clone();
         let fit = fit_request(messages, few_shot_len, &natives(), &[], 3_200, 4096).unwrap();
         assert_eq!(fit.messages.last().unwrap().content, original);
+    }
+
+    #[test]
+    fn a_summary_and_a_memory_block_stacked_on_one_message_both_shed_in_order() {
+        let block = |tag: (&str, &str), body: &str| format!("{}\n{body}\n{}", tag.0, tag.1);
+        let memory = format!(
+            "{}\n{}\n- {}\n{}\n{}",
+            MEMORY_TAG.0,
+            DIGEST_TAG.0,
+            "fact ".repeat(400),
+            DIGEST_TAG.1,
+            MEMORY_TAG.1
+        );
+        let summary = block(SUMMARY_TAG, &"note ".repeat(400));
+        for stacked in [format!("{memory}\n\n{summary}"), format!("{summary}\n\n{memory}")] {
+            let messages =
+                vec![Message::system("persona"), Message::user(format!("{stacked}\n\nlatest"))];
+            let fit = fit_request(messages, 0, &[], &[], 800, 512).unwrap();
+            assert!(
+                fit.shed.contains(&Shed::Summary) && fit.shed.contains(&Shed::Digest),
+                "{:?}",
+                fit.shed
+            );
+            let last = &fit.messages.last().unwrap().content;
+            assert_eq!(last, "latest");
+        }
     }
 }

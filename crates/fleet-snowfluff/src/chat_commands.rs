@@ -35,7 +35,7 @@ use crate::{
     chat_pause, chat_window, cli_workdir, compaction_runtime, execution_log_store,
     execution_recorder::ExecutionRecorder,
     manager::PetManager,
-    persona_store,
+    memory_runtime, persona_store,
     session_domain::{CliSessionEntry, ConversationId, ExecutionId, ExternalSessionRef},
     status_bubble, task_router_rules_store,
 };
@@ -49,6 +49,15 @@ fn context_manager() -> AemeathContextManager {
         Box::new(execution_log_store::ExecutionLogStore),
     )
     .with_summary_store(Box::new(fleet_snowfluff_ai::FileSummaryStore))
+}
+
+/// [`context_manager`] that also brings remembered facts into the request,
+/// unless memory is off.
+fn context_manager_with_memory(app: &AppHandle) -> AemeathContextManager {
+    match memory_runtime::service_if_enabled(app) {
+        Some(service) => context_manager().with_memory(service),
+        None => context_manager(),
+    }
 }
 
 pub struct PendingGeneration {
@@ -581,14 +590,28 @@ pub async fn send_chat_message(
     // local attempt's own message list does. Built before the user
     // entry is appended below, since `build_context` reads the log
     // itself and appends `message` on its own.
-    let default_messages = context_manager()
-        .build_context(&fleet_snowfluff_ai::ContextRequest::new(
-            &session_path,
-            &persona,
-            language,
-            &message,
-        ))
-        .await;
+    let memory_on = memory_runtime::is_enabled(&app);
+    let build = |audience: fleet_snowfluff_ai::memory::Audience| {
+        let manager = context_manager_with_memory(&app);
+        let (session_path, persona, message) = (&session_path, &persona, &message);
+        async move {
+            let mut request =
+                fleet_snowfluff_ai::ContextRequest::new(session_path, persona, language, message);
+            request.memory_audience = memory_on.then_some(audience);
+            manager.build_context(&request).await
+        }
+    };
+    let default_audience = memory_runtime::audience_for(default_profile.key());
+    let default_messages = build(default_audience).await;
+    // The local attempt of mixed mode is its own request with its own audience: if
+    // the default profile is a cloud one, an escalated request must not carry
+    // what only the local model may see.
+    let local_attempt_messages =
+        if routed_to_local && default_audience != fleet_snowfluff_ai::memory::Audience::Local {
+            Some(build(fleet_snowfluff_ai::memory::Audience::Local).await)
+        } else {
+            None
+        };
 
     // Appended immediately -- part of history regardless of what
     // happens to the reply.
@@ -616,8 +639,10 @@ pub async fn send_chat_message(
         // ever resolves to `local_profile_key` when `local_profile` was
         // itself `Some` (see `DefaultTaskRouter::route`).
         let local_profile = local_profile.expect("routed to local profile, but none is enabled");
-        let local_messages =
-            with_task_router_rules(default_messages.clone(), &task_router_rules_store::load(&app));
+        let local_messages = with_task_router_rules(
+            local_attempt_messages.unwrap_or_else(|| default_messages.clone()),
+            &task_router_rules_store::load(&app),
+        );
         let fallback = FallbackAttempt {
             profile: default_profile,
             messages: default_messages,
@@ -943,6 +968,7 @@ async fn stream_to_completion(
     );
     let final_text = partial_text.lock().unwrap().clone();
     context_manager().record_execution(&turn.session_path, &final_text).await;
+    memory_runtime::reply_done(&app, &turn.session_path, false);
     channel.send(ChatEvent::Done { content: final_text }).ok();
     clear_pending(&app);
     mark_unread_unless_focused(&app, UnreadKind::Reply);
@@ -1049,10 +1075,17 @@ async fn prepare_tool_request(
 /// The tools the top-level agent gets: the native set plus `compact_context`,
 /// placed just before `connect_mcp_server` (which stays last, so the
 /// `search_tools` insertion below keeps working).
-fn top_level_tools(compact_context: Arc<dyn Tool>, spill_dir: Option<&Path>) -> Vec<Arc<dyn Tool>> {
+fn top_level_tools(
+    compact_context: Arc<dyn Tool>,
+    memory_tools: Vec<Arc<dyn Tool>>,
+    spill_dir: Option<&Path>,
+) -> Vec<Arc<dyn Tool>> {
     let mut tools = native_tool_list(spill_dir);
     let before_connect = tools.len() - 1;
     tools.insert(before_connect, compact_context);
+    for (offset, tool) in memory_tools.into_iter().enumerate() {
+        tools.insert(before_connect + 1 + offset, tool);
+    }
     tools
 }
 
@@ -1067,9 +1100,14 @@ fn top_level_tools(compact_context: Arc<dyn Tool>, spill_dir: Option<&Path>) -> 
 /// weight in the model's own tool list. `web_search`/
 /// `get_system_context` are always `Auto` regardless, so they're
 /// offered unconditionally.
-fn mix_local_tool_registry(project_root: Option<&Path>, spill_dir: Option<&Path>) -> ToolRegistry {
+fn mix_local_tool_registry(
+    project_root: Option<&Path>,
+    spill_dir: Option<&Path>,
+    memory_read_tools: Vec<Arc<dyn Tool>>,
+) -> ToolRegistry {
     let mut tools: Vec<Arc<dyn Tool>> =
         vec![Arc::new(WebSearchTool::default()), Arc::new(GetSystemContextTool)];
+    tools.extend(memory_read_tools);
     if project_root.is_some() {
         tools.push(Arc::new(read_file_tool(spill_dir)));
         tools.push(Arc::new(ListDirectoryTool));
@@ -1131,7 +1169,11 @@ async fn run_generation_with_tools(
     ));
     let spill_dir = tool_output_dir(&app);
     let registry = if mcp_tools.is_empty() {
-        ToolRegistry::new(top_level_tools(compact_context.clone(), spill_dir.as_deref()))
+        ToolRegistry::new(top_level_tools(
+            compact_context.clone(),
+            memory_runtime::top_level_tools(&app, profile_key),
+            spill_dir.as_deref(),
+        ))
     } else {
         let lazy_summaries = mcp_tools
             .iter()
@@ -1140,7 +1182,11 @@ async fn run_generation_with_tools(
                 (definition.name, definition.description)
             })
             .collect();
-        let mut eager = top_level_tools(compact_context.clone(), spill_dir.as_deref());
+        let mut eager = top_level_tools(
+            compact_context.clone(),
+            memory_runtime::top_level_tools(&app, profile_key),
+            spill_dir.as_deref(),
+        );
         // Inserted right before `connect_mcp_server` (always last in
         // `native_tool_list()`), not appended after it: some models
         // show a real position bias toward earlier-listed tools, and
@@ -1246,6 +1292,7 @@ async fn run_generation_with_tools(
                 );
             }
             context_manager().record_execution(&turn.session_path, &final_text).await;
+            memory_runtime::reply_done(&app, &turn.session_path, saved_a_memory(&outcome.trace));
             channel.send(ChatEvent::Done { content: final_text }).ok();
             clear_pending(&app);
             mark_unread_unless_focused(&app, UnreadKind::Reply);
@@ -1438,7 +1485,11 @@ async fn run_generation_mix_local(
         ),
     };
     let spill_dir = tool_output_dir(&app);
-    let registry = mix_local_tool_registry(fallback.project_root.as_deref(), spill_dir.as_deref());
+    let registry = mix_local_tool_registry(
+        fallback.project_root.as_deref(),
+        spill_dir.as_deref(),
+        memory_runtime::local_read_tools(&app),
+    );
     let ctx = ToolContext {
         project_root: fallback.project_root.clone(),
         conversation_id: conversation_id.clone(),
@@ -1559,6 +1610,7 @@ async fn run_generation_mix_local(
             recorder.mark_completed(None, None, Vec::new());
             let final_text = partial_text.lock().unwrap().clone();
             context_manager().record_execution(&session_path, &final_text).await;
+            memory_runtime::reply_done(&app, &session_path, false);
             channel.send(ChatEvent::Done { content: final_text }).ok();
             clear_pending(&app);
             mark_unread_unless_focused(&app, UnreadKind::Reply);
@@ -1696,9 +1748,11 @@ async fn run_generation_mix_local(
     match result {
         Ok(outcome) => {
             trace.extend(outcome.trace);
+            let tool_saved = saved_a_memory(&trace);
             recorder.mark_completed(None, None, trace);
             let final_text = partial_text.lock().unwrap().clone();
             context_manager().record_execution(&session_path, &final_text).await;
+            memory_runtime::reply_done(&app, &session_path, tool_saved);
             channel.send(ChatEvent::Done { content: final_text }).ok();
             clear_pending(&app);
             mark_unread_unless_focused(&app, UnreadKind::Reply);
@@ -1708,6 +1762,15 @@ async fn run_generation_mix_local(
             finish_with_error(&app, &session_path, &channel, &err.to_string());
         }
     }
+}
+
+/// Whether the assistant already saved a memory with its own tool call this
+/// turn.
+fn saved_a_memory(trace: &[fleet_snowfluff_ai::ToolInvocation]) -> bool {
+    trace.iter().any(|call| {
+        call.name == fleet_snowfluff_ai::memory::tools::MEMORY_REMEMBER_TOOL_NAME
+            && matches!(call.outcome, fleet_snowfluff_ai::ToolOutcome::Executed { ok: true })
+    })
 }
 
 fn finish_with_error(
@@ -2224,27 +2287,69 @@ mod tests {
 
     #[test]
     fn the_top_level_agent_gets_compact_context_and_connect_mcp_server_stays_last() {
-        let tools = top_level_tools(compact_context_tool(), None);
+        let tools = top_level_tools(compact_context_tool(), vec![], None);
         let names: Vec<String> = tools.iter().map(|t| t.definition().name).collect();
         assert!(names.contains(&"compact_context".to_string()));
         assert_eq!(names.last().map(String::as_str), Some("connect_mcp_server"));
         assert_eq!(names.len(), 8);
     }
 
+    fn memory_service() -> Arc<dyn fleet_snowfluff_ai::memory::MemoryService> {
+        Arc::new(fleet_snowfluff_ai::memory::fake::InMemoryMemory::new())
+    }
+
+    #[test]
+    fn the_top_level_agent_gets_all_four_memory_tools_and_connect_mcp_server_stays_last() {
+        let memory = fleet_snowfluff_ai::memory::tools::all_tools(
+            memory_service(),
+            fleet_snowfluff_ai::memory::Audience::Cloud,
+            None,
+        );
+        let tools = top_level_tools(compact_context_tool(), memory, None);
+        let names: Vec<String> = tools.iter().map(|t| t.definition().name).collect();
+        for name in ["memory_search", "memory_get", "memory_remember", "memory_forget"] {
+            assert!(names.contains(&name.to_string()), "{name}");
+        }
+        assert_eq!(names.last().map(String::as_str), Some("connect_mcp_server"));
+        assert_eq!(names.len(), 12);
+        let registry = ToolRegistry::new(tools);
+        let child: Vec<String> =
+            registry.for_child().eager_definitions().into_iter().map(|d| d.name).collect();
+        assert!(
+            child.contains(&"memory_search".to_string())
+                && child.contains(&"memory_get".to_string())
+        );
+        assert!(!child.contains(&"memory_remember".to_string()));
+        assert!(!child.contains(&"memory_forget".to_string()));
+    }
+
+    #[test]
+    fn the_mixed_mode_local_attempt_gets_only_the_two_read_memory_tools() {
+        let read = fleet_snowfluff_ai::memory::tools::read_tools(
+            memory_service(),
+            fleet_snowfluff_ai::memory::Audience::Local,
+        );
+        let registry = mix_local_tool_registry(None, None, read);
+        assert!(registry.find("memory_search").is_some());
+        assert!(registry.find("memory_get").is_some());
+        assert!(registry.find("memory_remember").is_none());
+        assert!(registry.find("memory_forget").is_none());
+    }
+
     #[test]
     fn a_delegated_sub_task_and_the_mixed_mode_local_attempt_never_get_compact_context() {
-        let top_level = ToolRegistry::new(top_level_tools(compact_context_tool(), None));
+        let top_level = ToolRegistry::new(top_level_tools(compact_context_tool(), vec![], None));
         assert!(top_level.find("compact_context").is_some());
         assert!(top_level.for_child().find("compact_context").is_none());
-        assert!(mix_local_tool_registry(Some(Path::new("/p")), None)
+        assert!(mix_local_tool_registry(Some(Path::new("/p")), None, vec![])
             .find("compact_context")
             .is_none());
-        assert!(mix_local_tool_registry(None, None).find("compact_context").is_none());
+        assert!(mix_local_tool_registry(None, None, vec![]).find("compact_context").is_none());
     }
 
     #[test]
     fn mix_local_tool_registry_excludes_filesystem_tools_without_a_project_root() {
-        let registry = mix_local_tool_registry(None, None);
+        let registry = mix_local_tool_registry(None, None, vec![]);
         let names: Vec<String> = registry.definitions().into_iter().map(|d| d.name).collect();
         assert_eq!(names.len(), 2);
         assert!(names.contains(&"web_search".to_string()));
@@ -2261,7 +2366,7 @@ mod tests {
 
     #[test]
     fn mix_local_tool_registry_includes_filesystem_tools_with_a_project_root() {
-        let registry = mix_local_tool_registry(Some(Path::new("/some/project")), None);
+        let registry = mix_local_tool_registry(Some(Path::new("/some/project")), None, vec![]);
         let names: Vec<String> = registry.definitions().into_iter().map(|d| d.name).collect();
         assert_eq!(names.len(), 4);
         assert!(registry.find("read_file").is_some());
@@ -2387,7 +2492,7 @@ mod tests {
     #[test]
     fn an_in_root_read_file_call_classifies_as_auto() {
         let (root, file) = project_root_with_a_file("in-root");
-        let registry = mix_local_tool_registry(Some(&root), None);
+        let registry = mix_local_tool_registry(Some(&root), None, vec![]);
         let ctx = ToolContext {
             project_root: Some(root.clone()),
             conversation_id: conversation(&root.join("session.jsonl")),
@@ -2405,7 +2510,7 @@ mod tests {
     #[test]
     fn an_out_of_root_read_file_call_classifies_as_confirm() {
         let (root, _file) = project_root_with_a_file("out-of-root");
-        let registry = mix_local_tool_registry(Some(&root), None);
+        let registry = mix_local_tool_registry(Some(&root), None, vec![]);
         let ctx = ToolContext {
             project_root: Some(root.clone()),
             conversation_id: conversation(&root.join("session.jsonl")),
@@ -2422,7 +2527,7 @@ mod tests {
 
     #[test]
     fn an_unknown_tool_name_classifies_as_deny_with_no_tool() {
-        let registry = mix_local_tool_registry(None, None);
+        let registry = mix_local_tool_registry(None, None, vec![]);
         let ctx = ToolContext {
             project_root: None,
             conversation_id: conversation(Path::new("/project/session.jsonl")),

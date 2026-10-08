@@ -24,6 +24,7 @@ pub mod fit;
 pub mod limits;
 pub mod log;
 pub mod mcp;
+pub mod memory;
 pub mod message;
 pub mod native_tools;
 pub mod persona;

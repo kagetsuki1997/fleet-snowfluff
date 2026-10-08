@@ -15,6 +15,7 @@ futures-core = { workspace = true }
 futures-util = { workspace = true }
 log          = { workspace = true }
 rand         = { workspace = true }
+rusqlite     = { workspace = true }
 reqwest      = { workspace = true }
 serde        = { workspace = true }
 serde-saphyr = { workspace = true }

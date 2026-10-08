@@ -575,6 +575,7 @@ mod tests {
             project_root: None,
             claude_code_tool_access: Default::default(),
             disclosure_version: fleet_snowfluff_ai::settings::CURRENT_DISCLOSURE_VERSION,
+            memory_enabled: true,
         }
     }
 
@@ -591,6 +592,7 @@ mod tests {
             project_root: None,
             claude_code_tool_access: Default::default(),
             disclosure_version: fleet_snowfluff_ai::settings::CURRENT_DISCLOSURE_VERSION,
+            memory_enabled: true,
         }
     }
 

@@ -15,6 +15,7 @@ pub mod execution_recorder;
 pub mod mcp_commands;
 pub mod mcp_connection;
 pub mod mcp_servers_store;
+pub mod memory_runtime;
 pub mod persona_store;
 pub mod secrets_store;
 pub mod session_domain;
@@ -233,6 +234,7 @@ pub fn run() {
             app.manage(tool_confirmation::ToolConfirmationState::default());
             app.manage(mcp_connection::McpConnectionState::default());
             app.manage(mcp_connection::PendingOAuthState::default());
+            memory_runtime::start(app.handle());
             compaction_runtime::start(app.handle());
             app.manage(Mutex::<Option<tauri_plugin_updater::Update>>::new(None));
             tray::build(&app_handle)?;
