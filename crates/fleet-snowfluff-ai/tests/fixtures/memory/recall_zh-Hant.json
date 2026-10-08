@@ -1,0 +1,481 @@
+{
+ "language": "zh-Hant",
+ "memories": [
+  {
+   "id": "m1",
+   "text": "喜歡喝無糖綠茶",
+   "tags": [
+    "green tea",
+    "tea"
+   ]
+  },
+  {
+   "id": "m2",
+   "text": "養了一隻叫麻糬的貓",
+   "tags": [
+    "cat",
+    "pet",
+    "mochi"
+   ]
+  },
+  {
+   "id": "m3",
+   "text": "工作是軟體工程師",
+   "tags": [
+    "job",
+    "software engineer"
+   ]
+  },
+  {
+   "id": "m4",
+   "text": "住在台中",
+   "tags": [
+    "home",
+    "taichung"
+   ]
+  },
+  {
+   "id": "m5",
+   "text": "對花生過敏",
+   "tags": [
+    "allergy",
+    "peanuts"
+   ]
+  },
+  {
+   "id": "m6",
+   "text": "生日是三月十四日",
+   "tags": [
+    "birthday"
+   ]
+  },
+  {
+   "id": "m7",
+   "text": "下個月要考 TOEIC 多益",
+   "tags": [
+    "exam",
+    "toeic"
+   ]
+  },
+  {
+   "id": "m8",
+   "text": "週末會彈吉他",
+   "tags": [
+    "guitar",
+    "music"
+   ]
+  },
+  {
+   "id": "m9",
+   "text": "不喜歡吃香菜",
+   "tags": [
+    "cilantro",
+    "food dislike"
+   ]
+  },
+  {
+   "id": "m10",
+   "text": "通勤都騎腳踏車",
+   "tags": [
+    "bike",
+    "commute"
+   ]
+  },
+  {
+   "id": "m11",
+   "text": "最愛的遊戲是 Zelda",
+   "tags": [
+    "zelda",
+    "game"
+   ]
+  },
+  {
+   "id": "m12",
+   "text": "正在學日文",
+   "tags": [
+    "japanese",
+    "language"
+   ]
+  },
+  {
+   "id": "m13",
+   "text": "姊姊六月要結婚",
+   "tags": [
+    "sister",
+    "wedding"
+   ]
+  },
+  {
+   "id": "m14",
+   "text": "常常熬夜到凌晨兩點才睡",
+   "tags": [
+    "sleep",
+    "late night"
+   ]
+  },
+  {
+   "id": "m15",
+   "text": "很怕打雷閃電",
+   "tags": [
+    "thunder",
+    "fear"
+   ]
+  },
+  {
+   "id": "m16",
+   "text": "上個月剛搬家",
+   "tags": [
+    "moving",
+    "apartment"
+   ]
+  },
+  {
+   "id": "m17",
+   "text": "最喜歡吃拉麵",
+   "tags": [
+    "ramen",
+    "food"
+   ]
+  },
+  {
+   "id": "m18",
+   "text": "每天早上跑五公里",
+   "tags": [
+    "running",
+    "exercise"
+   ]
+  },
+  {
+   "id": "m19",
+   "text": "工作用的是 MacBook",
+   "tags": [
+    "macbook",
+    "laptop"
+   ]
+  },
+  {
+   "id": "m20",
+   "text": "偏好深色模式",
+   "tags": [
+    "dark mode",
+    "settings"
+   ]
+  },
+  {
+   "id": "m21",
+   "text": "爸媽住在台南",
+   "tags": [
+    "parents",
+    "tainan"
+   ]
+  },
+  {
+   "id": "m22",
+   "text": "打算秋天去京都旅行",
+   "tags": [
+    "trip",
+    "kyoto"
+   ]
+  },
+  {
+   "id": "m23",
+   "text": "在看一本推理小說",
+   "tags": [
+    "novel",
+    "reading"
+   ]
+  },
+  {
+   "id": "m24",
+   "text": "只有早上才喝咖啡",
+   "tags": [
+    "coffee",
+    "morning"
+   ]
+  },
+  {
+   "id": "m25",
+   "text": "想學游泳",
+   "tags": [
+    "swimming",
+    "learn"
+   ]
+  },
+  {
+   "id": "m26",
+   "text": "星期五要做簡報",
+   "tags": [
+    "presentation",
+    "work"
+   ]
+  },
+  {
+   "id": "m27",
+   "text": "下週二要去看牙醫",
+   "tags": [
+    "dentist",
+    "appointment"
+   ]
+  },
+  {
+   "id": "m28",
+   "text": "不敢吃辣",
+   "tags": [
+    "spicy",
+    "food dislike"
+   ]
+  },
+  {
+   "id": "m29",
+   "text": "收集明信片",
+   "tags": [
+    "postcards",
+    "collection"
+   ]
+  },
+  {
+   "id": "m30",
+   "text": "專案死線快到了壓力很大",
+   "tags": [
+    "stress",
+    "deadline"
+   ]
+  }
+ ],
+ "queries": [
+  {
+   "id": "q1",
+   "text": "今天想喝綠茶",
+   "expect": [
+    "m1"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q2",
+   "text": "麻糬今天都不吃飯",
+   "expect": [
+    "m2"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q3",
+   "text": "你還記得我的工作是什麼嗎",
+   "expect": [
+    "m3"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q4",
+   "text": "這家餐廳有花生耶",
+   "expect": [
+    "m5"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q5",
+   "text": "我的生日快到了",
+   "expect": [
+    "m6"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q6",
+   "text": "週末想去彈吉他",
+   "expect": [
+    "m8"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q7",
+   "text": "這道菜有香菜",
+   "expect": [
+    "m9"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q8",
+   "text": "明天騎腳踏車去上班",
+   "expect": [
+    "m10"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q9",
+   "text": "日文的敬語好難",
+   "expect": [
+    "m12"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q10",
+   "text": "姊姊的婚禮要準備什麼",
+   "expect": [
+    "m13"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q11",
+   "text": "搬家後還沒整理完",
+   "expect": [
+    "m16"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q12",
+   "text": "午餐吃拉麵好嗎",
+   "expect": [
+    "m17"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q13",
+   "text": "今天早上去跑步",
+   "expect": [
+    "m18"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q14",
+   "text": "要不要回台南看爸媽",
+   "expect": [
+    "m21"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q15",
+   "text": "早上來杯咖啡",
+   "expect": [
+    "m24"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q16",
+   "text": "這個太辣了我吃不了",
+   "expect": [
+    "m28"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q17",
+   "text": "新的 MacBook 好貴",
+   "expect": [
+    "m19"
+   ],
+   "kind": "latin_in_cjk"
+  },
+  {
+   "id": "q18",
+   "text": "Zelda 出新作了",
+   "expect": [
+    "m11"
+   ],
+   "kind": "latin_in_cjk"
+  },
+  {
+   "id": "q19",
+   "text": "TOEIC 要怎麼準備",
+   "expect": [
+    "m7"
+   ],
+   "kind": "latin_in_cjk"
+  },
+  {
+   "id": "q20",
+   "text": "貓",
+   "expect": [
+    "m2"
+   ],
+   "kind": "one_char"
+  },
+  {
+   "id": "q21",
+   "text": "茶",
+   "expect": [
+    "m1"
+   ],
+   "kind": "one_char"
+  },
+  {
+   "id": "q22",
+   "text": "kyoto trip planning",
+   "expect": [
+    "m22"
+   ],
+   "kind": "english_tag"
+  },
+  {
+   "id": "q23",
+   "text": "dentist",
+   "expect": [
+    "m27"
+   ],
+   "kind": "english_tag"
+  },
+  {
+   "id": "q24",
+   "text": "novel",
+   "expect": [
+    "m23"
+   ],
+   "kind": "english_tag"
+  },
+  {
+   "id": "q25",
+   "text": "外面一直響雷好吵",
+   "expect": [
+    "m15"
+   ],
+   "kind": "paraphrase"
+  },
+  {
+   "id": "q26",
+   "text": "螢幕亮度好刺眼",
+   "expect": [
+    "m20"
+   ],
+   "kind": "paraphrase"
+  },
+  {
+   "id": "q27",
+   "text": "旅行帶回來的小東西",
+   "expect": [
+    "m29"
+   ],
+   "kind": "paraphrase"
+  },
+  {
+   "id": "q28",
+   "text": "今天天氣怎麼樣",
+   "expect": [],
+   "kind": "negative"
+  },
+  {
+   "id": "q29",
+   "text": "你會唱歌嗎",
+   "expect": [],
+   "kind": "negative"
+  },
+  {
+   "id": "q30",
+   "text": "說個笑話給我聽",
+   "expect": [],
+   "kind": "negative"
+  }
+ ]
+}

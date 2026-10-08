@@ -1,0 +1,481 @@
+{
+ "language": "ja",
+ "memories": [
+  {
+   "id": "m1",
+   "text": "無糖の緑茶が好き",
+   "tags": [
+    "green tea",
+    "tea"
+   ]
+  },
+  {
+   "id": "m2",
+   "text": "モチという名前の猫を飼っている",
+   "tags": [
+    "cat",
+    "pet",
+    "mochi"
+   ]
+  },
+  {
+   "id": "m3",
+   "text": "ソフトウェアエンジニアとして働いている",
+   "tags": [
+    "job",
+    "software engineer"
+   ]
+  },
+  {
+   "id": "m4",
+   "text": "台中に住んでいる",
+   "tags": [
+    "home",
+    "taichung"
+   ]
+  },
+  {
+   "id": "m5",
+   "text": "ピーナッツアレルギーがある",
+   "tags": [
+    "allergy",
+    "peanuts"
+   ]
+  },
+  {
+   "id": "m6",
+   "text": "誕生日は三月十四日",
+   "tags": [
+    "birthday"
+   ]
+  },
+  {
+   "id": "m7",
+   "text": "来月TOEICを受ける",
+   "tags": [
+    "exam",
+    "toeic"
+   ]
+  },
+  {
+   "id": "m8",
+   "text": "週末はギターを弾く",
+   "tags": [
+    "guitar",
+    "music"
+   ]
+  },
+  {
+   "id": "m9",
+   "text": "パクチーが苦手",
+   "tags": [
+    "cilantro",
+    "food dislike"
+   ]
+  },
+  {
+   "id": "m10",
+   "text": "自転車で通勤している",
+   "tags": [
+    "bike",
+    "commute"
+   ]
+  },
+  {
+   "id": "m11",
+   "text": "一番好きなゲームはZelda",
+   "tags": [
+    "zelda",
+    "game"
+   ]
+  },
+  {
+   "id": "m12",
+   "text": "日本語の敬語を勉強中",
+   "tags": [
+    "japanese",
+    "language"
+   ]
+  },
+  {
+   "id": "m13",
+   "text": "姉が六月に結婚する",
+   "tags": [
+    "sister",
+    "wedding"
+   ]
+  },
+  {
+   "id": "m14",
+   "text": "夜更かしして午前二時ごろ寝ることが多い",
+   "tags": [
+    "sleep",
+    "late night"
+   ]
+  },
+  {
+   "id": "m15",
+   "text": "雷が怖い",
+   "tags": [
+    "thunder",
+    "fear"
+   ]
+  },
+  {
+   "id": "m16",
+   "text": "先月引っ越した",
+   "tags": [
+    "moving",
+    "apartment"
+   ]
+  },
+  {
+   "id": "m17",
+   "text": "一番好きな食べ物はラーメン",
+   "tags": [
+    "ramen",
+    "food"
+   ]
+  },
+  {
+   "id": "m18",
+   "text": "毎朝五キロ走っている",
+   "tags": [
+    "running",
+    "exercise"
+   ]
+  },
+  {
+   "id": "m19",
+   "text": "仕事ではMacBookを使っている",
+   "tags": [
+    "macbook",
+    "laptop"
+   ]
+  },
+  {
+   "id": "m20",
+   "text": "ダークモードが好み",
+   "tags": [
+    "dark mode",
+    "settings"
+   ]
+  },
+  {
+   "id": "m21",
+   "text": "両親は台南に住んでいる",
+   "tags": [
+    "parents",
+    "tainan"
+   ]
+  },
+  {
+   "id": "m22",
+   "text": "秋に京都へ旅行する予定",
+   "tags": [
+    "trip",
+    "kyoto"
+   ]
+  },
+  {
+   "id": "m23",
+   "text": "推理小説を読んでいる",
+   "tags": [
+    "novel",
+    "reading"
+   ]
+  },
+  {
+   "id": "m24",
+   "text": "コーヒーは朝しか飲まない",
+   "tags": [
+    "coffee",
+    "morning"
+   ]
+  },
+  {
+   "id": "m25",
+   "text": "水泳を習いたい",
+   "tags": [
+    "swimming",
+    "learn"
+   ]
+  },
+  {
+   "id": "m26",
+   "text": "金曜日にプレゼンがある",
+   "tags": [
+    "presentation",
+    "work"
+   ]
+  },
+  {
+   "id": "m27",
+   "text": "来週の火曜日に歯医者の予約がある",
+   "tags": [
+    "dentist",
+    "appointment"
+   ]
+  },
+  {
+   "id": "m28",
+   "text": "辛いものは食べられない",
+   "tags": [
+    "spicy",
+    "food dislike"
+   ]
+  },
+  {
+   "id": "m29",
+   "text": "絵はがきを集めている",
+   "tags": [
+    "postcards",
+    "collection"
+   ]
+  },
+  {
+   "id": "m30",
+   "text": "プロジェクトの締め切りが近くてストレスがたまっている",
+   "tags": [
+    "stress",
+    "deadline"
+   ]
+  }
+ ],
+ "queries": [
+  {
+   "id": "q1",
+   "text": "今日は緑茶が飲みたい",
+   "expect": [
+    "m1"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q2",
+   "text": "モチがごはんを食べない",
+   "expect": [
+    "m2"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q3",
+   "text": "私の仕事を覚えている？",
+   "expect": [
+    "m3"
+   ],
+   "kind": "paraphrase"
+  },
+  {
+   "id": "q4",
+   "text": "この料理にピーナッツが入っている",
+   "expect": [
+    "m5"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q5",
+   "text": "もうすぐ誕生日だ",
+   "expect": [
+    "m6"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q6",
+   "text": "週末にギターを弾きたい",
+   "expect": [
+    "m8"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q7",
+   "text": "これにパクチーが入ってる",
+   "expect": [
+    "m9"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q8",
+   "text": "明日は自転車で出勤する",
+   "expect": [
+    "m10"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q9",
+   "text": "敬語がむずかしい",
+   "expect": [
+    "m12"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q10",
+   "text": "姉の結婚式の準備",
+   "expect": [
+    "m13"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q11",
+   "text": "引っ越しの片付けがまだ終わらない",
+   "expect": [
+    "m16"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q12",
+   "text": "お昼はラーメンにしよう",
+   "expect": [
+    "m17"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q13",
+   "text": "今朝はジョギングに行った",
+   "expect": [
+    "m18"
+   ],
+   "kind": "paraphrase"
+  },
+  {
+   "id": "q14",
+   "text": "実家の両親に会いに行こうかな",
+   "expect": [
+    "m21"
+   ],
+   "kind": "paraphrase"
+  },
+  {
+   "id": "q15",
+   "text": "朝のコーヒーが欲しい",
+   "expect": [
+    "m24"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q16",
+   "text": "これは辛すぎて食べられない",
+   "expect": [
+    "m28"
+   ],
+   "kind": "lexical"
+  },
+  {
+   "id": "q17",
+   "text": "新しいMacBookは高い",
+   "expect": [
+    "m19"
+   ],
+   "kind": "latin_in_cjk"
+  },
+  {
+   "id": "q18",
+   "text": "Zeldaの新作が出た",
+   "expect": [
+    "m11"
+   ],
+   "kind": "latin_in_cjk"
+  },
+  {
+   "id": "q19",
+   "text": "TOEICの勉強法は？",
+   "expect": [
+    "m7"
+   ],
+   "kind": "latin_in_cjk"
+  },
+  {
+   "id": "q20",
+   "text": "猫",
+   "expect": [
+    "m2"
+   ],
+   "kind": "one_char"
+  },
+  {
+   "id": "q21",
+   "text": "雷",
+   "expect": [
+    "m15"
+   ],
+   "kind": "one_char"
+  },
+  {
+   "id": "q22",
+   "text": "kyoto trip planning",
+   "expect": [
+    "m22"
+   ],
+   "kind": "english_tag"
+  },
+  {
+   "id": "q23",
+   "text": "dentist",
+   "expect": [
+    "m27"
+   ],
+   "kind": "english_tag"
+  },
+  {
+   "id": "q24",
+   "text": "novel",
+   "expect": [
+    "m23"
+   ],
+   "kind": "english_tag"
+  },
+  {
+   "id": "q25",
+   "text": "外が暗くてゴロゴロ鳴っている",
+   "expect": [
+    "m15"
+   ],
+   "kind": "paraphrase"
+  },
+  {
+   "id": "q26",
+   "text": "画面がまぶしい",
+   "expect": [
+    "m20"
+   ],
+   "kind": "paraphrase"
+  },
+  {
+   "id": "q27",
+   "text": "旅行のお土産",
+   "expect": [
+    "m29"
+   ],
+   "kind": "paraphrase"
+  },
+  {
+   "id": "q28",
+   "text": "今日の天気はどう",
+   "expect": [],
+   "kind": "negative"
+  },
+  {
+   "id": "q29",
+   "text": "歌える？",
+   "expect": [],
+   "kind": "negative"
+  },
+  {
+   "id": "q30",
+   "text": "冗談を言って",
+   "expect": [],
+   "kind": "negative"
+  }
+ ]
+}

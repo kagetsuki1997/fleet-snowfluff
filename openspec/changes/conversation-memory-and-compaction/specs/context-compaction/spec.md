@@ -66,6 +66,25 @@ The summary SHALL be presented to the model inside a clearly labeled block ident
 - **WHEN** the summary contains text phrased as an instruction
 - **THEN** it appears only inside the labeled background block and is not presented to the model as a system or developer instruction
 
+### Requirement: The summary is in the conversation's language and omits sensitive topics
+
+The summary SHALL be written in the language the user is using in the conversation. Because a summary persists and is sent with later requests, it SHALL NOT retain content about health, medication, money or debt, credentials, sexuality, religion, or politics. The application SHALL instruct the model to leave such content out, and SHALL additionally screen the finished summary with a deterministic check for such topics in every supported language, removing any sentence the check matches, because the model cannot be relied on to follow the instruction.
+
+#### Scenario: A Traditional Chinese conversation gets a Traditional Chinese summary
+
+- **WHEN** the conversation is in Traditional Chinese
+- **THEN** the summary is written in Traditional Chinese, not in English
+
+#### Scenario: A sentence about medication is removed
+
+- **WHEN** the model's summary contains a sentence about the user's medication
+- **THEN** that sentence is absent from the stored summary
+
+#### Scenario: Surrounding content is kept
+
+- **WHEN** a summary contains one sentence the screen removes and other sentences about unrelated topics
+- **THEN** the other sentences remain
+
 ### Requirement: A failed compaction leaves the conversation intact
 
 If producing a summary fails or returns nothing, the application SHALL leave the existing summary and window unchanged, SHALL NOT show the user an error for it, and SHALL still answer the user's message. It SHALL try again at the next trigger.

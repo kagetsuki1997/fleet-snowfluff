@@ -34,7 +34,7 @@ An explicit request to remember something, and a correction of something previou
 
 ### Requirement: Derived memories and sensitive topics
 
-Memories derived at compaction SHALL be usable immediately and SHALL be marked as automatically derived, distinct from those the user asked for. Derivation SHALL NOT produce memories about health, money, credentials, sexuality, religion, or politics; such content SHALL be saved only when the user explicitly asks.
+Memories derived at compaction SHALL be usable immediately and SHALL be marked as automatically derived, distinct from those the user asked for. Derivation SHALL NOT produce memories about health, medication, money or debt, credentials, sexuality, religion, or politics; such content SHALL be saved only when the user explicitly asks. The application SHALL instruct the model accordingly and SHALL also screen every derived candidate with a deterministic check for such topics in every supported language, discarding any candidate it matches, because the model cannot be relied on to follow the instruction.
 
 #### Scenario: A derived memory is labeled
 
@@ -45,6 +45,11 @@ Memories derived at compaction SHALL be usable immediately and SHALL be marked a
 
 - **WHEN** the folded turns discuss the user's health
 - **THEN** no memory about it is derived, and one is saved only if the user explicitly asks the assistant to remember it
+
+#### Scenario: A model that ignores the exclusion is overruled
+
+- **WHEN** the model proposes a candidate about the user's medication despite the instruction
+- **THEN** the candidate is discarded by the screen and no memory is saved for it
 
 ### Requirement: Corrections supersede, deletion erases
 

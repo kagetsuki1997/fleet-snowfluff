@@ -122,8 +122,10 @@ nothing is missing while a summary is pending.
 | Estimated request over ~80% of the real window                                                | Safety net for long agent runs with big tool output.                           |
 | `compact_context(focus)` tool                                                                 | The model asks explicitly, optionally with a focus hint.                       |
 
-The token estimate must handle CJK: ASCII ÷ 4 and one token per non-ASCII character, as
-tact does, erring high. The window size for the safety net comes from the loaded model
+The token estimate uses a per-class rule calibrated on the dev machine's Ollama (letters
+0.25, digits 1.0, punctuation 1.0, whitespace 0.1, non-ASCII 1.0, times 1.15), because tact's
+ASCII ÷ 4 underestimated JSON, logs, and tables by 2 to 4 times; it errs high on every
+sample measured. The window size for the safety net comes from the loaded model
 (Ollama's `/api/ps` reports it as `context_length`, verified; API profiles use a built-in table with a conservative default; CLI-backed profiles do not use this check).
 
 ### 4.1a The persona is never trimmed

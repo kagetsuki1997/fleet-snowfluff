@@ -87,17 +87,17 @@ The first time a (provider, auth method) pair involving a cloud provider (OpenAI
 
 ### Requirement: The persona prompt is never trimmed
 
-Every request SHALL carry the persona's system prompt in full, unshortened, and as the system prompt, never inside a conversation turn. When a request would not fit the active model's context window, the application SHALL reduce other content first, in this order: older history, then the persona's few-shot examples, then the optional tool listings (the stubs for tools not yet loaded). It SHALL also lower the reply allowance on a small window instead of letting the reply overflow it. If the persona prompt, the user's current message, and a minimal reply allowance still do not fit, the application SHALL NOT send the request and SHALL tell the user that the model's context window is too small. For a CLI-backed profile, the persona SHALL be delivered through that CLI's own system-prompt mechanism, so that the CLI's own context management cannot summarize it away.
+Every request SHALL carry the persona's system prompt in full, unshortened, and as the system prompt, never inside a conversation turn. When a request would not fit the active model's context window, the application SHALL reduce other content first, in this order: older history, then the keyword-matched memories, then the conversation summary, then the memory digest, then the persona's few-shot examples, then the optional tool listings (the stubs for tools not yet loaded). It SHALL also lower the reply allowance on a small window instead of letting the reply overflow it. If the persona prompt, the user's current message, and a minimal reply allowance still do not fit, the application SHALL NOT send the request and SHALL tell the user that the model's context window is too small. For a CLI-backed profile, the persona SHALL be delivered through that CLI's own system-prompt mechanism, so that the CLI's own context management cannot summarize it away.
 
 #### Scenario: History shrinks before the persona does
 
 - **WHEN** a small context window cannot hold the persona prompt, the tools, and the usual amount of history
 - **THEN** the history sent is reduced, and the persona prompt in the request is byte-identical to the one that fits comfortably
 
-#### Scenario: Few-shot examples and tool listings go next
+#### Scenario: Memory blocks, few-shot examples, and tool listings go next
 
-- **WHEN** the persona prompt and tool listings still leave no room for history even after it is reduced to nothing
-- **THEN** the persona's few-shot examples are dropped first, then the stub tool listings, and the persona prompt is still sent whole
+- **WHEN** the persona prompt and tool listings still leave no room even after history is reduced to the current message
+- **THEN** the keyword matches, the summary, and the digest are dropped in that order, then the persona's few-shot examples, then the stub tool listings, and the persona prompt is still sent whole
 
 #### Scenario: The reply allowance shrinks on a small window
 
