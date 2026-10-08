@@ -15,6 +15,7 @@ pub mod execution_recorder;
 pub mod mcp_commands;
 pub mod mcp_connection;
 pub mod mcp_servers_store;
+pub mod memory_commands;
 pub mod memory_runtime;
 pub mod persona_store;
 pub mod secrets_store;
@@ -115,6 +116,13 @@ pub fn run() {
             mcp_commands::reauthorize_mcp_server,
             mcp_commands::submit_mcp_oauth_code,
             mcp_commands::set_mcp_tool_enabled,
+            memory_commands::list_memories,
+            memory_commands::list_memory_history,
+            memory_commands::update_memory,
+            memory_commands::delete_memory,
+            memory_commands::erase_all_memories,
+            memory_commands::get_memory_enabled,
+            memory_commands::set_memory_enabled,
         ])
         .setup(|app| {
             // Always on (not just debug builds) -- otherwise a release

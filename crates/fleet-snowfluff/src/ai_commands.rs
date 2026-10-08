@@ -625,6 +625,33 @@ mod tests {
     }
 
     #[test]
+    fn an_acknowledgement_from_before_the_memory_sentence_no_longer_counts_for_any_cloud_pair() {
+        let file = serde_json::json!({
+            "ai_enabled": true,
+            "enabled_profiles": [
+                { "provider": "open_ai", "auth_method": "api_key" },
+                { "provider": "anthropic", "auth_method": "subscription" },
+                { "provider": "ollama", "auth_method": "local" },
+            ],
+            "acknowledged_disclosures": [
+                { "provider": "open_ai", "auth_method": "api_key" },
+                { "provider": "anthropic", "auth_method": "subscription" },
+                { "provider": "ollama", "auth_method": "local" },
+            ],
+            "disclosure_version": 1,
+        });
+        let settings = fleet_snowfluff_ai::settings::load_from_str(&file.to_string());
+        let key = |provider, auth_method| ProfileKey { provider, auth_method };
+        assert!(!disclosure_ok(&settings, Some(key(ProviderKind::OpenAi, AuthMethod::ApiKey))));
+        assert!(!disclosure_ok(
+            &settings,
+            Some(key(ProviderKind::Anthropic, AuthMethod::Subscription))
+        ));
+        assert!(disclosure_ok(&settings, Some(key(ProviderKind::Ollama, AuthMethod::Local))));
+        assert!(disclosure_ok(&settings, Some(key(ProviderKind::Mock, AuthMethod::Local))));
+    }
+
+    #[test]
     fn disclosure_ok_once_acknowledged() {
         let key = ProfileKey { provider: ProviderKind::OpenAi, auth_method: AuthMethod::ApiKey };
         let settings = settings_with_acknowledgements(

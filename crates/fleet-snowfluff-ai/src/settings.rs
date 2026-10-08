@@ -292,18 +292,20 @@ impl Default for AiSettings {
 }
 
 /// Runs once per config, when it was written under an older disclosure
-/// text: drops the OpenAI and Anthropic *API-key* acknowledgements so the
-/// updated disclosure (which now says tool results go to the provider,
-/// and that tool use can make several billed requests) is shown again,
-/// then records the current version so it never runs a second time.
-/// Subscription, Ollama and Mock acknowledgements are untouched -- their
-/// disclosures did not change. Idempotent by construction.
+/// text: drops every OpenAI and Anthropic acknowledgement, API-key and
+/// subscription alike, so the updated disclosure is shown again. Revision 1
+/// added "tool results go to the provider, and tool use can make several
+/// billed requests" for API-key pairs; revision 2 adds "remembered facts and
+/// conversation summaries go to the provider too", which applies to every
+/// cloud pair, subscription-backed ones included. Records the current version
+/// so it never runs a second time. Ollama and Mock acknowledgements are
+/// untouched -- nothing leaves the machine for them. Idempotent by
+/// construction.
 fn migrate_disclosures(mut settings: AiSettings) -> AiSettings {
     if settings.disclosure_version < CURRENT_DISCLOSURE_VERSION {
-        settings.acknowledged_disclosures.retain(|key| {
-            !(matches!(key.provider, ProviderKind::OpenAi | ProviderKind::Anthropic)
-                && key.auth_method == AuthMethod::ApiKey)
-        });
+        settings
+            .acknowledged_disclosures
+            .retain(|key| !matches!(key.provider, ProviderKind::OpenAi | ProviderKind::Anthropic));
         settings.disclosure_version = CURRENT_DISCLOSURE_VERSION;
     }
     settings
@@ -323,9 +325,10 @@ fn is_default_endpoint(base_url: Option<&str>, default: &str) -> bool {
 /// a disclosure changes materially enough that an earlier acknowledgement
 /// should not carry over -- `1` is the revision that added "tool results
 /// are sent to the provider, and tool use can make several billed
-/// requests" to the two API-key disclosures (`api-key-tool-calling`).
+/// requests" to the two API-key disclosures (`api-key-tool-calling`); `2` added
+/// the remembered-facts and summaries sentence to every cloud disclosure.
 /// See [`migrate_disclosures`].
-pub const CURRENT_DISCLOSURE_VERSION: u32 = 1;
+pub const CURRENT_DISCLOSURE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiSettings {
@@ -814,6 +817,7 @@ mod tests {
             ],
             "default_profile": { "provider": "anthropic", "auth_method": "subscription" },
             "acknowledged_disclosures": [{ "provider": "anthropic", "auth_method": "subscription" }],
+            "disclosure_version": CURRENT_DISCLOSURE_VERSION,
         });
         let settings = sanitize(&raw);
         assert_eq!(settings.enabled_profiles.len(), 2);
@@ -1110,22 +1114,29 @@ mod tests {
     }
 
     #[test]
-    fn an_unversioned_config_loses_only_its_api_key_acknowledgements() {
+    fn an_unversioned_config_loses_every_cloud_acknowledgement_subscription_included() {
         let loaded = sanitize(&unversioned_file_with_everything_acknowledged());
+        assert!(
+            loaded.acknowledged_disclosures.is_empty(),
+            "{:?}",
+            loaded.acknowledged_disclosures
+        );
+        assert_eq!(loaded.disclosure_version, CURRENT_DISCLOSURE_VERSION);
+    }
 
-        assert!(!loaded
-            .acknowledged_disclosures
-            .contains(&key(ProviderKind::OpenAi, AuthMethod::ApiKey)));
-        assert!(!loaded
-            .acknowledged_disclosures
-            .contains(&key(ProviderKind::Anthropic, AuthMethod::ApiKey)));
-        // Their disclosures did not change, so these stand.
-        assert!(loaded
-            .acknowledged_disclosures
-            .contains(&key(ProviderKind::OpenAi, AuthMethod::Subscription)));
-        assert!(loaded
-            .acknowledged_disclosures
-            .contains(&key(ProviderKind::Anthropic, AuthMethod::Subscription)));
+    #[test]
+    fn a_config_acknowledged_under_revision_one_is_asked_again_for_every_cloud_pair() {
+        let mut file = unversioned_file_with_everything_acknowledged();
+        file["disclosure_version"] = json!(1);
+        let loaded = sanitize(&file);
+        for pair in [
+            key(ProviderKind::OpenAi, AuthMethod::ApiKey),
+            key(ProviderKind::Anthropic, AuthMethod::ApiKey),
+            key(ProviderKind::OpenAi, AuthMethod::Subscription),
+            key(ProviderKind::Anthropic, AuthMethod::Subscription),
+        ] {
+            assert!(!loaded.acknowledged_disclosures.contains(&pair), "{pair:?}");
+        }
         assert_eq!(loaded.disclosure_version, CURRENT_DISCLOSURE_VERSION);
     }
 
@@ -1192,9 +1203,7 @@ mod tests {
         let mut file = unversioned_file_with_everything_acknowledged();
         file["disclosure_version"] = json!("one");
         let loaded = sanitize(&file);
-        assert!(!loaded
-            .acknowledged_disclosures
-            .contains(&key(ProviderKind::OpenAi, AuthMethod::ApiKey)));
+        assert!(loaded.acknowledged_disclosures.is_empty());
     }
 
     #[test]

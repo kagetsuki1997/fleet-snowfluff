@@ -595,3 +595,28 @@ body.bubble-window #app {
 .ai-mcp-add-row summary {
   cursor: pointer;
 }
+
+/* conversation-memory-and-compaction: the Memory section's rows */
+.ai-memory-text {
+  display: inline-block;
+  max-width: 60%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
+.ai-memory-badge {
+  display: inline-block;
+  margin-left: 0.25rem;
+  padding: 0 0.4rem;
+  border: 1px solid currentColor;
+  border-radius: 0.6rem;
+  font-size: 0.7rem;
+  opacity: 0.75;
+}
+.ai-memory-badge-auto {
+  opacity: 1;
+}
+.ai-memory-row textarea {
+  width: 100%;
+}

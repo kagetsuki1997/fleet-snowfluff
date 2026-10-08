@@ -49,10 +49,10 @@
 
 ## 4. Settings UI and disclosure
 
-- [ ] 4.1 Add Tauri commands for the Memory section (list with search, edit, pin, mark sensitive, delete, history, erase-all, set enabled) and a change event so an open list refreshes. Verify the command logic with tests against the fake store.
-- [ ] 4.2 Build the Memory section in the AI tab: list with search, told/auto badge, edit, pin, sensitive toggle, delete, superseded history, empty state, the on/off switch, and erase-all with confirmation. Verify by running the app and exercising the golden path and edge cases (empty list, long text, delete during search, switch off and on).
-- [ ] 4.3 Add every new string to all five locale files. Verify the existing localization check passes with no missing keys in any language.
-- [ ] 4.4 Update the cloud disclosure text for every cloud pair with the memory and summary sentence, including that sensitive saved memories are withheld but typed conversation text is not, and make the change clear earlier acknowledgements for every cloud pair, subscription-backed ones included. Verify with tests: an old acknowledgement no longer counts for an API-key or a subscription pair, the new text is shown once and the profile is not used for chat until acknowledged, and Ollama and Mock still show none.
+- [x] 4.1 Add Tauri commands for the Memory section (list with search, edit, pin, mark sensitive, delete, history, erase-all, set enabled) and a change event so an open list refreshes. Verify the command logic with tests against the fake store.
+- [x] 4.2 (type-checks; the manual run through the golden path and edge cases is part of 5.4, since the GUI cannot be run here) Build the Memory section in the AI tab: list with search, told/auto badge, edit, pin, sensitive toggle, delete, superseded history, empty state, the on/off switch, and erase-all with confirmation. Verify by running the app and exercising the golden path and edge cases (empty list, long text, delete during search, switch off and on).
+- [x] 4.3 Add every new string to all five locale files. Verify the existing localization check passes with no missing keys in any language.
+- [x] 4.4 Update the cloud disclosure text for every cloud pair with the memory and summary sentence, including that sensitive saved memories are withheld but typed conversation text is not, and make the change clear earlier acknowledgements for every cloud pair, subscription-backed ones included. Verify with tests: an old acknowledgement no longer counts for an API-key or a subscription pair, the new text is shown once and the profile is not used for chat until acknowledged, and Ollama and Mock still show none.
 
 ## 5. Extraction and finish
 

@@ -21,7 +21,7 @@ use fleet_snowfluff_ai::{
 };
 use tauri::{AppHandle, Manager};
 
-use crate::{ai_commands, chat_log_store, persona_store};
+use crate::{ai_commands, chat_log_store, memory_commands, persona_store};
 
 /// The one memory database, opened lazily on first use.
 pub struct MemoryState {
@@ -75,6 +75,10 @@ pub fn local_read_tools(app: &AppHandle) -> Vec<Arc<dyn Tool>> {
 /// never waits on it.
 pub fn reply_done(app: &AppHandle, session_path: &Path, tool_saved: bool) {
     let Some(service) = service_if_enabled(app) else { return };
+    // The assistant may have saved something itself during the reply.
+    if tool_saved {
+        memory_commands::notify_changed(app);
+    }
     let Some(user_message) = last_user_message(session_path) else { return };
     if !background::has_remember_cue(&user_message)
         && !background::has_correction_cue(&user_message)
@@ -102,6 +106,7 @@ pub fn reply_done(app: &AppHandle, session_path: &Path, tool_saved: bool) {
         {
             log::debug!("corrected after the reply: {outcome:?}");
         }
+        memory_commands::notify_changed(&app);
     });
 }
 
