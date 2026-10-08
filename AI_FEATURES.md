@@ -22,6 +22,58 @@ Claude Code and Codex (the subscription-auth providers) have their own,
 separate native-tool system instead — see
 [Claude Code / Codex own tools](#claude-code--codex-own-tools) below.
 
+### Memory and long conversations
+
+**How much of a conversation the model sees.** The history sent with each
+request is bounded by a *token* budget (the smaller of 3,000 tokens or 40% of
+the model's loaded context window), not by a number of messages: many short
+messages are all kept, one very long message does not crowd out the rest. A
+fit check runs before every request and sheds optional parts in a fixed order
+— older history, keyword-matched memories, the summary, the memory digest,
+the persona's example replies, the optional tool listings — and never the
+persona itself. If a window is too small for the persona and your message
+(Ollama defaults to 4,096 tokens on machines with little video memory), the
+app says so instead of sending a request that would silently lose the persona.
+
+**Summaries.** Older turns are folded into a short, neutral summary kept next
+to the conversation. It is written in the background after a stretch of
+conversation builds up and goes quiet, when you close the chat window, or after
+ten idle minutes — never on every reply, and never while a reply is being
+written. The model that writes it is your local Ollama model if enabled,
+otherwise your default profile. The assistant can also ask for one itself
+(`compact_context`). The summary leaves out health, money, credentials, and
+similar topics. It is shown to the model as background notes, not instructions.
+
+**Long tool results.** A single tool result (a big file, a large MCP
+response) is cut to a bounded size in the middle of a run. The rest is saved
+under the app data directory as numbered parts the assistant can read back
+with `read_file` without a confirmation prompt; old ones are cleaned up
+automatically.
+
+**What the assistant remembers about you.** Facts like "has a cat named Mochi"
+persist across conversations in a local SQLite database. A short list of the
+most important and recent facts rides along with every request, plus any that
+match what you just said. Matching is by keyword and works across English,
+Traditional and Simplified Chinese, Japanese, and Korean; there is no
+embedding model and nothing is downloaded.
+
+- **Saved when you ask** ("remember that…"), when you correct something, and —
+  only at summary time — when the assistant notices a durable fact. Those last
+  ones carry an **Auto** badge in Settings → AI → Memory. Health, money,
+  credentials, sexuality, religion, and politics are never saved
+  automatically; if you explicitly ask it to remember one, it is saved and
+  marked sensitive.
+- **Corrections** replace the old fact (it stays viewable under "Replaced
+  memories"); **delete** really erases it, including from the database file.
+- **Tools.** `memory_search` and `memory_get` are available everywhere,
+  delegated sub-tasks included; `memory_remember` and `memory_forget` (which
+  asks for your confirmation) are for the main assistant only. Memory is a
+  single pool owned by you — a persona name is recorded for reference but
+  never filters anything.
+- **Control.** Settings → AI → Memory lists, searches, edits, pins, marks
+  sensitive, and deletes memories, has an off switch (existing memories stay
+  but are not used), and "Erase all memories".
+
 ### What leaves your machine
 
 With a cloud API-key profile, the **results of tool calls** — file
@@ -35,6 +87,16 @@ and chat with that profile waits until you do (Settings → AI). The local
 Ollama provider doesn't send your conversation to a cloud model — though a
 `web_search` it runs still sends the search query to a search service (see
 [Web search](#web-search)).
+
+With **any cloud profile** — API key or subscription — two more things ride
+along when memory is on: the facts the assistant remembers about you (see
+[Memory](#memory-and-long-conversations)) and the running summary of an
+earlier part of the conversation. Anything you mark **sensitive** is
+withheld from cloud profiles, but that covers saved entries only: text you
+type in the chat still goes to whichever provider you are talking to. The
+data disclosure says so, and because it changed, every cloud profile asks
+you to review it once more before it is used again. The local Ollama
+provider keeps all of this on your machine.
 
 ### When a task needs more than these tools
 

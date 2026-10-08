@@ -3370,6 +3370,11 @@ Stage 7 的第一個 change（`/opsx:explore` 已收斂，設計見
 首個 change 的重點是**關係型記憶**（寵物對使用者的了解）；專案事實放另一個 namespace，
 之後再做。
 
+**已交付**（change `conversation-memory-and-compaction`）：上述三項皆已實作——token 預算歷史、
+批次摘要與 `compact_context`、工具輸出上限與暫存檔、SQLite 記憶庫（含 Settings 檢視／編輯／
+刪除與總開關）、記憶工具、compaction 後的 extraction，以及所有雲端 profile 的更新揭露與重新確認。
+手動端對端驗證記錄見該 change 的 tasks 5.4。
+
 之後的 Stage 7 工作（各自獨立的 change）：
 
 - 好感度 / 心情值

@@ -164,6 +164,10 @@ What it means:
 - `ToolCallStreamItem` gained a `PromptTokens` item carrying the server's own prompt count from the final stream line; the agent loop warns in the log when it is under half the estimate.
 - A compaction folds what the latest request left out: when the fit check trims history, the scheduler is told the history actually kept, so trimmed turns are summarized rather than lost.
 
+### Live check of the model-dependent paths
+
+Against Ollama qwen3:14b on a Traditional Chinese chat (`crates/fleet-snowfluff-ai/tests/memory_live.rs`, ignored by default): extraction after a fold returned three durable facts (the cat Mochi, the job, the planned trip) and none about the anxiety medication; a correction ("I moved to Taipei") was matched to the right stored residence out of three candidates and superseded it with no tool call; "幫我記一下，我喜歡無糖綠茶" was saved as a told memory with English and Chinese tags. One quirk worth knowing: the extraction also kept a temporary plan ("going to Kyoto next month"), which the prompt asks it to skip only for passing states, so a user may see a few short-lived auto entries and delete them in Settings.
+
 ## Open Questions
 
 - Ranking weights and the keyword score floor, and confirmation of the starting values above (set by the spike, measured on checked-in synthetic fixtures in five languages plus a local, uncommitted run on real chats).

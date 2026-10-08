@@ -278,6 +278,30 @@ pub async fn run_compaction(
     Ok(CompactionOutcome::Updated(summary))
 }
 
+/// The messages a compaction that moved the summary from `before_covered` to
+/// `summary.covered_through` read, for work that should look at the same turns
+/// (memory extraction). Newest first up to the same input cap the summary
+/// writer used, returned oldest first.
+pub fn folded_messages(
+    entries: &[LogEntry],
+    before_covered: usize,
+    summary: &ConversationSummary,
+) -> Vec<Message> {
+    let history = log::entries_to_context(entries);
+    let end = summary.covered_through.min(history.len());
+    let mut first = end;
+    let mut tokens = 0usize;
+    for index in (before_covered.min(end)..end).rev() {
+        let cost = estimate_message_tokens(&history[index]);
+        if tokens + cost > FOLD_INPUT_MAX_TOKENS && first < end {
+            break;
+        }
+        tokens += cost;
+        first = index;
+    }
+    history[first..end].to_vec()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, path::PathBuf, sync::Mutex};
@@ -591,5 +615,26 @@ mod tests {
         let none = summary_user_message(None, &newer, None);
         assert!(none.contains("Existing notes:\n(none)"));
         assert!(!none.contains("Make sure the notes preserve"));
+    }
+
+    #[test]
+    fn the_folded_messages_are_the_turns_between_the_old_and_new_coverage() {
+        let entries: Vec<LogEntry> = (0..6)
+            .map(|i| LogEntry {
+                role: if i % 2 == 0 { LogRole::User } else { LogRole::Assistant },
+                content: format!("turn {i}"),
+                timestamp: format!("t{i}"),
+            })
+            .collect();
+        let summary = ConversationSummary {
+            covered_through: 5,
+            text: "notes".into(),
+            updated_at: "now".into(),
+            last_covered_timestamp: Some("t4".into()),
+        };
+        let folded = folded_messages(&entries, 2, &summary);
+        let texts: Vec<&str> = folded.iter().map(|m| m.content.as_str()).collect();
+        assert_eq!(texts, vec!["turn 2", "turn 3", "turn 4"]);
+        assert!(folded_messages(&entries, 5, &summary).is_empty());
     }
 }

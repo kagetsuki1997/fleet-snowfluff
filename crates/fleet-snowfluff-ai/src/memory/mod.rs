@@ -21,6 +21,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod background;
 pub mod block;
+pub mod extraction;
 pub mod fake;
 pub mod policy;
 pub mod rank;

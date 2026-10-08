@@ -22,7 +22,9 @@ use fleet_snowfluff_ai::{
 };
 use tauri::{AppHandle, Manager};
 
-use crate::{ai_commands, chat_commands, chat_log_store};
+use crate::{
+    ai_commands, chat_commands, chat_log_store, memory_commands, memory_runtime, persona_store,
+};
 
 /// How often the scheduler is asked whether anything is due.
 const TICK_INTERVAL: Duration = Duration::from_secs(5);
@@ -53,6 +55,10 @@ async fn compact_session(
     }
 
     let entries = chat_log_store::read_session(session_path);
+    let covered_before = FileSummaryStore
+        .read(session_path)
+        .filter(|summary| summary.matches(&fleet_snowfluff_ai::log::context_visible(&entries)))
+        .map_or(0, |summary| summary.covered_through);
     // Built fresh with no session to resume: a CLI-backed profile gets its own
     // throwaway session, and its id is never stored, so the chat's own CLI
     // session is untouched.
@@ -72,7 +78,53 @@ async fn compact_session(
     };
     log::debug!("compacting {session_path:?} using {:?}", profile.key());
     let outcome = run_compaction(&job, &writer, &FileSummaryStore).await?;
+    if let CompactionOutcome::Updated(summary) = &outcome {
+        extract_memories(app, session_path, &entries, covered_before, summary);
+    }
     Ok(Some((outcome, entries)))
+}
+
+/// After a compaction, derives memories from the turns it folded. Best effort
+/// and in the background: the summary is already stored, so a failure here
+/// changes nothing about it.
+fn extract_memories(
+    app: &AppHandle,
+    session_path: &Path,
+    entries: &[fleet_snowfluff_ai::LogEntry],
+    covered_before: usize,
+    summary: &fleet_snowfluff_ai::ConversationSummary,
+) {
+    let Some(service) = memory_runtime::service_if_enabled(app) else { return };
+    let folded = fleet_snowfluff_ai::compaction::folded_messages(entries, covered_before, summary);
+    if folded.is_empty() {
+        return;
+    }
+    let source = format!(
+        "{}:{covered_before}-{}",
+        session_path.file_name().and_then(|name| name.to_str()).unwrap_or("session"),
+        summary.covered_through
+    );
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        let Some(model) = memory_runtime::background_model(&app) else { return };
+        let persona = persona_store::load(&app).persona.name;
+        match fleet_snowfluff_ai::memory::extraction::extract_after_compaction(
+            &model,
+            service.as_ref(),
+            &folded,
+            &source,
+            Some(&persona),
+        )
+        .await
+        {
+            Ok(0) => {}
+            Ok(stored) => {
+                log::debug!("extracted {stored} memorie(s) from {source}");
+                memory_commands::notify_changed(&app);
+            }
+            Err(error) => log::debug!("memory extraction skipped for {source}: {error}"),
+        }
+    });
 }
 
 pub struct AppCompactionRunner {
