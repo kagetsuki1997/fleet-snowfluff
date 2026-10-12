@@ -293,8 +293,9 @@ pub fn extraction_system() -> String {
          dates.\nReturn ONLY a JSON array, possibly empty. Each item: {FIELDS}.\nRules:\n- Do NOT \
          include anything about health, medication, money or debt, passwords or credentials, \
          sexuality, religion, or politics, even if it was mentioned.\n- Skip temporary states \
-         (what they ate today, today's mood) and anything the assistant said.\n- Do not repeat \
-         anything listed under Already known.\n- If nothing qualifies, return []."
+         (what they ate today, today's mood), one-off plans for the coming days or weeks, and \
+         anything the assistant said.\n- Do not repeat anything listed under Already known.\n- If \
+         nothing qualifies, return []."
     )
 }
 

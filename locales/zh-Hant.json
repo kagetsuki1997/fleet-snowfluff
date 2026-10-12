@@ -132,7 +132,7 @@
   "ai.mcp.add_success_pending": "已開始對「{name}」進行授權 — 請在瀏覽器中完成。",
   "ai.mcp.add_declined": "未獲批准。",
   "ai.memory_section_title": "記憶",
-  "ai.memory.hint": "助理跨對話記得的關於你的事。可在此檢視、編輯或刪除。「自動」項目是助理自行留意到的，其餘是你要求記住的。",
+  "ai.memory.hint": "助理跨對話記得的關於你的事。可在此檢視、編輯或刪除。「自動」項目是助理自行留意到的，其餘是你要求記住的。摘要與記憶擷取會把較早的對話送給本機模型；若沒有本機模型，則送給預設 profile。",
   "ai.memory.enabled_label": "記住關於我的事",
   "ai.memory.search_placeholder": "搜尋記憶…",
   "ai.memory.empty": "目前沒有記憶。你可以請助理記住某件事，聊天時它也會自己留意一些。",

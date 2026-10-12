@@ -132,7 +132,7 @@
   "ai.mcp.add_success_pending": "Started authorizing \"{name}\" — finish in your browser.",
   "ai.mcp.add_declined": "Not approved.",
   "ai.memory_section_title": "Memory",
-  "ai.memory.hint": "What the assistant remembers about you across conversations. Review, edit, or delete anything here. \"Auto\" entries were noticed by the assistant; the rest you asked for.",
+  "ai.memory.hint": "What the assistant remembers about you across conversations. Review, edit, or delete anything here. \"Auto\" entries were noticed by the assistant; the rest you asked for. Summaries and extraction send the older turns to your local model, or to your default profile if there is no local one.",
   "ai.memory.enabled_label": "Remember things about me",
   "ai.memory.search_placeholder": "Search memories…",
   "ai.memory.empty": "Nothing remembered yet. Ask the assistant to remember something, or it will pick up a few things as you chat.",

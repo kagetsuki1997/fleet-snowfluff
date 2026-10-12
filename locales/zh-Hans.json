@@ -132,7 +132,7 @@
   "ai.mcp.add_success_pending": "已开始对「{name}」进行授权 — 请在浏览器中完成。",
   "ai.mcp.add_declined": "未获批准。",
   "ai.memory_section_title": "记忆",
-  "ai.memory.hint": "助手跨对话记得的关于你的事。可在此查看、编辑或删除。“自动”条目是助手自己留意到的，其余是你要求记住的。",
+  "ai.memory.hint": "助手跨对话记得的关于你的事。可在此查看、编辑或删除。“自动”条目是助手自己留意到的，其余是你要求记住的。摘要与记忆提取会把较早的对话发送给本地模型；若没有本地模型，则发送给默认 profile。",
   "ai.memory.enabled_label": "记住关于我的事",
   "ai.memory.search_placeholder": "搜索记忆…",
   "ai.memory.empty": "目前没有记忆。你可以让助手记住某件事，聊天时它也会自己留意一些。",

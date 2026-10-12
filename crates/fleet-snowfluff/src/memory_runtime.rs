@@ -56,15 +56,36 @@ pub fn audience_for(profile: ProfileKey) -> Audience { Audience::for_profile(pro
 
 /// The memory tools for the top-level agent, or none while memory is off.
 pub fn top_level_tools(app: &AppHandle, profile: ProfileKey) -> Vec<Arc<dyn Tool>> {
-    let Some(service) = service_if_enabled(app) else { return Vec::new() };
     let persona_name = Some(persona_store::load(app).persona.name);
-    fleet_snowfluff_ai::memory::tools::all_tools(service, audience_for(profile), persona_name)
+    tools_for(service_if_enabled(app), profile, persona_name)
 }
 
 /// Only the two read tools, for the mixed-mode local attempt (always the local
 /// audience).
 pub fn local_read_tools(app: &AppHandle) -> Vec<Arc<dyn Tool>> {
-    service_if_enabled(app)
+    read_tools_for(service_if_enabled(app))
+}
+
+/// `service` is `None` while memory is switched off, which gives no tools at
+/// all.
+fn tools_for(
+    service: Option<Arc<dyn MemoryService>>,
+    profile: ProfileKey,
+    persona_name: Option<String>,
+) -> Vec<Arc<dyn Tool>> {
+    service
+        .map(|service| {
+            fleet_snowfluff_ai::memory::tools::all_tools(
+                service,
+                audience_for(profile),
+                persona_name,
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn read_tools_for(service: Option<Arc<dyn MemoryService>>) -> Vec<Arc<dyn Tool>> {
+    service
         .map(|service| fleet_snowfluff_ai::memory::tools::read_tools(service, Audience::Local))
         .unwrap_or_default()
 }
@@ -141,4 +162,29 @@ pub fn background_model(app: &AppHandle) -> Option<ProviderTextModel> {
         &settings.claude_code_tool_access,
     );
     Some(ProviderTextModel::new(provider))
+}
+
+#[cfg(test)]
+mod tests {
+    use fleet_snowfluff_ai::{memory::fake::InMemoryMemory, AuthMethod, ProviderKind};
+
+    use super::*;
+
+    fn service() -> Option<Arc<dyn MemoryService>> { Some(Arc::new(InMemoryMemory::new())) }
+
+    fn key() -> ProfileKey {
+        ProfileKey { provider: ProviderKind::Anthropic, auth_method: AuthMethod::Subscription }
+    }
+
+    #[test]
+    fn while_memory_is_off_there_are_no_memory_tools_of_any_kind() {
+        assert!(tools_for(None, key(), None).is_empty());
+        assert!(read_tools_for(None).is_empty());
+    }
+
+    #[test]
+    fn while_memory_is_on_the_top_level_gets_four_and_the_local_attempt_two() {
+        assert_eq!(tools_for(service(), key(), None).len(), 4);
+        assert_eq!(read_tools_for(service()).len(), 2);
+    }
 }
