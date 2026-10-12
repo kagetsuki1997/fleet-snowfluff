@@ -76,7 +76,7 @@ before running:
 ## Memory and long conversations
 
 **How much of a conversation the model sees.** The history sent with each
-request is bounded by a *token* budget (the smaller of 3,000 tokens or 40% of
+request is bounded by a _token_ budget (the smaller of 3,000 tokens or 40% of
 the model's loaded context window), not by a number of messages: many short
 messages are all kept, one very long message does not crowd out the rest. A
 fit check runs before every request and sheds optional parts in a fixed order

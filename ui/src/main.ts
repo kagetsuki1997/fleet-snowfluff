@@ -755,7 +755,9 @@ function renderMemoryRow(memory: MemoryRecord, openIds: Set<string>, history: bo
   const badges = [
     `<span class="ai-memory-badge ai-memory-badge-${memory.origin}">${t(`ai.memory.origin.${memory.origin}`)}</span>`,
     memory.pinned ? `<span class="ai-memory-badge">${t("ai.memory.pinned_badge")}</span>` : "",
-    memory.sensitive ? `<span class="ai-memory-badge">${t("ai.memory.sensitive_badge")}</span>` : "",
+    memory.sensitive
+      ? `<span class="ai-memory-badge">${t("ai.memory.sensitive_badge")}</span>`
+      : "",
   ].join("");
   const body = history
     ? `<p class="hint">${t("ai.memory.replaced_hint")}</p>

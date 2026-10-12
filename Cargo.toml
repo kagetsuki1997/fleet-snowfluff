@@ -26,10 +26,10 @@ log = "0.4"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", features = ["NSWindow", "NSResponder", "NSView"] }
 pollster = "0.4"
-rusqlite = { version = "0.37", features = ["bundled"] }
 rand = "0.9"
 reqwest = { version = "0.13.5", features = ["json", "stream", "form"] }
 rodio = { version = "0.22", default-features = false, features = ["playback", "wav"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
 rust-embed = "8"
 serde = { version = "1", features = ["derive"] }
 serde-saphyr = "1.2.0"

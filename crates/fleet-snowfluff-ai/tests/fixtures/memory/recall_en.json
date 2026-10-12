@@ -1,391 +1,337 @@
 {
- "language": "en",
- "memories": [
-  {
-   "id": "m1",
-   "text": "Likes unsweetened green tea",
-   "tags": []
-  },
-  {
-   "id": "m2",
-   "text": "Has a cat named Mochi",
-   "tags": []
-  },
-  {
-   "id": "m3",
-   "text": "Works as a software engineer",
-   "tags": []
-  },
-  {
-   "id": "m4",
-   "text": "Lives in Taichung",
-   "tags": []
-  },
-  {
-   "id": "m5",
-   "text": "Allergic to peanuts",
-   "tags": []
-  },
-  {
-   "id": "m6",
-   "text": "Birthday is March 14",
-   "tags": []
-  },
-  {
-   "id": "m7",
-   "text": "Taking the TOEIC exam next month",
-   "tags": []
-  },
-  {
-   "id": "m8",
-   "text": "Plays guitar on weekends",
-   "tags": []
-  },
-  {
-   "id": "m9",
-   "text": "Dislikes cilantro",
-   "tags": []
-  },
-  {
-   "id": "m10",
-   "text": "Commutes by bike",
-   "tags": []
-  },
-  {
-   "id": "m11",
-   "text": "Favorite game is Zelda",
-   "tags": []
-  },
-  {
-   "id": "m12",
-   "text": "Is learning Japanese",
-   "tags": []
-  },
-  {
-   "id": "m13",
-   "text": "Sister is getting married in June",
-   "tags": []
-  },
-  {
-   "id": "m14",
-   "text": "Usually stays up until 2 am",
-   "tags": []
-  },
-  {
-   "id": "m15",
-   "text": "Afraid of thunderstorms",
-   "tags": []
-  },
-  {
-   "id": "m16",
-   "text": "Moved apartments last month",
-   "tags": []
-  },
-  {
-   "id": "m17",
-   "text": "Favorite food is ramen",
-   "tags": []
-  },
-  {
-   "id": "m18",
-   "text": "Runs five kilometers every morning",
-   "tags": []
-  },
-  {
-   "id": "m19",
-   "text": "Uses a MacBook for work",
-   "tags": []
-  },
-  {
-   "id": "m20",
-   "text": "Prefers dark mode",
-   "tags": []
-  },
-  {
-   "id": "m21",
-   "text": "Parents live in Tainan",
-   "tags": []
-  },
-  {
-   "id": "m22",
-   "text": "Planning a trip to Kyoto in autumn",
-   "tags": []
-  },
-  {
-   "id": "m23",
-   "text": "Reading a mystery novel",
-   "tags": []
-  },
-  {
-   "id": "m24",
-   "text": "Only drinks coffee in the morning",
-   "tags": []
-  },
-  {
-   "id": "m25",
-   "text": "Wants to learn swimming",
-   "tags": []
-  },
-  {
-   "id": "m26",
-   "text": "Has a presentation on Friday",
-   "tags": []
-  },
-  {
-   "id": "m27",
-   "text": "Dentist appointment next Tuesday",
-   "tags": []
-  },
-  {
-   "id": "m28",
-   "text": "Cannot eat spicy food",
-   "tags": []
-  },
-  {
-   "id": "m29",
-   "text": "Collects postcards",
-   "tags": []
-  },
-  {
-   "id": "m30",
-   "text": "Stressed about the project deadline",
-   "tags": []
-  }
- ],
- "queries": [
-  {
-   "id": "q1",
-   "text": "want some green tea today",
-   "expect": [
-    "m1"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q2",
-   "text": "Mochi is not eating again",
-   "expect": [
-    "m2"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q3",
-   "text": "do you remember what my job is",
-   "expect": [
-    "m3"
-   ],
-   "kind": "paraphrase"
-  },
-  {
-   "id": "q4",
-   "text": "this dish has peanuts in it",
-   "expect": [
-    "m5"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q5",
-   "text": "my birthday is coming up",
-   "expect": [
-    "m6"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q6",
-   "text": "feel like playing guitar this weekend",
-   "expect": [
-    "m8"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q7",
-   "text": "there is cilantro in this",
-   "expect": [
-    "m9"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q8",
-   "text": "I will bike to work tomorrow",
-   "expect": [
-    "m10"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q9",
-   "text": "Japanese keigo is hard",
-   "expect": [
-    "m12"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q10",
-   "text": "what should I prepare for the wedding",
-   "expect": [
-    "m13"
-   ],
-   "kind": "paraphrase"
-  },
-  {
-   "id": "q11",
-   "text": "still unpacking after the move",
-   "expect": [
-    "m16"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q12",
-   "text": "ramen for lunch?",
-   "expect": [
-    "m17"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q13",
-   "text": "going for a run this morning",
-   "expect": [
-    "m18"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q14",
-   "text": "should I visit my parents in Tainan",
-   "expect": [
-    "m21"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q15",
-   "text": "morning coffee please",
-   "expect": [
-    "m24"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q16",
-   "text": "this is way too spicy for me",
-   "expect": [
-    "m28"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q17",
-   "text": "MacBook prices are crazy",
-   "expect": [
-    "m19"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q18",
-   "text": "new Zelda game announced",
-   "expect": [
-    "m11"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q19",
-   "text": "how do I prepare for TOEIC",
-   "expect": [
-    "m7"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q20",
-   "text": "cats are so playful",
-   "expect": [
-    "m2"
-   ],
-   "kind": "inflection"
-  },
-  {
-   "id": "q21",
-   "text": "I studied the postcard collection today",
-   "expect": [
-    "m29"
-   ],
-   "kind": "inflection"
-  },
-  {
-   "id": "q22",
-   "text": "kyoto in the fall",
-   "expect": [
-    "m22"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q23",
-   "text": "I need to see the dentist",
-   "expect": [
-    "m27"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q24",
-   "text": "which novel next",
-   "expect": [
-    "m23"
-   ],
-   "kind": "lexical"
-  },
-  {
-   "id": "q25",
-   "text": "it keeps raining and the sky is rumbling",
-   "expect": [
-    "m15"
-   ],
-   "kind": "paraphrase"
-  },
-  {
-   "id": "q26",
-   "text": "the screen is too bright at night",
-   "expect": [
-    "m20"
-   ],
-   "kind": "paraphrase"
-  },
-  {
-   "id": "q27",
-   "text": "souvenirs from my travels",
-   "expect": [
-    "m29"
-   ],
-   "kind": "paraphrase"
-  },
-  {
-   "id": "q28",
-   "text": "how is the weather today",
-   "expect": [],
-   "kind": "negative"
-  },
-  {
-   "id": "q29",
-   "text": "can you sing",
-   "expect": [],
-   "kind": "negative"
-  },
-  {
-   "id": "q30",
-   "text": "tell me a joke",
-   "expect": [],
-   "kind": "negative"
-  }
- ]
+  "language": "en",
+  "memories": [
+    {
+      "id": "m1",
+      "text": "Likes unsweetened green tea",
+      "tags": []
+    },
+    {
+      "id": "m2",
+      "text": "Has a cat named Mochi",
+      "tags": []
+    },
+    {
+      "id": "m3",
+      "text": "Works as a software engineer",
+      "tags": []
+    },
+    {
+      "id": "m4",
+      "text": "Lives in Taichung",
+      "tags": []
+    },
+    {
+      "id": "m5",
+      "text": "Allergic to peanuts",
+      "tags": []
+    },
+    {
+      "id": "m6",
+      "text": "Birthday is March 14",
+      "tags": []
+    },
+    {
+      "id": "m7",
+      "text": "Taking the TOEIC exam next month",
+      "tags": []
+    },
+    {
+      "id": "m8",
+      "text": "Plays guitar on weekends",
+      "tags": []
+    },
+    {
+      "id": "m9",
+      "text": "Dislikes cilantro",
+      "tags": []
+    },
+    {
+      "id": "m10",
+      "text": "Commutes by bike",
+      "tags": []
+    },
+    {
+      "id": "m11",
+      "text": "Favorite game is Zelda",
+      "tags": []
+    },
+    {
+      "id": "m12",
+      "text": "Is learning Japanese",
+      "tags": []
+    },
+    {
+      "id": "m13",
+      "text": "Sister is getting married in June",
+      "tags": []
+    },
+    {
+      "id": "m14",
+      "text": "Usually stays up until 2 am",
+      "tags": []
+    },
+    {
+      "id": "m15",
+      "text": "Afraid of thunderstorms",
+      "tags": []
+    },
+    {
+      "id": "m16",
+      "text": "Moved apartments last month",
+      "tags": []
+    },
+    {
+      "id": "m17",
+      "text": "Favorite food is ramen",
+      "tags": []
+    },
+    {
+      "id": "m18",
+      "text": "Runs five kilometers every morning",
+      "tags": []
+    },
+    {
+      "id": "m19",
+      "text": "Uses a MacBook for work",
+      "tags": []
+    },
+    {
+      "id": "m20",
+      "text": "Prefers dark mode",
+      "tags": []
+    },
+    {
+      "id": "m21",
+      "text": "Parents live in Tainan",
+      "tags": []
+    },
+    {
+      "id": "m22",
+      "text": "Planning a trip to Kyoto in autumn",
+      "tags": []
+    },
+    {
+      "id": "m23",
+      "text": "Reading a mystery novel",
+      "tags": []
+    },
+    {
+      "id": "m24",
+      "text": "Only drinks coffee in the morning",
+      "tags": []
+    },
+    {
+      "id": "m25",
+      "text": "Wants to learn swimming",
+      "tags": []
+    },
+    {
+      "id": "m26",
+      "text": "Has a presentation on Friday",
+      "tags": []
+    },
+    {
+      "id": "m27",
+      "text": "Dentist appointment next Tuesday",
+      "tags": []
+    },
+    {
+      "id": "m28",
+      "text": "Cannot eat spicy food",
+      "tags": []
+    },
+    {
+      "id": "m29",
+      "text": "Collects postcards",
+      "tags": []
+    },
+    {
+      "id": "m30",
+      "text": "Stressed about the project deadline",
+      "tags": []
+    }
+  ],
+  "queries": [
+    {
+      "id": "q1",
+      "text": "want some green tea today",
+      "expect": ["m1"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q2",
+      "text": "Mochi is not eating again",
+      "expect": ["m2"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q3",
+      "text": "do you remember what my job is",
+      "expect": ["m3"],
+      "kind": "paraphrase"
+    },
+    {
+      "id": "q4",
+      "text": "this dish has peanuts in it",
+      "expect": ["m5"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q5",
+      "text": "my birthday is coming up",
+      "expect": ["m6"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q6",
+      "text": "feel like playing guitar this weekend",
+      "expect": ["m8"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q7",
+      "text": "there is cilantro in this",
+      "expect": ["m9"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q8",
+      "text": "I will bike to work tomorrow",
+      "expect": ["m10"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q9",
+      "text": "Japanese keigo is hard",
+      "expect": ["m12"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q10",
+      "text": "what should I prepare for the wedding",
+      "expect": ["m13"],
+      "kind": "paraphrase"
+    },
+    {
+      "id": "q11",
+      "text": "still unpacking after the move",
+      "expect": ["m16"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q12",
+      "text": "ramen for lunch?",
+      "expect": ["m17"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q13",
+      "text": "going for a run this morning",
+      "expect": ["m18"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q14",
+      "text": "should I visit my parents in Tainan",
+      "expect": ["m21"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q15",
+      "text": "morning coffee please",
+      "expect": ["m24"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q16",
+      "text": "this is way too spicy for me",
+      "expect": ["m28"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q17",
+      "text": "MacBook prices are crazy",
+      "expect": ["m19"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q18",
+      "text": "new Zelda game announced",
+      "expect": ["m11"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q19",
+      "text": "how do I prepare for TOEIC",
+      "expect": ["m7"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q20",
+      "text": "cats are so playful",
+      "expect": ["m2"],
+      "kind": "inflection"
+    },
+    {
+      "id": "q21",
+      "text": "I studied the postcard collection today",
+      "expect": ["m29"],
+      "kind": "inflection"
+    },
+    {
+      "id": "q22",
+      "text": "kyoto in the fall",
+      "expect": ["m22"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q23",
+      "text": "I need to see the dentist",
+      "expect": ["m27"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q24",
+      "text": "which novel next",
+      "expect": ["m23"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q25",
+      "text": "it keeps raining and the sky is rumbling",
+      "expect": ["m15"],
+      "kind": "paraphrase"
+    },
+    {
+      "id": "q26",
+      "text": "the screen is too bright at night",
+      "expect": ["m20"],
+      "kind": "paraphrase"
+    },
+    {
+      "id": "q27",
+      "text": "souvenirs from my travels",
+      "expect": ["m29"],
+      "kind": "paraphrase"
+    },
+    {
+      "id": "q28",
+      "text": "how is the weather today",
+      "expect": [],
+      "kind": "negative"
+    },
+    {
+      "id": "q29",
+      "text": "can you sing",
+      "expect": [],
+      "kind": "negative"
+    },
+    {
+      "id": "q30",
+      "text": "tell me a joke",
+      "expect": [],
+      "kind": "negative"
+    }
+  ]
 }

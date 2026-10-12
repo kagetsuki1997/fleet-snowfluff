@@ -113,4 +113,3 @@ Every request SHALL carry the persona's system prompt in full, unshortened, and 
 
 - **WHEN** a message is handled by a CLI-backed profile
 - **THEN** the persona is passed through that CLI's system-prompt mechanism and does not appear in any conversation turn
-

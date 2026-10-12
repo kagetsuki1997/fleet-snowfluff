@@ -41,20 +41,20 @@ Facts about the current code that shape the approach:
 
 **Values after the spike.** Confirmed by measurement where it was possible, and adjusted where measurement showed a problem (see Spike results); the ranking formula is a reasoned choice, not a measured one.
 
-| Setting | Value |
-|---|---|
-| History budget | min(3,000 tokens, 40% of loaded window) |
-| Hard message cap / uncovered allowance | 60 messages / up to 1,500 further tokens |
-| Batch threshold / quiet period / idle timeout | 1,200 uncovered tokens / 20 s / 10 min |
-| Digest / keyword block | 400 tokens (about 15-20 facts) / at most 5 hits within 400 tokens |
-| Tool-output bound | min(6,000 estimated tokens, 25% of window); the model gets the beginning up to the bound |
-| Spill retention | 200 files or 7 days; at most 50 parts of 18 KiB per result |
-| Summary cap | 800 tokens |
-| Safety net | 80% of the loaded window |
-| Reply allowance / floor | min(4,096, 25% of window) / 512 tokens |
-| Fit-check safety margin | 10% of the window |
-| Keyword score floor | −2.2 (re-check as the memory count grows) |
-| Digest ranking | pinned first; then importance (1 to 3) plus 2 × exp(−age in days / 30), newer first on ties. Chosen without real usage data; revisit after real use |
+| Setting                                       | Value                                                                                                                                               |
+| --------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| History budget                                | min(3,000 tokens, 40% of loaded window)                                                                                                             |
+| Hard message cap / uncovered allowance        | 60 messages / up to 1,500 further tokens                                                                                                            |
+| Batch threshold / quiet period / idle timeout | 1,200 uncovered tokens / 20 s / 10 min                                                                                                              |
+| Digest / keyword block                        | 400 tokens (about 15-20 facts) / at most 5 hits within 400 tokens                                                                                   |
+| Tool-output bound                             | min(6,000 estimated tokens, 25% of window); the model gets the beginning up to the bound                                                            |
+| Spill retention                               | 200 files or 7 days; at most 50 parts of 18 KiB per result                                                                                          |
+| Summary cap                                   | 800 tokens                                                                                                                                          |
+| Safety net                                    | 80% of the loaded window                                                                                                                            |
+| Reply allowance / floor                       | min(4,096, 25% of window) / 512 tokens                                                                                                              |
+| Fit-check safety margin                       | 10% of the window                                                                                                                                   |
+| Keyword score floor                           | −2.2 (re-check as the memory count grows)                                                                                                           |
+| Digest ranking                                | pinned first; then importance (1 to 3) plus 2 × exp(−age in days / 30), newer first on ties. Chosen without real usage data; revisit after real use |
 
 The tool-output bound is in estimated tokens, not characters: for CJK text one character is about one token, so a character limit that is comfortable for English could fill an entire window.
 
@@ -123,12 +123,12 @@ Additive. The database and summary sidecars are created lazily on first use, so 
 **Task 1.1: keyword matching (prototype in `scripts/spikes/memory/`, fixtures in `crates/fleet-snowfluff-ai/tests/fixtures/memory/`).** Script-aware tokenizer, character bigrams for CJK, words for Latin text, FTS5 with BM25, English stopwords, score floor −2.2, 30-memory corpus, recall@5:
 
 | Language | lexical | Latin inside CJK | one character | English tag | inflection | paraphrase (expected miss) | false matches on negatives |
-|---|---|---|---|---|---|---|---|
-| en | 20/20 | - | - | - | 2/2 | 0/5 | 0/3 |
-| zh-Hant | 15/16 | 3/3 | 2/2 | 3/3 | - | 0/3 | 0/3 |
-| zh-Hans | 15/16 | 3/3 | 2/2 | 3/3 | - | 0/3 | 0/3 |
-| ja | 13/13 | 3/3 | 2/2 | 3/3 | - | 1/6 | 0/3 |
-| ko | 15/15 | 3/3 | 1/1 | 3/3 | - | 1/5 | 1/3 |
+| -------- | ------- | ---------------- | ------------- | ----------- | ---------- | -------------------------- | -------------------------- |
+| en       | 20/20   | -                | -             | -           | 2/2        | 0/5                        | 0/3                        |
+| zh-Hant  | 15/16   | 3/3              | 2/2           | 3/3         | -          | 0/3                        | 0/3                        |
+| zh-Hans  | 15/16   | 3/3              | 2/2           | 3/3         | -          | 0/3                        | 0/3                        |
+| ja       | 13/13   | 3/3              | 2/2           | 3/3         | -          | 1/6                        | 0/3                        |
+| ko       | 15/15   | 3/3              | 1/1           | 3/3         | -          | 1/5                        | 1/3                        |
 
 What it means:
 
@@ -149,10 +149,10 @@ What it means:
 
 **Task 1.4: background prompts** (`scripts/spikes/memory/prompts_spike.py`, qwen3:14b, five languages, one chat each with durable facts, small talk, a correction, and a medication mention):
 
-- *Extraction:* valid JSON in 15 of 15 runs and all three expected facts found in 15 of 15. The sensitive medication fact leaked in 1 of 15 runs in the first pass and 0 of 15 in the second, so the instruction alone is unreliable.
-- *Correction:* the right memory id was chosen in 5 of 5 languages, with a short corrected text.
-- *Summary language:* with the language stated only in an English instruction, zh-Hant, ja, and ko summaries came back in English. Passing the language explicitly ("write the notes in Traditional Chinese (繁體中文)") fixed all five.
-- *Summary sensitivity:* with an explicit "leave out health and medication" rule, 5 of 5 summaries still kept it. Summaries persist and ride along on every later request, including to cloud profiles, and the user cannot review them in Settings, so the summary now gets the same deterministic screen as derived memories (a new requirement in `context-compaction`).
+- _Extraction:_ valid JSON in 15 of 15 runs and all three expected facts found in 15 of 15. The sensitive medication fact leaked in 1 of 15 runs in the first pass and 0 of 15 in the second, so the instruction alone is unreliable.
+- _Correction:_ the right memory id was chosen in 5 of 5 languages, with a short corrected text.
+- _Summary language:_ with the language stated only in an English instruction, zh-Hant, ja, and ko summaries came back in English. Passing the language explicitly ("write the notes in Traditional Chinese (繁體中文)") fixed all five.
+- _Summary sensitivity:_ with an explicit "leave out health and medication" rule, 5 of 5 summaries still kept it. Summaries persist and ride along on every later request, including to cloud profiles, and the user cannot review them in Settings, so the summary now gets the same deterministic screen as derived memories (a new requirement in `context-compaction`).
 - The prompts as tested are in the script and are the starting point for tasks 2.9, 3.15, and 5.1.
 
 **Task 1.5: fixed cost and the 4096-token case.** Measured on qwen3:14b with the real persona, few-shot examples, native tools, and 43 stubs (`prompt_eval_count` differences at a 32768 window): persona and one message 590 tokens, few-shot examples 115, eight native tools 925, the 43 stubs 1,687, for 3,334 before any history. At a 4096 window that leaves roughly 760 tokens before a reply is even reserved, so the shed order must engage there: with the margin and a 512-token reply floor, few-shot examples and the stubs go first, leaving the persona, the eight native tools, and about 1,600 tokens for history and memory blocks. In every configuration tried (full, native tools only, no stubs or few-shot, persona only) at both 4096 and 8192, the persona survived and the reply followed it. Adjustments made from this: the tool-output bound scales with the window (min of 6,000 estimated tokens and 25% of the window), the reply allowance is min(4,096, 25% of the window) with a 512 floor, and the keyword matches, summary, and digest take part in shedding. The history budget formula (min of 3,000 and 40% of the window) is unchanged: at 4096 it gives about 1,640, which the fit check then trims to whatever is left.
