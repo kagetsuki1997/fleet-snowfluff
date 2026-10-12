@@ -1,0 +1,337 @@
+{
+  "language": "ko",
+  "memories": [
+    {
+      "id": "m1",
+      "text": "무가당 녹차를 좋아한다",
+      "tags": ["green tea", "tea"]
+    },
+    {
+      "id": "m2",
+      "text": "모찌라는 이름의 고양이를 키운다",
+      "tags": ["cat", "pet", "mochi"]
+    },
+    {
+      "id": "m3",
+      "text": "소프트웨어 엔지니어로 일한다",
+      "tags": ["job", "software engineer"]
+    },
+    {
+      "id": "m4",
+      "text": "타이중에 산다",
+      "tags": ["home", "taichung"]
+    },
+    {
+      "id": "m5",
+      "text": "땅콩 알레르기가 있다",
+      "tags": ["allergy", "peanuts"]
+    },
+    {
+      "id": "m6",
+      "text": "생일은 3월 14일이다",
+      "tags": ["birthday"]
+    },
+    {
+      "id": "m7",
+      "text": "다음 달에 TOEIC 시험을 본다",
+      "tags": ["exam", "toeic"]
+    },
+    {
+      "id": "m8",
+      "text": "주말에는 기타를 친다",
+      "tags": ["guitar", "music"]
+    },
+    {
+      "id": "m9",
+      "text": "고수를 싫어한다",
+      "tags": ["cilantro", "food dislike"]
+    },
+    {
+      "id": "m10",
+      "text": "자전거로 출퇴근한다",
+      "tags": ["bike", "commute"]
+    },
+    {
+      "id": "m11",
+      "text": "가장 좋아하는 게임은 Zelda다",
+      "tags": ["zelda", "game"]
+    },
+    {
+      "id": "m12",
+      "text": "일본어를 공부하고 있다",
+      "tags": ["japanese", "language"]
+    },
+    {
+      "id": "m13",
+      "text": "누나가 6월에 결혼한다",
+      "tags": ["sister", "wedding"]
+    },
+    {
+      "id": "m14",
+      "text": "보통 새벽 두 시까지 안 자고 있다",
+      "tags": ["sleep", "late night"]
+    },
+    {
+      "id": "m15",
+      "text": "천둥을 무서워한다",
+      "tags": ["thunder", "fear"]
+    },
+    {
+      "id": "m16",
+      "text": "지난달에 이사했다",
+      "tags": ["moving", "apartment"]
+    },
+    {
+      "id": "m17",
+      "text": "가장 좋아하는 음식은 라멘이다",
+      "tags": ["ramen", "food"]
+    },
+    {
+      "id": "m18",
+      "text": "매일 아침 5킬로미터를 뛴다",
+      "tags": ["running", "exercise"]
+    },
+    {
+      "id": "m19",
+      "text": "일할 때 MacBook을 쓴다",
+      "tags": ["macbook", "laptop"]
+    },
+    {
+      "id": "m20",
+      "text": "다크 모드를 선호한다",
+      "tags": ["dark mode", "settings"]
+    },
+    {
+      "id": "m21",
+      "text": "부모님은 타이난에 사신다",
+      "tags": ["parents", "tainan"]
+    },
+    {
+      "id": "m22",
+      "text": "가을에 교토로 여행갈 계획이다",
+      "tags": ["trip", "kyoto"]
+    },
+    {
+      "id": "m23",
+      "text": "추리 소설을 읽고 있다",
+      "tags": ["novel", "reading"]
+    },
+    {
+      "id": "m24",
+      "text": "커피는 아침에만 마신다",
+      "tags": ["coffee", "morning"]
+    },
+    {
+      "id": "m25",
+      "text": "수영을 배우고 싶어 한다",
+      "tags": ["swimming", "learn"]
+    },
+    {
+      "id": "m26",
+      "text": "금요일에 발표가 있다",
+      "tags": ["presentation", "work"]
+    },
+    {
+      "id": "m27",
+      "text": "다음 주 화요일에 치과 예약이 있다",
+      "tags": ["dentist", "appointment"]
+    },
+    {
+      "id": "m28",
+      "text": "매운 음식을 못 먹는다",
+      "tags": ["spicy", "food dislike"]
+    },
+    {
+      "id": "m29",
+      "text": "엽서를 모은다",
+      "tags": ["postcards", "collection"]
+    },
+    {
+      "id": "m30",
+      "text": "프로젝트 마감이 다가와서 스트레스를 받는다",
+      "tags": ["stress", "deadline"]
+    }
+  ],
+  "queries": [
+    {
+      "id": "q1",
+      "text": "오늘은 녹차가 마시고 싶다",
+      "expect": ["m1"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q2",
+      "text": "모찌가 밥을 안 먹어",
+      "expect": ["m2"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q3",
+      "text": "내 직업이 뭔지 기억해?",
+      "expect": ["m3"],
+      "kind": "paraphrase"
+    },
+    {
+      "id": "q4",
+      "text": "이 음식에 땅콩이 들어 있어",
+      "expect": ["m5"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q5",
+      "text": "곧 내 생일이야",
+      "expect": ["m6"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q6",
+      "text": "주말에 기타 치고 싶다",
+      "expect": ["m8"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q7",
+      "text": "여기에 고수가 들어 있네",
+      "expect": ["m9"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q8",
+      "text": "내일은 자전거로 출근할 거야",
+      "expect": ["m10"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q9",
+      "text": "일본어 존댓말이 어려워",
+      "expect": ["m12"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q10",
+      "text": "누나 결혼식 준비는 어떻게 하지",
+      "expect": ["m13"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q11",
+      "text": "이사하고 아직 정리를 못 했어",
+      "expect": ["m16"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q12",
+      "text": "점심은 라멘 어때",
+      "expect": ["m17"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q13",
+      "text": "오늘 아침에 달리기를 했어",
+      "expect": ["m18"],
+      "kind": "paraphrase"
+    },
+    {
+      "id": "q14",
+      "text": "부모님 뵈러 타이난에 갈까",
+      "expect": ["m21"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q15",
+      "text": "아침 커피 한 잔 줘",
+      "expect": ["m24"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q16",
+      "text": "이건 너무 매워서 못 먹겠어",
+      "expect": ["m28"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q17",
+      "text": "새 MacBook이 너무 비싸",
+      "expect": ["m19"],
+      "kind": "latin_in_cjk"
+    },
+    {
+      "id": "q18",
+      "text": "Zelda 신작이 나왔대",
+      "expect": ["m11"],
+      "kind": "latin_in_cjk"
+    },
+    {
+      "id": "q19",
+      "text": "TOEIC 준비는 어떻게 해",
+      "expect": ["m7"],
+      "kind": "latin_in_cjk"
+    },
+    {
+      "id": "q20",
+      "text": "고양이",
+      "expect": ["m2"],
+      "kind": "lexical"
+    },
+    {
+      "id": "q21",
+      "text": "차",
+      "expect": ["m1"],
+      "kind": "one_char"
+    },
+    {
+      "id": "q22",
+      "text": "kyoto trip planning",
+      "expect": ["m22"],
+      "kind": "english_tag"
+    },
+    {
+      "id": "q23",
+      "text": "dentist",
+      "expect": ["m27"],
+      "kind": "english_tag"
+    },
+    {
+      "id": "q24",
+      "text": "novel",
+      "expect": ["m23"],
+      "kind": "english_tag"
+    },
+    {
+      "id": "q25",
+      "text": "밖에서 우르릉 소리가 계속 나",
+      "expect": ["m15"],
+      "kind": "paraphrase"
+    },
+    {
+      "id": "q26",
+      "text": "화면이 너무 밝아",
+      "expect": ["m20"],
+      "kind": "paraphrase"
+    },
+    {
+      "id": "q27",
+      "text": "여행에서 사 온 기념품",
+      "expect": ["m29"],
+      "kind": "paraphrase"
+    },
+    {
+      "id": "q28",
+      "text": "오늘 날씨 어때",
+      "expect": [],
+      "kind": "negative"
+    },
+    {
+      "id": "q29",
+      "text": "노래 할 수 있어?",
+      "expect": [],
+      "kind": "negative"
+    },
+    {
+      "id": "q30",
+      "text": "농담 하나 해줘",
+      "expect": [],
+      "kind": "negative"
+    }
+  ]
+}

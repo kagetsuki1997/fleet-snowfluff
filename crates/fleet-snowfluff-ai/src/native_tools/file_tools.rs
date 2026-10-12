@@ -106,7 +106,30 @@ fn required_permission_for_path(path_arg: &str, ctx: &ToolContext) -> Permission
     }
 }
 
-pub struct ReadFileTool;
+/// Reads a text file. `spill_dir`, when set, is the application's own directory
+/// of spilled tool output: a file inside it is read without asking, even when
+/// no project folder is configured, because the application itself wrote it
+/// there so the assistant could read what a long tool result had to leave out.
+/// Every other path keeps the usual rules.
+#[derive(Default, Clone)]
+pub struct ReadFileTool {
+    spill_dir: Option<PathBuf>,
+}
+
+impl ReadFileTool {
+    pub fn with_spill_dir(spill_dir: impl Into<PathBuf>) -> Self {
+        Self { spill_dir: Some(spill_dir.into()) }
+    }
+
+    /// Only an absolute path inside the spill directory counts: the markers the
+    /// application writes give absolute paths, and `is_within_root`
+    /// resolves `..` and symlinks before comparing.
+    fn is_spilled_output(&self, path_arg: &str) -> bool {
+        let Some(dir) = &self.spill_dir else { return false };
+        let candidate = Path::new(path_arg);
+        candidate.is_absolute() && is_within_root(dir, candidate)
+    }
+}
 
 #[async_trait]
 impl Tool for ReadFileTool {
@@ -129,6 +152,7 @@ impl Tool for ReadFileTool {
 
     fn required_permission(&self, args: &Value, ctx: &ToolContext) -> PermissionTier {
         match args.get("path").and_then(Value::as_str) {
+            Some(path) if self.is_spilled_output(path) => PermissionTier::Auto,
             Some(path) => required_permission_for_path(path, ctx),
             // Malformed args must never resolve to `Auto` -- fail
             // toward the safer tier and let `execute` report the real
@@ -233,7 +257,8 @@ mod tests {
 
     fn read(root: &Path, name: &str) -> ToolResult {
         let ctx = ctx_with_root(Some(root.to_path_buf()));
-        futures_executor_block(ReadFileTool.execute(json!({ "path": name }), &ctx)).unwrap()
+        futures_executor_block(ReadFileTool::default().execute(json!({ "path": name }), &ctx))
+            .unwrap()
     }
 
     /// Runs a future to completion without pulling in a runtime crate
@@ -314,7 +339,7 @@ mod tests {
         std::fs::write(root.join("a.txt"), "hi").unwrap();
         let ctx = ctx_with_root(Some(root));
         assert_eq!(
-            ReadFileTool.required_permission(&json!({"path": "a.txt"}), &ctx),
+            ReadFileTool::default().required_permission(&json!({"path": "a.txt"}), &ctx),
             PermissionTier::Auto
         );
         std::fs::remove_dir_all(ctx.project_root.unwrap()).ok();
@@ -328,7 +353,8 @@ mod tests {
         std::fs::write(&outside, "secret").unwrap();
         let ctx = ctx_with_root(Some(root.clone()));
         assert_eq!(
-            ReadFileTool.required_permission(&json!({"path": outside.to_string_lossy()}), &ctx),
+            ReadFileTool::default()
+                .required_permission(&json!({"path": outside.to_string_lossy()}), &ctx),
             PermissionTier::Confirm
         );
         std::fs::remove_dir_all(&root).ok();
@@ -344,7 +370,7 @@ mod tests {
         let ctx = ctx_with_root(Some(inner));
         // "../secret.txt" resolves outside `project_root` once canonicalized.
         assert_eq!(
-            ReadFileTool.required_permission(&json!({"path": "../secret.txt"}), &ctx),
+            ReadFileTool::default().required_permission(&json!({"path": "../secret.txt"}), &ctx),
             PermissionTier::Confirm
         );
         std::fs::remove_dir_all(&root).ok();
@@ -361,7 +387,7 @@ mod tests {
 
         let ctx = ctx_with_root(Some(root.clone()));
         assert_eq!(
-            ReadFileTool.required_permission(&json!({"path": "escape"}), &ctx),
+            ReadFileTool::default().required_permission(&json!({"path": "escape"}), &ctx),
             PermissionTier::Confirm,
             "a symlink resolving outside project_root must not be Auto"
         );
@@ -374,7 +400,7 @@ mod tests {
     fn any_path_is_confirm_when_project_root_is_unset() {
         let ctx = ctx_with_root(None);
         assert_eq!(
-            ReadFileTool.required_permission(&json!({"path": "anything.txt"}), &ctx),
+            ReadFileTool::default().required_permission(&json!({"path": "anything.txt"}), &ctx),
             PermissionTier::Confirm
         );
     }
@@ -384,7 +410,7 @@ mod tests {
         let root = temp_dir("read-contents");
         std::fs::write(root.join("a.txt"), "hello world").unwrap();
         let ctx = ctx_with_root(Some(root.clone()));
-        let result = ReadFileTool.execute(json!({"path": "a.txt"}), &ctx).await.unwrap();
+        let result = ReadFileTool::default().execute(json!({"path": "a.txt"}), &ctx).await.unwrap();
         assert_eq!(result, ToolResult::ok("hello world"));
         std::fs::remove_dir_all(&root).ok();
     }
@@ -393,7 +419,8 @@ mod tests {
     async fn read_file_reports_a_model_visible_error_for_a_missing_file() {
         let root = temp_dir("read-missing");
         let ctx = ctx_with_root(Some(root.clone()));
-        let result = ReadFileTool.execute(json!({"path": "nope.txt"}), &ctx).await.unwrap();
+        let result =
+            ReadFileTool::default().execute(json!({"path": "nope.txt"}), &ctx).await.unwrap();
         assert!(result.is_error);
         std::fs::remove_dir_all(&root).ok();
     }
@@ -407,5 +434,80 @@ mod tests {
         let result = ListDirectoryTool.execute(json!({"path": "."}), &ctx).await.unwrap();
         assert_eq!(result, ToolResult::ok("a.txt\nb.txt"));
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    // -- the spill directory exception --
+
+    #[test]
+    fn a_spilled_file_is_read_without_asking_even_with_no_project_root() {
+        let spill = temp_dir("spill-auto");
+        std::fs::write(spill.join("out-part-002.txt"), "rest of the page").unwrap();
+        let tool = ReadFileTool::with_spill_dir(&spill);
+        let path = spill.join("out-part-002.txt").to_string_lossy().into_owned();
+        let tier = tool.required_permission(&json!({ "path": path }), &ctx_with_root(None));
+        assert_eq!(tier, PermissionTier::Auto);
+    }
+
+    #[test]
+    fn a_path_outside_both_the_spill_directory_and_the_project_still_asks() {
+        let spill = temp_dir("spill-outside");
+        let elsewhere = temp_dir("spill-elsewhere");
+        std::fs::write(elsewhere.join("secret.txt"), "x").unwrap();
+        let tool = ReadFileTool::with_spill_dir(&spill);
+        let path = elsewhere.join("secret.txt").to_string_lossy().into_owned();
+        assert_eq!(
+            tool.required_permission(&json!({ "path": path }), &ctx_with_root(None)),
+            PermissionTier::Confirm
+        );
+    }
+
+    #[test]
+    fn a_path_that_escapes_the_spill_directory_with_dot_dot_still_asks() {
+        let parent = temp_dir("spill-dotdot");
+        let spill = parent.join("tool-output");
+        std::fs::create_dir_all(&spill).unwrap();
+        std::fs::write(parent.join("outside.txt"), "x").unwrap();
+        let tool = ReadFileTool::with_spill_dir(&spill);
+        let sneaky = format!("{}/../outside.txt", spill.display());
+        assert_eq!(
+            tool.required_permission(&json!({ "path": sneaky }), &ctx_with_root(None)),
+            PermissionTier::Confirm
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_symlink_inside_the_spill_directory_pointing_outside_still_asks() {
+        let parent = temp_dir("spill-symlink");
+        let spill = parent.join("tool-output");
+        std::fs::create_dir_all(&spill).unwrap();
+        std::fs::write(parent.join("outside.txt"), "x").unwrap();
+        std::os::unix::fs::symlink(parent.join("outside.txt"), spill.join("link.txt")).unwrap();
+        let tool = ReadFileTool::with_spill_dir(&spill);
+        let path = spill.join("link.txt").to_string_lossy().into_owned();
+        assert_eq!(
+            tool.required_permission(&json!({ "path": path }), &ctx_with_root(None)),
+            PermissionTier::Confirm
+        );
+    }
+
+    #[test]
+    fn a_relative_path_never_counts_as_spilled_output() {
+        let spill = temp_dir("spill-relative");
+        std::fs::write(spill.join("a.txt"), "x").unwrap();
+        let tool = ReadFileTool::with_spill_dir(&spill);
+        assert_eq!(
+            tool.required_permission(&json!({ "path": "a.txt" }), &ctx_with_root(None)),
+            PermissionTier::Confirm
+        );
+    }
+
+    #[test]
+    fn without_a_spill_directory_nothing_changes() {
+        let tool = ReadFileTool::default();
+        assert_eq!(
+            tool.required_permission(&json!({ "path": "/tmp/anything" }), &ctx_with_root(None)),
+            PermissionTier::Confirm
+        );
     }
 }

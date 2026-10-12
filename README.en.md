@@ -45,6 +45,9 @@ running natively on **Windows**, **macOS**, and **Linux (X11)**.
   commands, and search the web as part of a reply, with a permission system
   to confirm anything risky; see [`AI_FEATURES.md`](AI_FEATURES.md) for the
   full breakdown, including what is sent to a cloud provider
+- 🧠 **Memory and long conversations** — she remembers what you tell her (review,
+  edit, delete, or switch it off in Settings), and long chats are summarized
+  automatically so she never loses her persona; see [`AI_FEATURES.md`](AI_FEATURES.md)
 - 👥 **Multiple instances** — several pets on screen at once, with settings
   applying live to every one
 - 📏 **Adjustable scale and opacity** — both apply immediately, no restart

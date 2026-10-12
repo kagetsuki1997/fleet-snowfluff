@@ -36,6 +36,16 @@ Ollama provider doesn't send your conversation to a cloud model — though a
 `web_search` it runs still sends the search query to a search service (see
 [Web search](#web-search)).
 
+With **any cloud profile** — API key or subscription — two more things ride
+along when memory is on: the facts the assistant remembers about you (see
+[Memory](#memory-and-long-conversations)) and the running summary of an
+earlier part of the conversation. Anything you mark **sensitive** is
+withheld from cloud profiles, but that covers saved entries only: text you
+type in the chat still goes to whichever provider you are talking to. The
+data disclosure says so, and because it changed, every cloud profile asks
+you to review it once more before it is used again. The local Ollama
+provider keeps all of this on your machine.
+
 ### When a task needs more than these tools
 
 In `mix` mode, a request that needs tools is escalated from the local model
@@ -62,6 +72,87 @@ before running:
   offer that option.
 - **Deny** — reported back to the model as "not permitted," never silently
   ignored.
+
+## Memory and long conversations
+
+**How much of a conversation the model sees.** The history sent with each
+request is bounded by a _token_ budget (the smaller of 3,000 tokens or 40% of
+the model's loaded context window), not by a number of messages: many short
+messages are all kept, one very long message does not crowd out the rest. A
+fit check runs before every request and sheds optional parts in a fixed order
+— older history, keyword-matched memories, the summary, the memory digest,
+the persona's example replies, the optional tool listings — and never the
+persona itself. If a window is too small for the persona and your message
+(Ollama defaults to 4,096 tokens on machines with little video memory), the
+app says so instead of sending a request that would silently lose the persona.
+
+**Summaries.** Older turns are folded into a short, neutral summary kept next
+to the conversation. It is written in the background after a stretch of
+conversation builds up and goes quiet, when you close the chat window, or after
+ten idle minutes — never on every reply, and never while a reply is being
+written. The model that writes it is your local Ollama model if enabled,
+otherwise your default profile. The assistant can also ask for one itself
+(`compact_context`). The summary leaves out health, money, credentials, and
+similar topics. It is shown to the model as background notes, not instructions.
+
+**Long tool results.** A single tool result (a big file, a large MCP
+response) is cut to a bounded size in the middle of a run. The rest is saved
+under the app data directory as numbered parts the assistant can read back
+with `read_file` without a confirmation prompt; old ones are cleaned up
+automatically.
+
+**What the assistant remembers about you.** Facts like "has a cat named Mochi"
+persist across conversations in a local SQLite database. A short list of the
+most important and recent facts rides along with every request, plus any that
+match what you just said. Matching is by keyword and works across English,
+Traditional and Simplified Chinese, Japanese, and Korean; there is no
+embedding model and nothing is downloaded.
+
+- **Saved when you ask** ("remember that…"), when you correct something, and —
+  only at summary time — when the assistant notices a durable fact. Those last
+  ones carry an **Auto** badge in Settings → AI → Memory. Health, money,
+  credentials, sexuality, religion, and politics are never saved
+  automatically; if you explicitly ask it to remember one, it is saved and
+  marked sensitive.
+- <a id="trigger-phrases"></a>**Trigger phrases.** The save-on-request and correction paths run only when
+  your message contains one of a fixed set of phrases (matched
+  case-insensitively, as plain substrings) in English, Traditional/Simplified
+  Chinese, Japanese, or Korean: `REMEMBER_CUES` ("remember that", "記住",
+  "覚えておいて", "기억해", …) in
+  [`background.rs`](crates/fleet-snowfluff-ai/src/memory/background.rs#L52) and
+  `CORRECTION_CUES` ("actually", "不對", "違う", "아니야", …) in
+  [the same file](crates/fleet-snowfluff-ai/src/memory/background.rs#L85).
+  A message without one of them triggers no background save, so phrase it
+  that way ("remember that I…") or ask the assistant to use its memory tool.
+  Both lists are meant to be extended.
+- **Corrections** replace the old fact (it stays viewable under "Replaced
+  memories"); **delete** really erases it, including from the database file.
+- **Tools.** `memory_search` and `memory_get` are available everywhere,
+  delegated sub-tasks included; `memory_remember` and `memory_forget` (which
+  asks for your confirmation) are for the main assistant only. Memory is a
+  single pool owned by you — a persona name is recorded for reference but
+  never filters anything.
+- **Control.** Settings → AI → Memory lists, searches, edits, pins, marks
+  sensitive, and deletes memories, has an off switch (existing memories stay
+  but are not used), and "Erase all memories".
+
+### When does each part run?
+
+| What                              | When it happens                                                                                                                                                                                                                |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Memory lookup**                 | On every message while memory is on: the top-ranked facts (about 400 tokens) plus up to 5 keyword matches for what you just typed are added to the request. The assistant can also call `memory_search` / `memory_get` itself. |
+| **Memory save, by the assistant** | When it calls `memory_remember` (you confirm each one).                                                                                                                                                                        |
+| **Memory save, backstop**         | After a reply, only if your message contains a [trigger phrase](#trigger-phrases) and the assistant didn't already save it. Runs in the background.                                                                            |
+| **Memory save, automatic**        | After each summary is written, the turns it covered are scanned for durable facts (saved with an **Auto** badge). Nothing is saved from ordinary chatting otherwise.                                                           |
+| **Summary (batch)**               | Older turns that no longer fit the history budget have built up to about 1,200 tokens, 20 seconds have passed with no new message, and no reply is being written. Checked every 5 seconds.                                     |
+| **Summary (idle / close)**        | After 10 idle minutes, or when you close the chat window.                                                                                                                                                                      |
+| **Summary (by the assistant)**    | When it calls `compact_context`.                                                                                                                                                                                               |
+| **Summary retry**                 | After a failure, retries after 1 minute, doubling up to 30 minutes.                                                                                                                                                            |
+
+A short conversation is never summarized, because nothing has fallen out of
+the history budget yet. Summaries and lookups never delay a reply. With memory
+off, there is no lookup, no memory save, and no automatic extraction (summaries
+still run).
 
 ## Native tools
 

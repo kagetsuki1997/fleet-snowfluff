@@ -105,6 +105,21 @@ interface AiSettingsSnapshot {
   persona_warning: string | null;
 }
 
+// Mirrors `fleet_snowfluff_ai::memory::MemoryRecord`.
+interface MemoryRecord {
+  id: string;
+  text: string;
+  kind: string;
+  tags: string[];
+  origin: "told" | "auto";
+  importance: number;
+  pinned: boolean;
+  status: "active" | "superseded";
+  superseded_by: string | null;
+  sensitive: boolean;
+  created_at: string;
+}
+
 // Mirrors `fleet_snowfluff_ai::mcp::config` (`crates/fleet-snowfluff-ai/src/mcp/config.rs`).
 type McpServerStatus = "ready" | "pending";
 
@@ -357,6 +372,13 @@ async function main(): Promise<void> {
     // than relying on its own caller's `await renderAi()` -- see
     // `tool_confirmation::notify_mcp_servers_changed`'s own doc comment.
     await listen("mcp-servers-changed", () => void renderAi());
+
+    // The assistant can save or correct a memory while Settings is open; only the list is
+    // reloaded, so a search being typed or a row being edited is not lost.
+    await listen("memories-changed", () => {
+      const panel = document.querySelector<HTMLElement>('[data-panel="ai"]');
+      if (panel) void refreshMemoryList(panel);
+    });
   } catch (err) {
     // Nothing above renders anything on its own failure -- without
     // this, a thrown error here (e.g. an invoke() rejection) would
@@ -572,17 +594,19 @@ async function renderPersonalization(): Promise<void> {
 
 async function renderAi(): Promise<void> {
   const panel = document.querySelector<HTMLElement>('[data-panel="ai"]')!;
-  const [snapshot, mcpServers] = await Promise.all([
+  const [snapshot, mcpServers, memoryEnabled] = await Promise.all([
     invoke<AiSettingsSnapshot>("get_ai_settings"),
     invoke<McpServerRecord[]>("list_mcp_servers"),
+    invoke<boolean>("get_memory_enabled"),
   ]);
-  renderAiPanel(panel, snapshot, mcpServers);
+  renderAiPanel(panel, snapshot, mcpServers, memoryEnabled);
 }
 
 function renderAiPanel(
   panel: HTMLElement,
   snapshot: AiSettingsSnapshot,
   mcpServers: McpServerRecord[],
+  memoryEnabled: boolean,
 ): void {
   const { settings, persona_warning } = snapshot;
 
@@ -640,6 +664,20 @@ function renderAiPanel(
       <p class="hint">${t("ai.mcp.hint")}</p>
       <div id="ai-mcp-servers">${renderMcpServerRows(mcpServers)}</div>
       ${renderMcpAddForm()}
+    </fieldset>
+    <fieldset class="ai-section">
+      <legend>${t("ai.memory_section_title")}</legend>
+      <p class="hint">${t("ai.memory.hint")}</p>
+      ${field(t("ai.memory.enabled_label"), `<input type="checkbox" id="ai-memory-enabled-checkbox" ${memoryEnabled ? "checked" : ""} />`)}
+      <input type="search" id="ai-memory-search" placeholder="${escapeHtml(t("ai.memory.search_placeholder"))}" />
+      <div id="ai-memory-list"></div>
+      <details id="ai-memory-history" hidden>
+        <summary id="ai-memory-history-summary"></summary>
+        <div id="ai-memory-history-list"></div>
+      </details>
+      <div id="ai-memory-erase-area">
+        <button type="button" id="ai-memory-erase-button" class="secondary">${t("ai.memory.erase_all_button")}</button>
+      </div>
     </fieldset>
     ${persona_warning ? `<p class="error">${t("ai.persona_warning", { error: persona_warning })}</p>` : ""}
   `;
@@ -700,6 +738,154 @@ function renderAiPanel(
   }
 
   wireMcpServersSection(panel);
+  wireMemorySection(panel);
+}
+
+// -- conversation-memory-and-compaction: what the assistant remembers. Every row is a collapsible
+// `<details>` like the profile and MCP rows. The list reloads on its own (search, a change from
+// chat), so the rest of the AI panel is not re-rendered and a half-typed search survives.
+
+function formatMemoryDate(iso: string): string {
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString();
+}
+
+function renderMemoryRow(memory: MemoryRecord, openIds: Set<string>, history: boolean): string {
+  const id = escapeHtml(memory.id);
+  const badges = [
+    `<span class="ai-memory-badge ai-memory-badge-${memory.origin}">${t(`ai.memory.origin.${memory.origin}`)}</span>`,
+    memory.pinned ? `<span class="ai-memory-badge">${t("ai.memory.pinned_badge")}</span>` : "",
+    memory.sensitive
+      ? `<span class="ai-memory-badge">${t("ai.memory.sensitive_badge")}</span>`
+      : "",
+  ].join("");
+  const body = history
+    ? `<p class="hint">${t("ai.memory.replaced_hint")}</p>
+       <button type="button" class="ai-memory-delete-button secondary" data-id="${id}">${t("ai.memory.delete_button")}</button>`
+    : `<textarea class="ai-memory-text-input" data-id="${id}" rows="3">${escapeHtml(memory.text)}</textarea>
+       ${field(t("ai.memory.pinned_label"), `<input type="checkbox" class="ai-memory-pinned-checkbox" data-id="${id}" ${memory.pinned ? "checked" : ""} />`)}
+       ${field(t("ai.memory.sensitive_label"), `<input type="checkbox" class="ai-memory-sensitive-checkbox" data-id="${id}" ${memory.sensitive ? "checked" : ""} />`)}
+       <p class="hint">${t("ai.memory.sensitive_hint")}</p>
+       <p class="hint">${escapeHtml(formatMemoryDate(memory.created_at))}</p>
+       <button type="button" class="ai-memory-save-button" data-id="${id}">${t("ai.memory.save_button")}</button>
+       <button type="button" class="ai-memory-delete-button secondary" data-id="${id}">${t("ai.memory.delete_button")}</button>`;
+  return `
+    <details class="ai-profile-row ai-memory-row" data-id="${id}" ${openIds.has(memory.id) ? "open" : ""}>
+      <summary><span class="ai-memory-text">${escapeHtml(memory.text)}</span> ${badges}</summary>
+      <div class="ai-profile-body">${body}</div>
+    </details>`;
+}
+
+function openMemoryIds(container: Element | null): Set<string> {
+  const ids = new Set<string>();
+  container?.querySelectorAll<HTMLDetailsElement>("details.ai-memory-row[open]").forEach((row) => {
+    if (row.dataset.id) ids.add(row.dataset.id);
+  });
+  return ids;
+}
+
+async function refreshMemoryList(panel: HTMLElement): Promise<void> {
+  const listEl = panel.querySelector<HTMLElement>("#ai-memory-list");
+  const historyEl = panel.querySelector<HTMLElement>("#ai-memory-history-list");
+  if (!listEl || !historyEl) return;
+  const query = panel.querySelector<HTMLInputElement>("#ai-memory-search")?.value.trim() ?? "";
+  try {
+    const [memories, history] = await Promise.all([
+      invoke<MemoryRecord[]>("list_memories", { query: query || null }),
+      invoke<MemoryRecord[]>("list_memory_history"),
+    ]);
+    const open = new Set([...openMemoryIds(listEl), ...openMemoryIds(historyEl)]);
+    listEl.innerHTML = memories.length
+      ? memories.map((memory) => renderMemoryRow(memory, open, false)).join("")
+      : `<p class="hint">${t(query ? "ai.memory.no_matches" : "ai.memory.empty")}</p>`;
+    historyEl.innerHTML = history.map((memory) => renderMemoryRow(memory, open, true)).join("");
+    const historyDetails = panel.querySelector<HTMLElement>("#ai-memory-history")!;
+    historyDetails.hidden = history.length === 0;
+    panel.querySelector<HTMLElement>("#ai-memory-history-summary")!.textContent = t(
+      "ai.memory.history_summary",
+      { count: history.length },
+    );
+    wireMemoryRows(panel);
+  } catch (err) {
+    listEl.innerHTML = `<p class="error">${escapeHtml(t("ai.memory.load_error", { error: String(err) }))}</p>`;
+  }
+}
+
+function wireMemoryRows(panel: HTMLElement): void {
+  for (const button of panel.querySelectorAll<HTMLButtonElement>(".ai-memory-save-button")) {
+    button.addEventListener("click", async () => {
+      const id = button.dataset.id!;
+      const pick = <T extends HTMLElement>(selector: string) =>
+        panel.querySelector<T>(`${selector}[data-id="${id}"]`)!;
+      await invoke("update_memory", {
+        id,
+        request: {
+          text: pick<HTMLTextAreaElement>(".ai-memory-text-input").value,
+          pinned: pick<HTMLInputElement>(".ai-memory-pinned-checkbox").checked,
+          sensitive: pick<HTMLInputElement>(".ai-memory-sensitive-checkbox").checked,
+        },
+      });
+      await refreshMemoryList(panel);
+    });
+  }
+  for (const button of panel.querySelectorAll<HTMLButtonElement>(".ai-memory-delete-button")) {
+    // A second click confirms, so a stray click never erases anything.
+    let armed: number | undefined;
+    button.addEventListener("click", async () => {
+      if (armed === undefined) {
+        button.textContent = t("ai.memory.delete_confirm");
+        armed = window.setTimeout(() => {
+          armed = undefined;
+          button.textContent = t("ai.memory.delete_button");
+        }, 4000);
+        return;
+      }
+      window.clearTimeout(armed);
+      await invoke("delete_memory", { id: button.dataset.id });
+      await refreshMemoryList(panel);
+    });
+  }
+}
+
+function wireMemorySection(panel: HTMLElement): void {
+  panel
+    .querySelector<HTMLInputElement>("#ai-memory-enabled-checkbox")!
+    .addEventListener("change", (e) => {
+      invoke("set_memory_enabled", { enabled: (e.target as HTMLInputElement).checked });
+    });
+
+  let searchTimer: number | undefined;
+  panel.querySelector<HTMLInputElement>("#ai-memory-search")!.addEventListener("input", () => {
+    window.clearTimeout(searchTimer);
+    searchTimer = window.setTimeout(() => void refreshMemoryList(panel), 200);
+  });
+
+  const eraseArea = panel.querySelector<HTMLElement>("#ai-memory-erase-area")!;
+  const showEraseButton = () => {
+    eraseArea.innerHTML = `<button type="button" id="ai-memory-erase-button" class="secondary">${t("ai.memory.erase_all_button")}</button>`;
+    eraseArea
+      .querySelector<HTMLButtonElement>("#ai-memory-erase-button")!
+      .addEventListener("click", showConfirm);
+  };
+  const showConfirm = () => {
+    eraseArea.innerHTML = `
+      <p class="error">${t("ai.memory.erase_all_warning")}</p>
+      <button type="button" id="ai-memory-erase-confirm-button">${t("ai.memory.erase_all_confirm")}</button>
+      <button type="button" id="ai-memory-erase-cancel-button" class="secondary">${t("ai.memory.erase_all_cancel")}</button>`;
+    eraseArea
+      .querySelector<HTMLButtonElement>("#ai-memory-erase-cancel-button")!
+      .addEventListener("click", showEraseButton);
+    eraseArea
+      .querySelector<HTMLButtonElement>("#ai-memory-erase-confirm-button")!
+      .addEventListener("click", async () => {
+        await invoke("erase_all_memories");
+        showEraseButton();
+        await refreshMemoryList(panel);
+      });
+  };
+  showEraseButton();
+
+  void refreshMemoryList(panel);
 }
 
 // -- mcp-client-support: connected-servers list, each a collapsible

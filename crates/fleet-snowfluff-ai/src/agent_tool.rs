@@ -94,6 +94,13 @@ pub trait Tool: Send + Sync {
     /// write-capable tool from this).
     fn allows_session_remember(&self) -> bool { false }
 
+    /// Whether a delegated sub-task may be given this tool. `true` by default;
+    /// tools that write to shared state the top-level agent owns (saving or
+    /// forgetting a memory, compacting the conversation) return `false`, so
+    /// a sub-task can read but never change them, and parallel
+    /// sub-tasks cannot create overlapping writes.
+    fn available_to_children(&self) -> bool { true }
+
     async fn execute(&self, args: Value, ctx: &ToolContext) -> Result<ToolResult, ToolError>;
 }
 

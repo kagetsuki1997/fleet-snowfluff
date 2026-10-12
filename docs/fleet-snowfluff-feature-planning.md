@@ -3351,16 +3351,38 @@ consumer 先建基礎設施」的原則維持未建，不是遺漏。）
 
 （原 Stage 5。）
 
-建立：
+Stage 7 的第一個 change（`/opsx:explore` 已收斂，設計見
+[`agent-foundation-memory-architecture.md`](agent-foundation-memory-architecture.md)）
+把下面三件事放在**同一個 change**，內部分成可獨立出貨的 task group：
+
+- Context Compaction：歷史視窗由「20 則訊息」改為固定 token 預算（短訊息可保留更多、
+  超長訊息不會撐爆成本）；超出預算的內容以批次方式（累積到門檻、安靜一段時間後、且
+  不在回覆生成中）加上「對話閒置／結束」觸發摘要，不是每則回覆都摘要；視窗百分比只當
+  長 agent run 的保險；滾動摘要以標記過的 untrusted 區塊注入；單次 run 內對工具輸出
+  （含 MCP）加上大小上限，溢出內容存到可讀取的暫存目錄
+- Memory Store：SQLite（`rusqlite`）+ FTS5，藏在 `MemoryService` trait 後面；v1 不用
+  embedding（CJK 以字元 bigram 索引、繁→簡正規化）；永遠注入的 digest（排序後的
+  top-N 原子事實）；supersede／hard delete；Settings 可檢視、編輯、刪除
+- Memory Tools 與 Extraction：`memory_search`/`memory_get`（Aemeath 各情境皆可）、
+  `memory_remember`/`memory_forget`/`compact_context`（僅 top-level）；extraction 只在
+  compaction 時跑，結果標記 `auto`、不抽敏感主題
+
+首個 change 的重點是**關係型記憶**（寵物對使用者的了解）；專案事實放另一個 namespace，
+之後再做。
+
+**已交付**（change `conversation-memory-and-compaction`）：上述三項皆已實作——token 預算歷史、
+批次摘要與 `compact_context`、工具輸出上限與暫存檔、SQLite 記憶庫（含 Settings 檢視／編輯／
+刪除與總開關）、記憶工具、compaction 後的 extraction，以及所有雲端 profile 的更新揭露與重新確認。
+手動端對端驗證記錄見該 change 的 tasks 5.4。
+
+之後的 Stage 7 工作（各自獨立的 change）：
 
 - 好感度 / 心情值
-- 近期互動記憶摘要
-- RAG
-- 長期向量記憶（需求確認後）
-- Context Engine 升級：Compaction、Memory Retrieval，`ContextManager` →
-  `ContextEngine` trait（見第 10.3 節）
 - Sub-agent Context Projection（`SubAgentContextSpec`、`build_sub_agent_context`，
   第 10.1 節；原排在 Stage 5，挪到這裡的理由見上方 §10 的「實作時機」說明）
+- RAG（遊戲設定、劇情、使用者文件）與 embedding／向量記憶（需求確認後；
+  `MemoryService` 後面換 adapter 即可，`semantic-memory` 是候選之一）
+- `ContextManager` → `ContextEngine` trait（見第 10.3 節；視需要才升級）
 
 ### Stage 8 — Voice / Automation
 
@@ -3747,7 +3769,8 @@ MCP
         ▼
 Stage 7
 Memory / Knowledge
-+ Context Engine: compaction / retrieval / sub-agent projection
++ Context Engine: compaction + memory store + extraction（首個 change）
++ 之後：mood / sub-agent projection / RAG + embedding
         │
         ▼
 Stage 8

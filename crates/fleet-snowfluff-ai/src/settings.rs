@@ -286,23 +286,26 @@ impl Default for AiSettings {
             project_root: None,
             claude_code_tool_access: ClaudeCodeToolAccess::default(),
             disclosure_version: CURRENT_DISCLOSURE_VERSION,
+            memory_enabled: true,
         }
     }
 }
 
 /// Runs once per config, when it was written under an older disclosure
-/// text: drops the OpenAI and Anthropic *API-key* acknowledgements so the
-/// updated disclosure (which now says tool results go to the provider,
-/// and that tool use can make several billed requests) is shown again,
-/// then records the current version so it never runs a second time.
-/// Subscription, Ollama and Mock acknowledgements are untouched -- their
-/// disclosures did not change. Idempotent by construction.
+/// text: drops every OpenAI and Anthropic acknowledgement, API-key and
+/// subscription alike, so the updated disclosure is shown again. Revision 1
+/// added "tool results go to the provider, and tool use can make several
+/// billed requests" for API-key pairs; revision 2 adds "remembered facts and
+/// conversation summaries go to the provider too", which applies to every
+/// cloud pair, subscription-backed ones included. Records the current version
+/// so it never runs a second time. Ollama and Mock acknowledgements are
+/// untouched -- nothing leaves the machine for them. Idempotent by
+/// construction.
 fn migrate_disclosures(mut settings: AiSettings) -> AiSettings {
     if settings.disclosure_version < CURRENT_DISCLOSURE_VERSION {
-        settings.acknowledged_disclosures.retain(|key| {
-            !(matches!(key.provider, ProviderKind::OpenAi | ProviderKind::Anthropic)
-                && key.auth_method == AuthMethod::ApiKey)
-        });
+        settings
+            .acknowledged_disclosures
+            .retain(|key| !matches!(key.provider, ProviderKind::OpenAi | ProviderKind::Anthropic));
         settings.disclosure_version = CURRENT_DISCLOSURE_VERSION;
     }
     settings
@@ -322,9 +325,10 @@ fn is_default_endpoint(base_url: Option<&str>, default: &str) -> bool {
 /// a disclosure changes materially enough that an earlier acknowledgement
 /// should not carry over -- `1` is the revision that added "tool results
 /// are sent to the provider, and tool use can make several billed
-/// requests" to the two API-key disclosures (`api-key-tool-calling`).
+/// requests" to the two API-key disclosures (`api-key-tool-calling`); `2` added
+/// the remembered-facts and summaries sentence to every cloud disclosure.
 /// See [`migrate_disclosures`].
-pub const CURRENT_DISCLOSURE_VERSION: u32 = 1;
+pub const CURRENT_DISCLOSURE_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AiSettings {
@@ -401,9 +405,34 @@ pub struct AiSettings {
     /// profile slot today (mirrors `project_root`'s own reasoning).
     #[serde(default)]
     pub claude_code_tool_access: ClaudeCodeToolAccess,
+    /// Master switch for conversation memory: the remembered-facts block in
+    /// requests, the memory tools, the explicit-remember backstop, and
+    /// extraction at compaction. On by default (also for a config written
+    /// before this field existed). Turning it off leaves saved memories
+    /// untouched; they are used again when it is turned back on.
+    #[serde(default = "default_memory_enabled")]
+    pub memory_enabled: bool,
 }
 
+fn default_memory_enabled() -> bool { true }
+
+/// The one local profile: Ollama running on this machine. It is the only
+/// profile whose requests never leave the machine, which is what the memory and
+/// compaction features key their privacy rules on.
+pub const LOCAL_PROFILE_KEY: ProfileKey =
+    ProfileKey { provider: ProviderKind::Ollama, auth_method: AuthMethod::Local };
+
 impl AiSettings {
+    /// The profile that does background work on the user's conversation
+    /// (writing summaries and deriving memories): the enabled local profile
+    /// when there is one, so the text stays on this machine, otherwise the
+    /// default profile. A CLI-backed profile can be returned; the caller builds
+    /// it as a fresh provider with no session to resume, so it never touches
+    /// the chat's own CLI session.
+    pub fn background_profile(&self) -> Option<&ProviderProfile> {
+        self.profile(LOCAL_PROFILE_KEY).or_else(|| self.default_profile())
+    }
+
     /// The profile currently handling chat requests, if any.
     pub fn default_profile(&self) -> Option<&ProviderProfile> {
         let key = self.default_profile?;
@@ -456,6 +485,7 @@ fn migrate_legacy_active_provider(obj: &serde_json::Map<String, Value>) -> AiSet
             project_root: None,
             claude_code_tool_access: ClaudeCodeToolAccess::default(),
             disclosure_version: 0,
+            memory_enabled: true,
         };
     };
 
@@ -491,6 +521,7 @@ fn migrate_legacy_active_provider(obj: &serde_json::Map<String, Value>) -> AiSet
         claude_code_tool_access: ClaudeCodeToolAccess::default(),
         // A Stage 1 acknowledgement predates every disclosure revision.
         disclosure_version: 0,
+        memory_enabled: true,
     }
 }
 
@@ -562,6 +593,10 @@ pub fn sanitize(raw: &Value) -> AiSettings {
         .and_then(Value::as_u64)
         .map_or(0, |v| u32::try_from(v).unwrap_or(u32::MAX));
 
+    // Missing, or not a boolean: on, as for a config from before the switch
+    // existed.
+    let memory_enabled = obj.get("memory_enabled").and_then(Value::as_bool).unwrap_or(true);
+
     migrate_disclosures(AiSettings {
         ai_enabled,
         enabled_profiles,
@@ -571,6 +606,7 @@ pub fn sanitize(raw: &Value) -> AiSettings {
         project_root,
         claude_code_tool_access,
         disclosure_version,
+        memory_enabled,
     })
 }
 
@@ -781,6 +817,7 @@ mod tests {
             ],
             "default_profile": { "provider": "anthropic", "auth_method": "subscription" },
             "acknowledged_disclosures": [{ "provider": "anthropic", "auth_method": "subscription" }],
+            "disclosure_version": CURRENT_DISCLOSURE_VERSION,
         });
         let settings = sanitize(&raw);
         assert_eq!(settings.enabled_profiles.len(), 2);
@@ -789,6 +826,35 @@ mod tests {
         assert_eq!(settings.default_profile, Some(default_key));
         assert_eq!(settings.default_profile().unwrap().model, None);
         assert!(settings.disclosure_acknowledged(default_key));
+    }
+
+    #[test]
+    fn the_background_profile_prefers_an_enabled_local_profile_over_the_default() {
+        let raw = json!({
+            "enabled_profiles": [
+                { "provider": "anthropic", "auth_method": "api_key" },
+                { "provider": "ollama", "auth_method": "local" },
+            ],
+            "default_profile": { "provider": "anthropic", "auth_method": "api_key" },
+        });
+        let settings = sanitize(&raw);
+        assert_eq!(settings.background_profile().unwrap().key(), LOCAL_PROFILE_KEY);
+    }
+
+    #[test]
+    fn the_background_profile_falls_back_to_the_default_without_a_local_one() {
+        let raw = json!({
+            "enabled_profiles": [{ "provider": "anthropic", "auth_method": "subscription" }],
+            "default_profile": { "provider": "anthropic", "auth_method": "subscription" },
+        });
+        let settings = sanitize(&raw);
+        let profile = settings.background_profile().unwrap();
+        assert!(profile.uses_cli(), "a CLI-backed default is allowed for background work");
+    }
+
+    #[test]
+    fn there_is_no_background_profile_when_nothing_is_enabled() {
+        assert!(AiSettings::default().background_profile().is_none());
     }
 
     #[test]
@@ -841,6 +907,7 @@ mod tests {
             project_root: Some(PathBuf::from("/home/user/my-project")),
             claude_code_tool_access: ClaudeCodeToolAccess::default(),
             disclosure_version: CURRENT_DISCLOSURE_VERSION,
+            memory_enabled: false,
         };
 
         let json_str = to_json_string(&settings);
@@ -1047,22 +1114,29 @@ mod tests {
     }
 
     #[test]
-    fn an_unversioned_config_loses_only_its_api_key_acknowledgements() {
+    fn an_unversioned_config_loses_every_cloud_acknowledgement_subscription_included() {
         let loaded = sanitize(&unversioned_file_with_everything_acknowledged());
+        assert!(
+            loaded.acknowledged_disclosures.is_empty(),
+            "{:?}",
+            loaded.acknowledged_disclosures
+        );
+        assert_eq!(loaded.disclosure_version, CURRENT_DISCLOSURE_VERSION);
+    }
 
-        assert!(!loaded
-            .acknowledged_disclosures
-            .contains(&key(ProviderKind::OpenAi, AuthMethod::ApiKey)));
-        assert!(!loaded
-            .acknowledged_disclosures
-            .contains(&key(ProviderKind::Anthropic, AuthMethod::ApiKey)));
-        // Their disclosures did not change, so these stand.
-        assert!(loaded
-            .acknowledged_disclosures
-            .contains(&key(ProviderKind::OpenAi, AuthMethod::Subscription)));
-        assert!(loaded
-            .acknowledged_disclosures
-            .contains(&key(ProviderKind::Anthropic, AuthMethod::Subscription)));
+    #[test]
+    fn a_config_acknowledged_under_revision_one_is_asked_again_for_every_cloud_pair() {
+        let mut file = unversioned_file_with_everything_acknowledged();
+        file["disclosure_version"] = json!(1);
+        let loaded = sanitize(&file);
+        for pair in [
+            key(ProviderKind::OpenAi, AuthMethod::ApiKey),
+            key(ProviderKind::Anthropic, AuthMethod::ApiKey),
+            key(ProviderKind::OpenAi, AuthMethod::Subscription),
+            key(ProviderKind::Anthropic, AuthMethod::Subscription),
+        ] {
+            assert!(!loaded.acknowledged_disclosures.contains(&pair), "{pair:?}");
+        }
         assert_eq!(loaded.disclosure_version, CURRENT_DISCLOSURE_VERSION);
     }
 
@@ -1129,9 +1203,7 @@ mod tests {
         let mut file = unversioned_file_with_everything_acknowledged();
         file["disclosure_version"] = json!("one");
         let loaded = sanitize(&file);
-        assert!(!loaded
-            .acknowledged_disclosures
-            .contains(&key(ProviderKind::OpenAi, AuthMethod::ApiKey)));
+        assert!(loaded.acknowledged_disclosures.is_empty());
     }
 
     #[test]
@@ -1147,5 +1219,16 @@ mod tests {
             loaded.acknowledged_disclosures
         );
         assert_eq!(loaded.disclosure_version, CURRENT_DISCLOSURE_VERSION);
+    }
+
+    #[test]
+    fn memory_is_on_by_default_and_for_a_config_without_the_field() {
+        assert!(AiSettings::default().memory_enabled);
+        assert!(load_from_str(r#"{"ai_enabled": true}"#).memory_enabled);
+        assert!(!load_from_str(r#"{"memory_enabled": false}"#).memory_enabled);
+        assert!(
+            load_from_str(r#"{"memory_enabled": "no"}"#).memory_enabled,
+            "junk reads as the default"
+        );
     }
 }

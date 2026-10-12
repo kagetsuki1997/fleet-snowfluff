@@ -90,6 +90,9 @@ pub fn open_or_focus_chat(app: &AppHandle, title: &str) {
                 // `sync` read that state themselves rather than
                 // assuming closing always means "done".
                 WindowEvent::Destroyed => {
+                    // A conversation with unsummarized turns gets summarized now rather than
+                    // waiting for the idle timeout.
+                    crate::compaction_runtime::window_closed(&app_handle);
                     chat_pause::recompute(&app_handle);
                     status_bubble::sync(&app_handle);
                 }

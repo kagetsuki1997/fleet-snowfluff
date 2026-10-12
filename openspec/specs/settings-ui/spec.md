@@ -49,7 +49,7 @@ The update tab SHALL offer manual check-for-update, show current and latest vers
 
 ### Requirement: AI tab
 
-The AI tab SHALL expose: the master AI-enabled switch, a list of enabled provider profiles (each a provider brand plus an auth method) with controls to enable/disable a profile and choose which one is the default, per-profile settings (credentials for API-key auth, endpoint where applicable, live-fetched model selection) for OpenAI, Anthropic, Ollama, and Mock, connection status for each enabled profile, a task-routing mode control (single, or mixed local-then-default routing), a project directory picker used to scope file- and command-related tool access, per-tool native access controls for a subscription profile backed by a CLI with its own per-tool allow/deny list (currently Claude Code), a list of connected MCP servers with a control to add one by filling in its connection details directly and a control to remove any connected one, and any persona-load warning per the ai-persona capability. Every control SHALL reflect current state on open and apply its change immediately, consistent with the personalization tab's existing live-apply behavior.
+The AI tab SHALL expose: the master AI-enabled switch, a list of enabled provider profiles (each a provider brand plus an auth method) with controls to enable/disable a profile and choose which one is the default, per-profile settings (credentials for API-key auth, endpoint where applicable, live-fetched model selection) for OpenAI, Anthropic, Ollama, and Mock, connection status for each enabled profile, a task-routing mode control (single, or mixed local-then-default routing), a project directory picker used to scope file- and command-related tool access, per-tool native access controls for a subscription profile backed by a CLI with its own per-tool allow/deny list (currently Claude Code), a list of connected MCP servers with a control to add one by filling in its connection details directly and a control to remove any connected one, a Memory section listing the memories the assistant has saved about the user (see the `memory` capability) with controls to review and manage them, and any persona-load warning per the ai-persona capability. Every control SHALL reflect current state on open and apply its change immediately, consistent with the personalization tab's existing live-apply behavior.
 
 #### Scenario: AI tab reflects current state
 
@@ -90,6 +90,36 @@ The AI tab SHALL expose: the master AI-enabled switch, a list of enabled provide
 
 - **WHEN** a user fills in an MCP server's connection details directly in the AI tab, instead of asking for it in chat
 - **THEN** the same confirmation and connection process applies as it would for a chat-requested connection
+
+#### Scenario: Memories are listed with where they came from
+
+- **WHEN** the user opens the Memory section after memories exist
+- **THEN** every active memory is listed with its text and whether the user asked for it or it was derived automatically, and a way to search the list
+
+#### Scenario: A memory can be edited, pinned, marked sensitive, or deleted
+
+- **WHEN** the user edits, pins, marks sensitive, or deletes a memory in the Memory section
+- **THEN** the change applies immediately, and a deletion erases the memory entirely
+
+#### Scenario: Superseded memories can be viewed
+
+- **WHEN** a memory was replaced by a correction
+- **THEN** the Memory section can show the superseded version as history, distinct from active memories
+
+#### Scenario: The Memory section is available in every supported language
+
+- **WHEN** the application language is English, Traditional Chinese, Simplified Chinese, Japanese, or Korean
+- **THEN** the Memory section's labels and messages are shown in that language
+
+#### Scenario: No memories yet is a valid state
+
+- **WHEN** no memory has been saved
+- **THEN** the Memory section says so plainly rather than showing an error or an empty control
+
+#### Scenario: Memory can be switched off and erased from the Memory section
+
+- **WHEN** the user opens the Memory section
+- **THEN** it offers a switch that turns memory on or off and an action to erase all memories, and a change to the switch applies starting with the next message sent
 
 ### Requirement: Cloud provider disclosure in AI tab
 

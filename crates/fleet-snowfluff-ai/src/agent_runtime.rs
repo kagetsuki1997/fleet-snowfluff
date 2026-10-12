@@ -24,7 +24,10 @@ use serde_json::{json, Value};
 
 use crate::{
     agent_tool::{PermissionTier, Tool, ToolContext, ToolError, ToolResult},
+    context_budget::{shrink_tool_results, suspected_truncation},
     message::{Message, ProviderError, ToolCallRecord},
+    token_estimate::{estimate_messages_tokens, estimate_tools_tokens},
+    tool_output::{bound_tool_output, ToolOutputBound},
     tool_provider::{ToolCallStreamItem, ToolCallingProvider, ToolDefinition},
 };
 
@@ -551,17 +554,23 @@ pub trait PermissionDecider: Send + Sync {
 pub struct ToolRegistry {
     eager: Vec<Arc<dyn Tool>>,
     lazy: Vec<Arc<dyn Tool>>,
+    /// Whether the stub listings for locked lazy tools are sent. Turned off
+    /// when the model's context window is too small for them; the tools
+    /// stay findable and unlockable through `search_tools`.
+    offer_stubs: bool,
 }
 
 impl ToolRegistry {
     /// Every tool here is eager -- the registry behaves exactly as it
     /// always has for a caller that never uses `with_lazy`.
-    pub fn new(tools: Vec<Arc<dyn Tool>>) -> Self { Self { eager: tools, lazy: Vec::new() } }
+    pub fn new(tools: Vec<Arc<dyn Tool>>) -> Self {
+        Self { eager: tools, lazy: Vec::new(), offer_stubs: true }
+    }
 
     /// `lazy` tools are only named (not fully defined) until the model
     /// searches for one -- see this type's own doc comment.
     pub fn with_lazy(eager: Vec<Arc<dyn Tool>>, lazy: Vec<Arc<dyn Tool>>) -> Self {
-        Self { eager, lazy }
+        Self { eager, lazy, offer_stubs: true }
     }
 
     /// Every eager tool's definition, unconditionally -- what
@@ -585,7 +594,7 @@ impl ToolRegistry {
             let definition = tool.definition();
             if unlocked.contains(&definition.name) {
                 definitions.push(definition);
-            } else {
+            } else if self.offer_stubs {
                 definitions.push(ToolDefinition {
                     name: definition.name,
                     description: truncate_for_stub(&definition.description),
@@ -594,6 +603,35 @@ impl ToolRegistry {
             }
         }
         definitions
+    }
+
+    /// The definitions that are always sent: every eager tool.
+    pub fn eager_definitions(&self) -> Vec<ToolDefinition> {
+        self.eager.iter().map(|tool| tool.definition()).collect()
+    }
+
+    /// The stub listings for the lazy tools, as `definitions_for` would send
+    /// them with nothing unlocked. What the pre-flight fit check may give
+    /// up on a small window.
+    pub fn stub_definitions(&self) -> Vec<ToolDefinition> {
+        self.lazy
+            .iter()
+            .map(|tool| {
+                let definition = tool.definition();
+                ToolDefinition {
+                    name: definition.name,
+                    description: truncate_for_stub(&definition.description),
+                    parameters: json!({"type": "object", "additionalProperties": true}),
+                }
+            })
+            .collect()
+    }
+
+    /// Stops (or resumes) sending the stub listings. The lazy tools remain
+    /// findable and unlockable through `search_tools` either way.
+    pub fn with_stubs_offered(mut self, offered: bool) -> Self {
+        self.offer_stubs = offered;
+        self
     }
 
     /// Every lazy tool's own name and description -- what
@@ -655,6 +693,25 @@ impl ToolRegistry {
     /// runtime-checked counter). Preserves the eager/lazy split --
     /// excluding `DELEGATE_TOOL_NAME`/`CONNECT_MCP_SERVER_TOOL_NAME`
     /// (both always eager) never touches `lazy` at all.
+    /// The registry a delegated sub-task gets: this one minus the tools that
+    /// must stay with the top-level agent -- delegation itself (so
+    /// recursion is impossible by construction), connecting
+    /// a new MCP server, and any tool that declares itself not
+    /// [`Tool::available_to_children`].
+    pub fn for_child(&self) -> Self {
+        let keep = |tool: &Arc<dyn Tool>| {
+            let name = tool.definition().name;
+            name != DELEGATE_TOOL_NAME
+                && name != CONNECT_MCP_SERVER_TOOL_NAME
+                && tool.available_to_children()
+        };
+        Self {
+            eager: self.eager.iter().filter(|tool| keep(tool)).cloned().collect(),
+            lazy: self.lazy.iter().filter(|tool| keep(tool)).cloned().collect(),
+            offer_stubs: self.offer_stubs,
+        }
+    }
+
     pub fn without(&self, name: &str) -> Self {
         Self {
             eager: self
@@ -664,6 +721,7 @@ impl ToolRegistry {
                 .cloned()
                 .collect(),
             lazy: self.lazy.iter().filter(|tool| tool.definition().name != name).cloned().collect(),
+            offer_stubs: self.offer_stubs,
         }
     }
 }
@@ -748,10 +806,33 @@ pub trait AgentRuntime: Send + Sync {
 /// still guaranteeing the loop cannot run forever.
 pub struct AemeathAgentRuntime {
     pub max_iterations: usize,
+    /// How large one tool result may be before it is cut off and the rest saved
+    /// to disk.
+    pub output_bound: ToolOutputBound,
+    /// The model's context window in tokens, when it is known. While a run is
+    /// filling it, old tool results are replaced to make room
+    /// (`context_budget::shrink_tool_results`). `None` -- an unknown
+    /// window, or a CLI-backed profile that manages its own context -- never
+    /// does.
+    pub context_window: Option<usize>,
 }
 
 impl Default for AemeathAgentRuntime {
-    fn default() -> Self { Self { max_iterations: 8 } }
+    fn default() -> Self {
+        Self { max_iterations: 8, output_bound: ToolOutputBound::default(), context_window: None }
+    }
+}
+
+impl AemeathAgentRuntime {
+    pub fn with_output_bound(mut self, output_bound: ToolOutputBound) -> Self {
+        self.output_bound = output_bound;
+        self
+    }
+
+    pub fn with_context_window(mut self, context_window: Option<usize>) -> Self {
+        self.context_window = context_window;
+        self
+    }
 }
 
 /// Turns a permitted tool's own outcome into the tool-result message
@@ -790,15 +871,29 @@ impl AgentRuntime for AemeathAgentRuntime {
         let mut unlocked: HashSet<String> = HashSet::new();
 
         for _ in 0..self.max_iterations {
+            let tool_definitions = registry.definitions_for(&unlocked);
+            if let Some(window) = self.context_window {
+                let removed = shrink_tool_results(&mut messages, &tool_definitions, window);
+                if removed > 0 {
+                    log::info!(
+                        "the request was near {window} tokens, so {removed} older tool result(s) \
+                         were replaced to make room"
+                    );
+                }
+            }
+            let estimated_prompt =
+                estimate_messages_tokens(&messages) + estimate_tools_tokens(&tool_definitions);
             let mut stream = provider
-                .chat_with_tools(messages.clone(), registry.definitions_for(&unlocked))
+                .chat_with_tools(messages.clone(), tool_definitions)
                 .await
                 .map_err(AgentError::Provider)?;
 
             let mut text = String::new();
             let mut calls = Vec::new();
+            let mut reported_prompt: Option<usize> = None;
             while let Some(item) = stream.next().await {
                 match item.map_err(AgentError::Provider)? {
+                    ToolCallStreamItem::PromptTokens(count) => reported_prompt = Some(count),
                     ToolCallStreamItem::TextDelta(delta) => {
                         on_text_delta(&delta);
                         text.push_str(&delta);
@@ -806,6 +901,15 @@ impl AgentRuntime for AemeathAgentRuntime {
                     ToolCallStreamItem::ToolCall { id, name, arguments } => {
                         calls.push(PendingToolCall { id, name, arguments })
                     }
+                }
+            }
+            if let Some(reported) = reported_prompt {
+                if suspected_truncation(reported, estimated_prompt) {
+                    log::warn!(
+                        "the model server processed only {reported} prompt tokens for a request \
+                         estimated at {estimated_prompt}: it probably truncated the prompt, which \
+                         can cut off the persona"
+                    );
                 }
             }
             last_text = text.clone();
@@ -983,9 +1087,7 @@ impl AgentRuntime for AemeathAgentRuntime {
                         // blast-radius concern `run_command`/`delegate_task`
                         // are already kept out of a child's own registry
                         // for.
-                        let child_registry = registry
-                            .without(DELEGATE_TOOL_NAME)
-                            .without(CONNECT_MCP_SERVER_TOOL_NAME);
+                        let child_registry = registry.for_child();
                         auto_futures.push(Box::pin(async move {
                             let child_messages = vec![
                                 Message::system(crate::prompt::delegated_task_system_prompt()),
@@ -1156,6 +1258,7 @@ impl AgentRuntime for AemeathAgentRuntime {
                             "every Auto-tier/Delegate/ConnectMcp/SearchTools call has a result by \
                              the writeback pass",
                         );
+                        let content = bound_tool_output(&content, &call.name, &self.output_bound);
                         messages.push(Message::tool_result(call.id.clone(), content));
                         trace.push(ToolInvocation {
                             name: call.name.clone(),
@@ -1176,7 +1279,12 @@ impl AgentRuntime for AemeathAgentRuntime {
                         let name = call.name.clone();
                         let result = execute(&tool, call.arguments, ctx).await;
                         let ok = !result.is_error;
-                        messages.push(Message::tool_result(id, tool_result_content(result)));
+                        let content = bound_tool_output(
+                            &tool_result_content(result),
+                            &name,
+                            &self.output_bound,
+                        );
+                        messages.push(Message::tool_result(id, content));
                         trace.push(ToolInvocation { name, outcome: ToolOutcome::Executed { ok } });
                     } else {
                         messages.push(Message::tool_result(
@@ -1485,6 +1593,234 @@ mod tests {
         assert_eq!(names, vec!["alpha".to_string()]);
         assert!(without_delegate.find(DELEGATE_TOOL_NAME).is_none());
         assert!(without_delegate.find("alpha").is_some(), "every other tool is kept unchanged");
+    }
+
+    /// A tool that returns a fixed, possibly huge, result.
+    struct BigResultTool {
+        name: &'static str,
+        content: String,
+    }
+
+    #[async_trait::async_trait]
+    impl Tool for BigResultTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: self.name.to_string(),
+                description: String::new(),
+                parameters: json!({"type": "object"}),
+            }
+        }
+
+        fn required_permission(&self, _: &Value, _: &ToolContext) -> PermissionTier {
+            PermissionTier::Auto
+        }
+
+        async fn execute(&self, _: Value, _: &ToolContext) -> Result<ToolResult, ToolError> {
+            Ok(ToolResult::ok(self.content.clone()))
+        }
+    }
+
+    async fn tool_message_the_model_received(content: String, bound: ToolOutputBound) -> String {
+        let provider = ScriptedProvider::new(vec![
+            vec![ToolCallStreamItem::ToolCall {
+                id: "call_0".to_string(),
+                name: "big".to_string(),
+                arguments: json!({}),
+            }],
+            vec![ToolCallStreamItem::TextDelta("done".to_string())],
+        ]);
+        let registry = ToolRegistry::new(vec![Arc::new(BigResultTool { name: "big", content })]);
+        AemeathAgentRuntime::default()
+            .with_output_bound(bound)
+            .run(
+                &provider,
+                vec![Message::user("hi")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &NeverConnectMcp,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+        let received = provider.received.lock().unwrap();
+        let second_request = &received[1];
+        second_request
+            .iter()
+            .find(|m| m.role == crate::message::Role::Tool)
+            .unwrap()
+            .content
+            .clone()
+    }
+
+    #[tokio::test]
+    async fn an_oversize_tool_result_reaches_the_model_cut_off_with_a_marker() {
+        let dir =
+            std::env::temp_dir().join(format!("fleet-snowfluff-run-bound-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let huge = "word ".repeat(30_000);
+        let received = tool_message_the_model_received(
+            huge.clone(),
+            ToolOutputBound { max_tokens: 1_000, spill_dir: Some(dir.clone()) },
+        )
+        .await;
+        assert!(received.len() < huge.len() / 4);
+        assert!(received.contains("This output was cut off"));
+        assert!(std::fs::read_dir(&dir).unwrap().count() > 0, "the rest was saved");
+    }
+
+    /// Six tool calls in a row, each returning a mid-sized result, then a final
+    /// answer. Returns the tool messages the model saw on its last request.
+    async fn tool_messages_on_the_last_request(window: Option<usize>) -> Vec<String> {
+        let call = |n: usize| {
+            vec![ToolCallStreamItem::ToolCall {
+                id: format!("call_{n}"),
+                name: "big".to_string(),
+                arguments: json!({}),
+            }]
+        };
+        let mut script: Vec<_> = (0..6).map(call).collect();
+        script.push(vec![ToolCallStreamItem::TextDelta("done".to_string())]);
+        let provider = ScriptedProvider::new(script);
+        let registry = ToolRegistry::new(vec![Arc::new(BigResultTool {
+            name: "big",
+            content: "word ".repeat(600),
+        })]);
+        AemeathAgentRuntime { max_iterations: 10, ..Default::default() }
+            .with_context_window(window)
+            .run(
+                &provider,
+                vec![Message::user("go")],
+                &registry,
+                &ctx(),
+                &AlwaysApprove,
+                &NeverConnectMcp,
+                &mut |_: &str| {},
+            )
+            .await
+            .unwrap();
+        let received = provider.received.lock().unwrap();
+        received
+            .last()
+            .unwrap()
+            .iter()
+            .filter(|m| m.role == crate::message::Role::Tool)
+            .map(|m| m.content.clone())
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_run_that_fills_a_small_window_has_its_oldest_results_replaced_and_keeps_the_latest()
+    {
+        let results = tool_messages_on_the_last_request(Some(4_000)).await;
+        assert_eq!(results.len(), 6);
+        assert!(results[0].contains("removed to make room"), "the oldest result was replaced");
+        assert!(results[1].contains("removed to make room"));
+        for kept in &results[2..] {
+            assert!(kept.starts_with("word word"), "the newest results stay whole");
+        }
+    }
+
+    #[tokio::test]
+    async fn with_no_known_window_nothing_is_ever_replaced() {
+        let results = tool_messages_on_the_last_request(None).await;
+        assert_eq!(results.len(), 6);
+        assert!(
+            results.iter().all(|r| r.starts_with("word word")),
+            "a CLI-backed profile never runs the net"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_large_window_leaves_the_same_run_untouched() {
+        let results = tool_messages_on_the_last_request(Some(200_000)).await;
+        assert!(results.iter().all(|r| r.starts_with("word word")));
+    }
+
+    #[tokio::test]
+    async fn a_result_within_the_bound_reaches_the_model_unchanged() {
+        let received =
+            tool_message_the_model_received("small result".to_string(), ToolOutputBound::default())
+                .await;
+        assert_eq!(received, "small result");
+    }
+
+    #[test]
+    fn the_eager_and_stub_definitions_are_reported_separately() {
+        let registry = ToolRegistry::with_lazy(
+            vec![Arc::new(CountingTool::new("eager", PermissionTier::Auto))],
+            vec![Arc::new(CountingTool::new("lazy", PermissionTier::Auto))],
+        );
+        assert_eq!(registry.eager_definitions().len(), 1);
+        let stubs = registry.stub_definitions();
+        assert_eq!(stubs.len(), 1);
+        assert_eq!(stubs[0].parameters, json!({"type": "object", "additionalProperties": true}));
+    }
+
+    #[test]
+    fn a_registry_that_stops_offering_stubs_still_finds_and_unlocks_its_lazy_tools() {
+        let registry = ToolRegistry::with_lazy(
+            vec![Arc::new(CountingTool::new("eager", PermissionTier::Auto))],
+            vec![Arc::new(CountingTool::new("lazy", PermissionTier::Auto))],
+        )
+        .with_stubs_offered(false);
+
+        let names: Vec<String> = registry.definitions().into_iter().map(|d| d.name).collect();
+        assert_eq!(names, vec!["eager".to_string()], "no stub is sent");
+        assert!(registry.find("lazy").is_some(), "the tool still exists");
+        assert_eq!(registry.lazy_tools_matching("lazy").len(), 1, "search_tools can still find it");
+
+        let mut unlocked = HashSet::new();
+        unlocked.insert("lazy".to_string());
+        let after: Vec<String> =
+            registry.definitions_for(&unlocked).into_iter().map(|d| d.name).collect();
+        assert!(after.contains(&"lazy".to_string()), "an unlocked tool is sent in full regardless");
+    }
+
+    /// A tool that declares itself withheld from sub-tasks.
+    struct TopLevelOnlyTool;
+
+    #[async_trait::async_trait]
+    impl Tool for TopLevelOnlyTool {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition {
+                name: "top_level_only".to_string(),
+                description: String::new(),
+                parameters: json!({"type": "object"}),
+            }
+        }
+
+        fn required_permission(&self, _: &Value, _: &ToolContext) -> PermissionTier {
+            PermissionTier::Auto
+        }
+
+        fn available_to_children(&self) -> bool { false }
+
+        async fn execute(&self, _: Value, _: &ToolContext) -> Result<ToolResult, ToolError> {
+            Ok(ToolResult::ok(""))
+        }
+    }
+
+    #[test]
+    fn a_child_registry_drops_delegation_connecting_and_flagged_tools_but_keeps_the_rest() {
+        let registry = ToolRegistry::with_lazy(
+            vec![
+                Arc::new(CountingTool::new("read_only", PermissionTier::Auto)),
+                Arc::new(TopLevelOnlyTool),
+                Arc::new(DelegateTool),
+                Arc::new(ConnectMcpServerTool),
+            ],
+            vec![Arc::new(CountingTool::new("lazy_kept", PermissionTier::Auto))],
+        );
+
+        let child = registry.for_child();
+
+        assert!(child.find("read_only").is_some());
+        assert!(child.find("lazy_kept").is_some(), "the lazy split is preserved");
+        assert!(child.find("top_level_only").is_none(), "a flagged tool is withheld");
+        assert!(child.find(DELEGATE_TOOL_NAME).is_none());
+        assert!(child.find(CONNECT_MCP_SERVER_TOOL_NAME).is_none());
+        assert!(registry.find("top_level_only").is_some(), "the parent keeps it");
     }
 
     // -- tool-list-optimization: ToolRegistry's own eager/lazy split --
@@ -2786,7 +3122,7 @@ mod tests {
             vec![ToolCallStreamItem::TextDelta("parent continues anyway".to_string())],
         ]);
         let registry = ToolRegistry::new(vec![Arc::new(DelegateTool)]);
-        let runtime = AemeathAgentRuntime { max_iterations: 2 };
+        let runtime = AemeathAgentRuntime { max_iterations: 2, ..Default::default() };
 
         let result = runtime
             .run(
@@ -2822,7 +3158,7 @@ mod tests {
         }]);
         let alpha = Arc::new(CountingTool::new("alpha", PermissionTier::Auto));
         let registry = ToolRegistry::new(vec![alpha.clone()]);
-        let runtime = AemeathAgentRuntime { max_iterations: 3 };
+        let runtime = AemeathAgentRuntime { max_iterations: 3, ..Default::default() };
 
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),

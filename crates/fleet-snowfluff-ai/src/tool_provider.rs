@@ -48,7 +48,15 @@ pub struct ToolDefinition {
 #[derive(Debug, Clone, PartialEq)]
 pub enum ToolCallStreamItem {
     TextDelta(String),
-    ToolCall { id: String, name: String, arguments: Value },
+    ToolCall {
+        id: String,
+        name: String,
+        arguments: Value,
+    },
+    /// The model server's own count of the prompt tokens it processed, when it
+    /// reports one. Not content: the agent loop compares it with its own
+    /// estimate to notice a prompt the server silently truncated.
+    PromptTokens(usize),
 }
 
 /// A streamed reply that may contain tool calls -- boxed for the same
@@ -74,6 +82,17 @@ pub trait ToolCallingProvider: AiProvider {
         messages: Vec<Message>,
         tools: Vec<ToolDefinition>,
     ) -> Result<ToolCallStream, ProviderError>;
+
+    /// Limits how many tokens a reply may use, below the usual cap. The fit
+    /// check lowers it on a small context window so the prompt plus the
+    /// reply fit. Ignored by providers whose window is never close to the
+    /// cap.
+    fn set_reply_allowance(&mut self, _tokens: u32) {}
+
+    /// The model's context window in tokens, when this provider can find out. A
+    /// local server can report what it loaded; the cloud providers return
+    /// `None` and the caller uses a name table.
+    async fn context_window(&self) -> Option<usize> { None }
 }
 
 #[cfg(test)]

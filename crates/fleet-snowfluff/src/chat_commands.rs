@@ -17,14 +17,14 @@ use std::{
 
 use fleet_snowfluff_ai::{
     detect_escalation, log::LogRole, with_task_router_rules, AemeathAgentRuntime,
-    AemeathContextManager, AgentRuntime, AiProvider, AiSettings, AuthMethod, ChatStream,
-    ClaudeCodeToolAccess, CliContext, ConnectMcpServerTool, ContextManager, DefaultTaskRouter,
-    DelegateTool, EscalationDecision, ExecutionPath, GetSystemContextTool, Language,
-    ListDirectoryTool, LogEntry, Message, NeverConnectMcp, PendingToolCall, PermissionDecider,
-    PermissionTier, Persona, ProfileKey, ProviderCredentials, ProviderKind, ProviderProfile,
-    ReadFileTool, ResponseLanguage, RoutingContext, RunCommandTool, Task, TaskRouter,
-    TaskRouterMode, Tool, ToolCallRecord, ToolCallStream, ToolCallStreamItem, ToolCallingProvider,
-    ToolContext, ToolInvocation, ToolOutcome, ToolRegistry, ToolResult, WebSearchTool,
+    AemeathContextManager, AgentRuntime, AiProvider, AiSettings, ChatStream, ClaudeCodeToolAccess,
+    CliContext, ConnectMcpServerTool, ContextManager, DefaultTaskRouter, DelegateTool,
+    EscalationDecision, ExecutionPath, GetSystemContextTool, Language, ListDirectoryTool, LogEntry,
+    Message, NeverConnectMcp, PendingToolCall, PermissionDecider, PermissionTier, Persona,
+    ProfileKey, ProviderCredentials, ProviderKind, ProviderProfile, ReadFileTool, ResponseLanguage,
+    RoutingContext, RunCommandTool, Task, TaskRouter, TaskRouterMode, Tool, ToolCallRecord,
+    ToolCallStream, ToolCallStreamItem, ToolCallingProvider, ToolContext, ToolInvocation,
+    ToolOutcome, ToolRegistry, ToolResult, WebSearchTool,
 };
 use futures_util::StreamExt;
 use tauri::{ipc::Channel, AppHandle, Manager, State};
@@ -32,10 +32,10 @@ use tauri::{ipc::Channel, AppHandle, Manager, State};
 use crate::{
     ai_commands::{self, RoutedExecution},
     chat_log_store::{self, ChatLogStore},
-    chat_pause, chat_window, cli_workdir, execution_log_store,
+    chat_pause, chat_window, cli_workdir, compaction_runtime, execution_log_store,
     execution_recorder::ExecutionRecorder,
     manager::PetManager,
-    persona_store,
+    memory_runtime, persona_store,
     session_domain::{CliSessionEntry, ConversationId, ExecutionId, ExternalSessionRef},
     status_bubble, task_router_rules_store,
 };
@@ -48,6 +48,16 @@ fn context_manager() -> AemeathContextManager {
         Box::new(ChatLogStore),
         Box::new(execution_log_store::ExecutionLogStore),
     )
+    .with_summary_store(Box::new(fleet_snowfluff_ai::FileSummaryStore))
+}
+
+/// [`context_manager`] that also brings remembered facts into the request,
+/// unless memory is off.
+fn context_manager_with_memory(app: &AppHandle) -> AemeathContextManager {
+    match memory_runtime::service_if_enabled(app) {
+        Some(service) => context_manager().with_memory(service),
+        None => context_manager(),
+    }
 }
 
 pub struct PendingGeneration {
@@ -143,6 +153,11 @@ impl ChatRuntimeState {
     /// so this is directly testable without an `AppHandle` (the
     /// `on_chat_activity_changed` notification that also belongs to this
     /// reset is the caller's job, at the Tauri-command layer).
+    /// The conversation currently open, if one has been resolved yet.
+    pub(crate) fn current_session_path(&self) -> Option<PathBuf> {
+        self.session_path.lock().unwrap().clone()
+    }
+
     fn reset_for_new_conversation(&self) -> bool {
         let cancelled = match self.pending.lock().unwrap().take() {
             Some(pending) => {
@@ -380,7 +395,13 @@ pub fn list_conversations(app: AppHandle) -> Vec<chat_log_store::ConversationSum
 /// `AppHandle`-dependent activity notification -- kept separate so the
 /// state-reset logic itself stays testable without an `AppHandle`.
 fn reset_chat_runtime_state(app: &AppHandle, chat_state: &ChatRuntimeState) {
+    // Leaving a conversation mid-reply must not leave it marked busy to the
+    // compaction scheduler.
+    let leaving = chat_state.current_session_path();
     chat_state.reset_for_new_conversation();
+    if let Some(session_path) = leaving {
+        compaction_runtime::reply_finished_for(app, &session_path);
+    }
     on_chat_activity_changed(app);
 }
 
@@ -434,6 +455,15 @@ fn map_ui_language(ui: fleet_snowfluff_core::UiLanguage) -> Language {
         UiLanguage::Ja => Language::Ja,
         UiLanguage::Ko => Language::Ko,
     }
+}
+
+/// The language the pet speaks in right now: the persona's explicit choice,
+/// else the app's UI language. Used for background work (conversation
+/// summaries) that must match the chat.
+pub(crate) fn conversation_language(app: &AppHandle) -> Language {
+    let persona = persona_store::load(app).persona;
+    let detected = map_ui_language(app.state::<Mutex<PetManager>>().lock().unwrap().ui_language());
+    resolve_language(&persona, detected)
 }
 
 /// `Auto` defers to the detected system UI language; any explicit
@@ -492,8 +522,7 @@ pub async fn send_chat_message(
         return Ok(());
     }
 
-    let local_profile_key =
-        ProfileKey { provider: ProviderKind::Ollama, auth_method: AuthMethod::Local };
+    let local_profile_key = fleet_snowfluff_ai::LOCAL_PROFILE_KEY;
     let local_profile = settings_snapshot.profile(local_profile_key).cloned();
 
     // Task Router's initial route (`agent-core-and-task-router`'s
@@ -561,14 +590,42 @@ pub async fn send_chat_message(
     // local attempt's own message list does. Built before the user
     // entry is appended below, since `build_context` reads the log
     // itself and appends `message` on its own.
-    let default_messages =
-        context_manager().build_context(&session_path, &persona, language, &message).await;
+    let memory_on = memory_runtime::is_enabled(&app);
+    let build = |audience: fleet_snowfluff_ai::memory::Audience| {
+        let manager = context_manager_with_memory(&app);
+        let (session_path, persona, message) = (&session_path, &persona, &message);
+        async move {
+            let mut request =
+                fleet_snowfluff_ai::ContextRequest::new(session_path, persona, language, message);
+            request.memory_audience = memory_on.then_some(audience);
+            manager.build_context(&request).await
+        }
+    };
+    let default_audience = memory_runtime::audience_for(default_profile.key());
+    let default_messages = build(default_audience).await;
+    // The local attempt of mixed mode is its own request with its own audience: if
+    // the default profile is a cloud one, an escalated request must not carry
+    // what only the local model may see.
+    let local_attempt_messages =
+        if routed_to_local && default_audience != fleet_snowfluff_ai::memory::Audience::Local {
+            Some(build(fleet_snowfluff_ai::memory::Audience::Local).await)
+        } else {
+            None
+        };
 
     // Appended immediately -- part of history regardless of what
     // happens to the reply.
     chat_log_store::append_entry(
         &session_path,
         &LogEntry { role: LogRole::User, content: message.clone(), timestamp: now_rfc3339() },
+    );
+
+    // Recorded so a compaction never starts while this reply is being generated,
+    // and so it folds exactly the turns this request left out.
+    compaction_runtime::reply_started(
+        &app,
+        &session_path,
+        fleet_snowfluff_ai::HistoryLimits::default(),
     );
 
     let partial_text = Arc::new(Mutex::new(String::new()));
@@ -582,8 +639,10 @@ pub async fn send_chat_message(
         // ever resolves to `local_profile_key` when `local_profile` was
         // itself `Some` (see `DefaultTaskRouter::route`).
         let local_profile = local_profile.expect("routed to local profile, but none is enabled");
-        let local_messages =
-            with_task_router_rules(default_messages.clone(), &task_router_rules_store::load(&app));
+        let local_messages = with_task_router_rules(
+            local_attempt_messages.unwrap_or_else(|| default_messages.clone()),
+            &task_router_rules_store::load(&app),
+        );
         let fallback = FallbackAttempt {
             profile: default_profile,
             messages: default_messages,
@@ -798,6 +857,7 @@ async fn run_generation_routed(
                 execution_id,
                 conversation_id,
                 profile_key,
+                profile.model.clone(),
                 project_root,
                 messages,
                 channel,
@@ -908,6 +968,7 @@ async fn stream_to_completion(
     );
     let final_text = partial_text.lock().unwrap().clone();
     context_manager().record_execution(&turn.session_path, &final_text).await;
+    memory_runtime::reply_done(&app, &turn.session_path, false);
     channel.send(ChatEvent::Done { content: final_text }).ok();
     clear_pending(&app);
     mark_unread_unless_focused(&app, UnreadKind::Reply);
@@ -921,16 +982,111 @@ async fn stream_to_completion(
 /// the registry -- every one of these is a plain, app-handle-free
 /// `Arc::new(DefaultStruct)` construction already, so pulling the list
 /// itself out costs nothing.
-fn native_tool_list() -> Vec<Arc<dyn Tool>> {
+/// Where the rest of an oversize tool result is saved so the assistant can read
+/// it back.
+fn tool_output_dir(app: &AppHandle) -> Option<PathBuf> {
+    app.path().app_data_dir().ok().map(|dir| dir.join("tool-output"))
+}
+
+fn read_file_tool(spill_dir: Option<&Path>) -> ReadFileTool {
+    spill_dir.map_or_else(ReadFileTool::default, ReadFileTool::with_spill_dir)
+}
+
+fn native_tool_list(spill_dir: Option<&Path>) -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(WebSearchTool::default()),
-        Arc::new(ReadFileTool),
+        Arc::new(read_file_tool(spill_dir)),
         Arc::new(ListDirectoryTool),
         Arc::new(RunCommandTool::default()),
         Arc::new(GetSystemContextTool),
         Arc::new(DelegateTool),
         Arc::new(ConnectMcpServerTool),
     ]
+}
+
+/// A tool-calling request after the pre-flight fit check.
+struct PreparedRequest {
+    messages: Vec<Message>,
+    registry: ToolRegistry,
+    window: Option<usize>,
+}
+
+/// Works out the model's context window and makes the request fit it without
+/// ever trimming the persona prompt (`ai-provider`'s "The persona prompt is
+/// never trimmed"): sheds optional content in the specified order, lowers the
+/// provider's reply allowance on a small window, and reports a window too small
+/// for the persona itself instead of sending anything. With no known window (a
+/// custom endpoint) the request is sent as built.
+async fn prepare_tool_request(
+    app: &AppHandle,
+    provider: &mut dyn ToolCallingProvider,
+    profile_key: ProfileKey,
+    model: Option<&str>,
+    session_path: &Path,
+    messages: Vec<Message>,
+    registry: ToolRegistry,
+) -> Result<PreparedRequest, fleet_snowfluff_ai::WindowTooSmall> {
+    let window = if profile_key.provider == ProviderKind::Ollama {
+        provider.context_window().await
+    } else {
+        Some(fleet_snowfluff_ai::api_window(model))
+    };
+    let Some(window) = window else {
+        return Ok(PreparedRequest { messages, registry, window: None });
+    };
+
+    let persona = persona_store::load(app).persona;
+    let few_shot_len = persona
+        .few_shot_examples
+        .get(&conversation_language(app))
+        .map_or(0, |examples| examples.len() * 2);
+    let fit = fleet_snowfluff_ai::fit_request(
+        messages,
+        few_shot_len,
+        &registry.eager_definitions(),
+        &registry.stub_definitions(),
+        window,
+        fleet_snowfluff_ai::limits::MAX_RESPONSE_TOKENS as usize,
+    )?;
+    if !fit.shed.is_empty() {
+        log::info!("fitting the request to a {window}-token window: gave up {:?}", fit.shed);
+    }
+    provider.set_reply_allowance(fit.reply_allowance as u32);
+    let history_shed =
+        fit.shed.iter().any(|shed| matches!(shed, fleet_snowfluff_ai::Shed::History(_)));
+    if history_shed {
+        let history_start = 1 + if fit.shed.contains(&fleet_snowfluff_ai::Shed::FewShot) {
+            0
+        } else {
+            few_shot_len
+        };
+        let kept = fleet_snowfluff_ai::estimate_messages_tokens(
+            &fit.messages[history_start..fit.messages.len().saturating_sub(1)],
+        );
+        compaction_runtime::history_was_trimmed(app, session_path, kept);
+    }
+    Ok(PreparedRequest {
+        messages: fit.messages,
+        registry: registry.with_stubs_offered(fit.keep_stubs),
+        window: Some(window),
+    })
+}
+
+/// The tools the top-level agent gets: the native set plus `compact_context`,
+/// placed just before `connect_mcp_server` (which stays last, so the
+/// `search_tools` insertion below keeps working).
+fn top_level_tools(
+    compact_context: Arc<dyn Tool>,
+    memory_tools: Vec<Arc<dyn Tool>>,
+    spill_dir: Option<&Path>,
+) -> Vec<Arc<dyn Tool>> {
+    let mut tools = native_tool_list(spill_dir);
+    let before_connect = tools.len() - 1;
+    tools.insert(before_connect, compact_context);
+    for (offset, tool) in memory_tools.into_iter().enumerate() {
+        tools.insert(before_connect + 1 + offset, tool);
+    }
+    tools
 }
 
 /// The local-first mix-mode attempt's own, deliberately narrower
@@ -944,11 +1100,16 @@ fn native_tool_list() -> Vec<Arc<dyn Tool>> {
 /// weight in the model's own tool list. `web_search`/
 /// `get_system_context` are always `Auto` regardless, so they're
 /// offered unconditionally.
-fn mix_local_tool_registry(project_root: Option<&Path>) -> ToolRegistry {
+fn mix_local_tool_registry(
+    project_root: Option<&Path>,
+    spill_dir: Option<&Path>,
+    memory_read_tools: Vec<Arc<dyn Tool>>,
+) -> ToolRegistry {
     let mut tools: Vec<Arc<dyn Tool>> =
         vec![Arc::new(WebSearchTool::default()), Arc::new(GetSystemContextTool)];
+    tools.extend(memory_read_tools);
     if project_root.is_some() {
-        tools.push(Arc::new(ReadFileTool));
+        tools.push(Arc::new(read_file_tool(spill_dir)));
         tools.push(Arc::new(ListDirectoryTool));
     }
     ToolRegistry::new(tools)
@@ -970,10 +1131,11 @@ fn mix_local_tool_registry(project_root: Option<&Path>) -> ToolRegistry {
 #[allow(clippy::too_many_arguments)]
 async fn run_generation_with_tools(
     app: AppHandle,
-    provider: Box<dyn ToolCallingProvider>,
+    mut provider: Box<dyn ToolCallingProvider>,
     execution_id: ExecutionId,
     conversation_id: ConversationId,
     profile_key: ProfileKey,
+    model: Option<String>,
     project_root: Option<PathBuf>,
     messages: Vec<Message>,
     channel: Channel<ChatEvent>,
@@ -1001,8 +1163,17 @@ async fn run_generation_with_tools(
     // (`search_tools`, added as an eager tool alongside the native
     // ones whenever there's at least one MCP tool to search for).
     let mcp_tools = crate::mcp_commands::mcp_sourced_tools(&app).await;
+    let compact_context: Arc<dyn Tool> = Arc::new(fleet_snowfluff_ai::CompactContextTool::new(
+        turn.session_path.clone(),
+        Arc::new(compaction_runtime::AppCompactionRequester::new(app.clone())),
+    ));
+    let spill_dir = tool_output_dir(&app);
     let registry = if mcp_tools.is_empty() {
-        ToolRegistry::new(native_tool_list())
+        ToolRegistry::new(top_level_tools(
+            compact_context.clone(),
+            memory_runtime::top_level_tools(&app, profile_key),
+            spill_dir.as_deref(),
+        ))
     } else {
         let lazy_summaries = mcp_tools
             .iter()
@@ -1011,7 +1182,11 @@ async fn run_generation_with_tools(
                 (definition.name, definition.description)
             })
             .collect();
-        let mut eager = native_tool_list();
+        let mut eager = top_level_tools(
+            compact_context.clone(),
+            memory_runtime::top_level_tools(&app, profile_key),
+            spill_dir.as_deref(),
+        );
         // Inserted right before `connect_mcp_server` (always last in
         // `native_tool_list()`), not appended after it: some models
         // show a real position bias toward earlier-listed tools, and
@@ -1052,7 +1227,31 @@ async fn run_generation_with_tools(
             first_iteration_chars / 4
         );
     }
-    let runtime = AemeathAgentRuntime::default();
+    let prepared = match prepare_tool_request(
+        &app,
+        provider.as_mut(),
+        profile_key,
+        model.as_deref(),
+        &turn.session_path,
+        messages,
+        registry,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(too_small) => {
+            turn.recorder.mark_errored(None, None, Vec::new());
+            finish_with_error(&app, &turn.session_path, &channel, &too_small.to_string());
+            return;
+        }
+    };
+    let (messages, registry, window) = (prepared.messages, prepared.registry, prepared.window);
+    let runtime = AemeathAgentRuntime::default()
+        .with_output_bound(fleet_snowfluff_ai::ToolOutputBound::for_window(
+            window,
+            spill_dir.clone(),
+        ))
+        .with_context_window(window);
     let permission = crate::tool_confirmation::PopupPermissionDecider {
         app: app.clone(),
         conversation_id: conversation_id.clone(),
@@ -1093,6 +1292,7 @@ async fn run_generation_with_tools(
                 );
             }
             context_manager().record_execution(&turn.session_path, &final_text).await;
+            memory_runtime::reply_done(&app, &turn.session_path, saved_a_memory(&outcome.trace));
             channel.send(ChatEvent::Done { content: final_text }).ok();
             clear_pending(&app);
             mark_unread_unless_focused(&app, UnreadKind::Reply);
@@ -1173,6 +1373,7 @@ async fn read_mix_local_first_iteration(stream: &mut ToolCallStream) -> MixLocal
                 }
                 calls.push(PendingToolCall { id, name, arguments });
             }
+            Some(Ok(ToolCallStreamItem::PromptTokens(_))) => {}
             Some(Err(_)) => return MixLocalFirstIteration::ProviderError,
             None => break,
         }
@@ -1272,7 +1473,7 @@ async fn run_generation_mix_local(
     // so `route_provider` provably never resolves `PlainChat` here.
     // No `cli_sessions` lookup: Ollama has no resumable-session
     // concept, so this is always a fresh call.
-    let provider = match ai_commands::route_provider(
+    let mut provider = match ai_commands::route_provider(
         &credentials,
         &local_profile,
         CliContext::fresh(std::env::temp_dir()),
@@ -1283,11 +1484,50 @@ async fn run_generation_mix_local(
             "local_profile is always Ollama+Local, which always supports_tool_calling()"
         ),
     };
-    let registry = mix_local_tool_registry(fallback.project_root.as_deref());
+    let spill_dir = tool_output_dir(&app);
+    let registry = mix_local_tool_registry(
+        fallback.project_root.as_deref(),
+        spill_dir.as_deref(),
+        memory_runtime::local_read_tools(&app),
+    );
     let ctx = ToolContext {
         project_root: fallback.project_root.clone(),
         conversation_id: conversation_id.clone(),
     };
+
+    // A window too small for the local attempt is handled like any other reason the
+    // local model cannot start: the message goes to the default profile instead
+    // of failing.
+    let prepared = match prepare_tool_request(
+        &app,
+        provider.as_mut(),
+        local_profile_key,
+        local_profile.model.as_deref(),
+        &session_path,
+        local_messages,
+        registry,
+    )
+    .await
+    {
+        Ok(prepared) => prepared,
+        Err(_) => {
+            recorder.mark_errored(None, None, Vec::new());
+            drop(recorder);
+            run_generation_fallback(
+                app,
+                fallback,
+                execution_id,
+                conversation_id,
+                channel,
+                partial_text,
+                session_path,
+            )
+            .await;
+            return;
+        }
+    };
+    let (local_messages, registry, window) =
+        (prepared.messages, prepared.registry, prepared.window);
 
     let mut stream =
         match provider.chat_with_tools(local_messages.clone(), registry.definitions()).await {
@@ -1370,6 +1610,7 @@ async fn run_generation_mix_local(
             recorder.mark_completed(None, None, Vec::new());
             let final_text = partial_text.lock().unwrap().clone();
             context_manager().record_execution(&session_path, &final_text).await;
+            memory_runtime::reply_done(&app, &session_path, false);
             channel.send(ChatEvent::Done { content: final_text }).ok();
             clear_pending(&app);
             mark_unread_unless_focused(&app, UnreadKind::Reply);
@@ -1479,7 +1720,12 @@ async fn run_generation_mix_local(
         }
     }
 
-    let runtime = AemeathAgentRuntime::default();
+    let runtime = AemeathAgentRuntime::default()
+        .with_output_bound(fleet_snowfluff_ai::ToolOutputBound::for_window(
+            window,
+            spill_dir.clone(),
+        ))
+        .with_context_window(window);
     let decider = AlwaysDenyConfirm;
     let result = {
         let mut on_text_delta = |delta: &str| {
@@ -1502,9 +1748,11 @@ async fn run_generation_mix_local(
     match result {
         Ok(outcome) => {
             trace.extend(outcome.trace);
+            let tool_saved = saved_a_memory(&trace);
             recorder.mark_completed(None, None, trace);
             let final_text = partial_text.lock().unwrap().clone();
             context_manager().record_execution(&session_path, &final_text).await;
+            memory_runtime::reply_done(&app, &session_path, tool_saved);
             channel.send(ChatEvent::Done { content: final_text }).ok();
             clear_pending(&app);
             mark_unread_unless_focused(&app, UnreadKind::Reply);
@@ -1514,6 +1762,15 @@ async fn run_generation_mix_local(
             finish_with_error(&app, &session_path, &channel, &err.to_string());
         }
     }
+}
+
+/// Whether the assistant already saved a memory with its own tool call this
+/// turn.
+fn saved_a_memory(trace: &[fleet_snowfluff_ai::ToolInvocation]) -> bool {
+    trace.iter().any(|call| {
+        call.name == fleet_snowfluff_ai::memory::tools::MEMORY_REMEMBER_TOOL_NAME
+            && matches!(call.outcome, fleet_snowfluff_ai::ToolOutcome::Executed { ok: true })
+    })
 }
 
 fn finish_with_error(
@@ -1533,6 +1790,7 @@ fn finish_with_error(
 
 fn clear_pending(app: &AppHandle) {
     *app.state::<ChatRuntimeState>().pending.lock().unwrap() = None;
+    compaction_runtime::reply_finished(app);
     on_chat_activity_changed(app);
 }
 
@@ -1545,6 +1803,9 @@ pub fn stop_generation(app: AppHandle, chat_state: State<ChatRuntimeState>) {
     if let Some(pending) = chat_state.pending.lock().unwrap().take() {
         pending.handle.abort();
     }
+    // An aborted task never reaches its own completion code, so the conversation
+    // would otherwise look permanently busy to the compaction scheduler.
+    compaction_runtime::reply_finished(&app);
     on_chat_activity_changed(&app);
 }
 
@@ -1994,7 +2255,7 @@ mod tests {
 
     #[test]
     fn native_tool_registry_offers_delegate_task_alongside_the_five_native_tools() {
-        let registry = ToolRegistry::new(native_tool_list());
+        let registry = ToolRegistry::new(native_tool_list(None));
         let names: Vec<String> = registry.definitions().into_iter().map(|d| d.name).collect();
         assert_eq!(names.len(), 7, "5 native tools, plus delegate_task and connect_mcp_server");
         assert!(names.contains(&"delegate_task".to_string()));
@@ -2003,9 +2264,92 @@ mod tests {
         assert!(registry.find("connect_mcp_server").is_some());
     }
 
+    struct NeverRequester;
+
+    #[async_trait::async_trait]
+    impl fleet_snowfluff_ai::CompactionRequester for NeverRequester {
+        async fn compact(
+            &self,
+            _session_path: &Path,
+            _focus: Option<&str>,
+        ) -> Result<fleet_snowfluff_ai::CompactionOutcome, fleet_snowfluff_ai::CompactionError>
+        {
+            unreachable!("registry composition tests never execute the tool")
+        }
+    }
+
+    fn compact_context_tool() -> Arc<dyn Tool> {
+        Arc::new(fleet_snowfluff_ai::CompactContextTool::new(
+            PathBuf::from("session.jsonl"),
+            Arc::new(NeverRequester),
+        ))
+    }
+
+    #[test]
+    fn the_top_level_agent_gets_compact_context_and_connect_mcp_server_stays_last() {
+        let tools = top_level_tools(compact_context_tool(), vec![], None);
+        let names: Vec<String> = tools.iter().map(|t| t.definition().name).collect();
+        assert!(names.contains(&"compact_context".to_string()));
+        assert_eq!(names.last().map(String::as_str), Some("connect_mcp_server"));
+        assert_eq!(names.len(), 8);
+    }
+
+    fn memory_service() -> Arc<dyn fleet_snowfluff_ai::memory::MemoryService> {
+        Arc::new(fleet_snowfluff_ai::memory::fake::InMemoryMemory::new())
+    }
+
+    #[test]
+    fn the_top_level_agent_gets_all_four_memory_tools_and_connect_mcp_server_stays_last() {
+        let memory = fleet_snowfluff_ai::memory::tools::all_tools(
+            memory_service(),
+            fleet_snowfluff_ai::memory::Audience::Cloud,
+            None,
+        );
+        let tools = top_level_tools(compact_context_tool(), memory, None);
+        let names: Vec<String> = tools.iter().map(|t| t.definition().name).collect();
+        for name in ["memory_search", "memory_get", "memory_remember", "memory_forget"] {
+            assert!(names.contains(&name.to_string()), "{name}");
+        }
+        assert_eq!(names.last().map(String::as_str), Some("connect_mcp_server"));
+        assert_eq!(names.len(), 12);
+        let registry = ToolRegistry::new(tools);
+        let child: Vec<String> =
+            registry.for_child().eager_definitions().into_iter().map(|d| d.name).collect();
+        assert!(
+            child.contains(&"memory_search".to_string())
+                && child.contains(&"memory_get".to_string())
+        );
+        assert!(!child.contains(&"memory_remember".to_string()));
+        assert!(!child.contains(&"memory_forget".to_string()));
+    }
+
+    #[test]
+    fn the_mixed_mode_local_attempt_gets_only_the_two_read_memory_tools() {
+        let read = fleet_snowfluff_ai::memory::tools::read_tools(
+            memory_service(),
+            fleet_snowfluff_ai::memory::Audience::Local,
+        );
+        let registry = mix_local_tool_registry(None, None, read);
+        assert!(registry.find("memory_search").is_some());
+        assert!(registry.find("memory_get").is_some());
+        assert!(registry.find("memory_remember").is_none());
+        assert!(registry.find("memory_forget").is_none());
+    }
+
+    #[test]
+    fn a_delegated_sub_task_and_the_mixed_mode_local_attempt_never_get_compact_context() {
+        let top_level = ToolRegistry::new(top_level_tools(compact_context_tool(), vec![], None));
+        assert!(top_level.find("compact_context").is_some());
+        assert!(top_level.for_child().find("compact_context").is_none());
+        assert!(mix_local_tool_registry(Some(Path::new("/p")), None, vec![])
+            .find("compact_context")
+            .is_none());
+        assert!(mix_local_tool_registry(None, None, vec![]).find("compact_context").is_none());
+    }
+
     #[test]
     fn mix_local_tool_registry_excludes_filesystem_tools_without_a_project_root() {
-        let registry = mix_local_tool_registry(None);
+        let registry = mix_local_tool_registry(None, None, vec![]);
         let names: Vec<String> = registry.definitions().into_iter().map(|d| d.name).collect();
         assert_eq!(names.len(), 2);
         assert!(names.contains(&"web_search".to_string()));
@@ -2022,7 +2366,7 @@ mod tests {
 
     #[test]
     fn mix_local_tool_registry_includes_filesystem_tools_with_a_project_root() {
-        let registry = mix_local_tool_registry(Some(Path::new("/some/project")));
+        let registry = mix_local_tool_registry(Some(Path::new("/some/project")), None, vec![]);
         let names: Vec<String> = registry.definitions().into_iter().map(|d| d.name).collect();
         assert_eq!(names.len(), 4);
         assert!(registry.find("read_file").is_some());
@@ -2148,7 +2492,7 @@ mod tests {
     #[test]
     fn an_in_root_read_file_call_classifies_as_auto() {
         let (root, file) = project_root_with_a_file("in-root");
-        let registry = mix_local_tool_registry(Some(&root));
+        let registry = mix_local_tool_registry(Some(&root), None, vec![]);
         let ctx = ToolContext {
             project_root: Some(root.clone()),
             conversation_id: conversation(&root.join("session.jsonl")),
@@ -2166,7 +2510,7 @@ mod tests {
     #[test]
     fn an_out_of_root_read_file_call_classifies_as_confirm() {
         let (root, _file) = project_root_with_a_file("out-of-root");
-        let registry = mix_local_tool_registry(Some(&root));
+        let registry = mix_local_tool_registry(Some(&root), None, vec![]);
         let ctx = ToolContext {
             project_root: Some(root.clone()),
             conversation_id: conversation(&root.join("session.jsonl")),
@@ -2183,7 +2527,7 @@ mod tests {
 
     #[test]
     fn an_unknown_tool_name_classifies_as_deny_with_no_tool() {
-        let registry = mix_local_tool_registry(None);
+        let registry = mix_local_tool_registry(None, None, vec![]);
         let ctx = ToolContext {
             project_root: None,
             conversation_id: conversation(Path::new("/project/session.jsonl")),
