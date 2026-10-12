@@ -114,6 +114,17 @@ embedding model and nothing is downloaded.
   credentials, sexuality, religion, and politics are never saved
   automatically; if you explicitly ask it to remember one, it is saved and
   marked sensitive.
+- <a id="trigger-phrases"></a>**Trigger phrases.** The save-on-request and correction paths run only when
+  your message contains one of a fixed set of phrases (matched
+  case-insensitively, as plain substrings) in English, Traditional/Simplified
+  Chinese, Japanese, or Korean: `REMEMBER_CUES` ("remember that", "記住",
+  "覚えておいて", "기억해", …) in
+  [`background.rs`](crates/fleet-snowfluff-ai/src/memory/background.rs#L52) and
+  `CORRECTION_CUES` ("actually", "不對", "違う", "아니야", …) in
+  [the same file](crates/fleet-snowfluff-ai/src/memory/background.rs#L85).
+  A message without one of them triggers no background save, so phrase it
+  that way ("remember that I…") or ask the assistant to use its memory tool.
+  Both lists are meant to be extended.
 - **Corrections** replace the old fact (it stays viewable under "Replaced
   memories"); **delete** really erases it, including from the database file.
 - **Tools.** `memory_search` and `memory_get` are available everywhere,
@@ -124,6 +135,24 @@ embedding model and nothing is downloaded.
 - **Control.** Settings → AI → Memory lists, searches, edits, pins, marks
   sensitive, and deletes memories, has an off switch (existing memories stay
   but are not used), and "Erase all memories".
+
+### When does each part run?
+
+| What                              | When it happens                                                                                                                                                                                                                |
+| --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Memory lookup**                 | On every message while memory is on: the top-ranked facts (about 400 tokens) plus up to 5 keyword matches for what you just typed are added to the request. The assistant can also call `memory_search` / `memory_get` itself. |
+| **Memory save, by the assistant** | When it calls `memory_remember` (you confirm each one).                                                                                                                                                                        |
+| **Memory save, backstop**         | After a reply, only if your message contains a [trigger phrase](#trigger-phrases) and the assistant didn't already save it. Runs in the background.                                                                            |
+| **Memory save, automatic**        | After each summary is written, the turns it covered are scanned for durable facts (saved with an **Auto** badge). Nothing is saved from ordinary chatting otherwise.                                                           |
+| **Summary (batch)**               | Older turns that no longer fit the history budget have built up to about 1,200 tokens, 20 seconds have passed with no new message, and no reply is being written. Checked every 5 seconds.                                     |
+| **Summary (idle / close)**        | After 10 idle minutes, or when you close the chat window.                                                                                                                                                                      |
+| **Summary (by the assistant)**    | When it calls `compact_context`.                                                                                                                                                                                               |
+| **Summary retry**                 | After a failure, retries after 1 minute, doubling up to 30 minutes.                                                                                                                                                            |
+
+A short conversation is never summarized, because nothing has fallen out of
+the history budget yet. Summaries and lookups never delay a reply. With memory
+off, there is no lookup, no memory save, and no automatic extraction (summaries
+still run).
 
 ## Native tools
 
