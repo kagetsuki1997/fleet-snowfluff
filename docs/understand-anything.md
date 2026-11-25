@@ -25,14 +25,14 @@ merged graph, architectural layers, a guided tour, and save. On this repository 
 dispatches around 20 subagents, so it takes several minutes and a real amount of model usage.
 The first run asks you to confirm the ignore file before scanning.
 
-| Option | Effect |
-| --- | --- |
-| `--full` | Rebuild everything and ignore any existing graph. |
-| `--review` | Run the full LLM graph-reviewer instead of the quick deterministic check. |
-| `--language <lang>` | Write summaries, tour and lessons in that language (for example `zh-TW`, `ja`, `ko`). The choice is remembered in `.ua/config.json`. |
-| `--exclude "<globs>"` | Extra comma-separated patterns to leave out, gitignore syntax. |
-| `--auto-update` / `--no-auto-update` | Turn automatic graph updates on commit on or off. |
-| `<path>` | Analyze another directory instead of the current one. |
+| Option                               | Effect                                                                                                                               |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `--full`                             | Rebuild everything and ignore any existing graph.                                                                                    |
+| `--review`                           | Run the full LLM graph-reviewer instead of the quick deterministic check.                                                            |
+| `--language <lang>`                  | Write summaries, tour and lessons in that language (for example `zh-TW`, `ja`, `ko`). The choice is remembered in `.ua/config.json`. |
+| `--exclude "<globs>"`                | Extra comma-separated patterns to leave out, gitignore syntax.                                                                       |
+| `--auto-update` / `--no-auto-update` | Turn automatic graph updates on commit on or off.                                                                                    |
+| `<path>`                             | Analyze another directory instead of the current one.                                                                                |
 
 Re-running `/understand` after new commits does an **incremental** update: only files whose
 structure changed are re-analyzed.
@@ -56,12 +56,12 @@ That covers about 140 files. Without a scope the run also analyzes `openspec/`, 
 
 ### What it writes
 
-| File | Purpose |
-| --- | --- |
-| `.ua/knowledge-graph.json` | Nodes, edges, layers and the tour. |
-| `.ua/code-lessons.json` | Per-file explanations shown in the dashboard's code viewer. |
-| `.ua/fingerprints.json`, `.ua/meta.json` | Baseline for incremental updates. |
-| `.ua/config.json`, `.ua/.understandignore` | Your language and scope settings. |
+| File                                       | Purpose                                                     |
+| ------------------------------------------ | ----------------------------------------------------------- |
+| `.ua/knowledge-graph.json`                 | Nodes, edges, layers and the tour.                          |
+| `.ua/code-lessons.json`                    | Per-file explanations shown in the dashboard's code viewer. |
+| `.ua/fingerprints.json`, `.ua/meta.json`   | Baseline for incremental updates.                           |
+| `.ua/config.json`, `.ua/.understandignore` | Your language and scope settings.                           |
 
 `.ua/` is generated output, about 1.3 MB, tied to the commit it was built from, and none of it
 contains machine-specific paths. **This repository commits it**, so anyone can open the dashboard
@@ -118,13 +118,13 @@ terminal; otherwise find the process with `lsof -i :5173` and stop it.
 
 ## Other commands
 
-| Command | Use it to |
-| --- | --- |
-| `/understand-chat` | Ask questions about the codebase using the graph. |
-| `/understand-explain` | Get a deep-dive on one file, function or module. |
-| `/understand-diff` | Explain what a diff or pull request touches and the risk it carries. |
-| `/understand-onboard` | Generate an onboarding guide for someone new to the project. |
-| `/understand-domain` | Extract business-domain flows into a separate domain graph. |
+| Command               | Use it to                                                            |
+| --------------------- | -------------------------------------------------------------------- |
+| `/understand-chat`    | Ask questions about the codebase using the graph.                    |
+| `/understand-explain` | Get a deep-dive on one file, function or module.                     |
+| `/understand-diff`    | Explain what a diff or pull request touches and the risk it carries. |
+| `/understand-onboard` | Generate an onboarding guide for someone new to the project.         |
+| `/understand-domain`  | Extract business-domain flows into a separate domain graph.          |
 
 ## Known limits on this repository
 

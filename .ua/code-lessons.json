@@ -1,0 +1,2118 @@
+{
+  "version": 1,
+  "generatedAt": "2026-11-25T02:14:24.278660+00:00",
+  "files": {
+    "crates/fleet-snowfluff/src/main.rs": {
+      "overview": "The binary entry point of the desktop app. It is deliberately tiny: it suppresses the Windows console window in release builds and hands control to `run()` in the library crate. This is the first stop of the tour step 'App Entry and Startup'.",
+      "sections": [
+        {
+          "title": "Console suppression attribute",
+          "lineRange": [1, 2],
+          "explanation": "`windows_subsystem = \"windows\"` is applied only when `debug_assertions` is off, so release builds on Windows start as a GUI app without a stray console window while debug builds keep stdout visible. The comment warns not to remove it because the effect is invisible on other platforms.",
+          "tourOrder": 1
+        },
+        {
+          "title": "Delegating to the library",
+          "lineRange": [4, 4],
+          "explanation": "`main` only calls `fleet_snowfluff_lib::run()`. Keeping all logic in the library crate makes it reusable by examples and tests, which cannot link against a binary's `main`.",
+          "tourOrder": 1
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/src/lib.rs": {
+      "overview": "The app crate root. It declares every module of the shell (pet windows, chat, AI commands, MCP, memory, tray, updater) and implements `run()`, which builds the Tauri app, registers IPC commands, restores config, installs shared state and starts the background tick loop. It is the best map of how the pet, chat, settings and AI features connect.",
+      "sections": [
+        {
+          "title": "Module declarations",
+          "lineRange": [1, 38],
+          "explanation": "Lists all modules of the app crate, grouped loosely into AI/chat stores and runtimes, then pet rendering and windows. `gfx` (the wgpu renderer) is compiled out on Windows, where pet windows draw through GDI via the platform layer instead.",
+          "tourOrder": 1
+        },
+        {
+          "title": "Imports and build info",
+          "lineRange": [40, 46],
+          "explanation": "Pulls in the core crate's tick interval, `Config` and `WanderStayMode`, plus the `PetManager`. `shadow_rs::shadow!(build)` generates a `build` module with version and commit constants used in the startup log line.",
+          "tourOrder": 1
+        },
+        {
+          "title": "Builder, panic hook and plugins",
+          "lineRange": [48, 64],
+          "explanation": "`run()` installs a panic hook that logs through `log::error!`, because a release GUI process otherwise dies silently. It then builds the Tauri app with the shell, updater, dialog and autostart plugins.",
+          "tourOrder": 1
+        },
+        {
+          "title": "IPC command registry",
+          "lineRange": [65, 126],
+          "explanation": "`generate_handler!` registers every command the webview can invoke, grouped by module: personalization and updates (`commands`), AI settings, chat, tool confirmation, MCP servers and memory. This list is effectively the frontend-to-backend API surface.",
+          "tourOrder": 1
+        },
+        {
+          "title": "Setup: logging",
+          "lineRange": [127, 150],
+          "explanation": "The log plugin is attached inside `setup` and is always on, so release builds still produce logs. The `wgpu_hal::vulkan` target is lowered to Error to silence a per-frame warning from Mesa software rasterizers. Then a startup line with version and commit is logged."
+        },
+        {
+          "title": "Setup: config bootstrap",
+          "lineRange": [152, 189],
+          "explanation": "A `PetManager` is first created with default values because it needs `total_screen` to compute bounds. The persisted config is then loaded (sanitized by the core crate) and applied through each setter, and saved straight back so corrections reach disk immediately.",
+          "tourOrder": 2
+        },
+        {
+          "title": "Setup: autostart reconciliation",
+          "lineRange": [191, 215],
+          "explanation": "Compares the OS login-item state with the saved `auto_startup` flag and enables or disables it on mismatch. Failures are only logged, since some Linux desktops restrict this, so startup is never blocked."
+        },
+        {
+          "title": "Setup: AI state and managed services",
+          "lineRange": [217, 249],
+          "explanation": "AI settings and credentials load from separate files, independent of the personalization config. Personas and task-router rules are seeded on first run. All state is registered with `app.manage` (mostly `Mutex`-wrapped) so commands can borrow it, then the memory and compaction runtimes, tray and startup update check are started."
+        },
+        {
+          "title": "Background tick thread",
+          "lineRange": [251, 295],
+          "explanation": "Tauri's event loop waits by default, so a dedicated thread sleeps `MOVE_INTERVAL_MS` and calls `run_on_main_thread` to tick the `PetManager`. The manager lock is released before popping up the quick menu or opening the chat window, because those need to lock the same state and would deadlock. The loop exits when the main thread is gone."
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-core/src/lib.rs": {
+      "overview": "Crate root of `fleet-snowfluff-core`, the platform-independent pet logic. It declares the modules and re-exports their main types so the app crate can use short paths like `fleet_snowfluff_core::Config`. It opens the 'Pet Motion Core' tour step.",
+      "sections": [
+        {
+          "title": "Module declarations",
+          "lineRange": [1, 9],
+          "explanation": "Nine public modules: config, constants, dock, i18n, locale, motion, pause, swarm and voice. None of them depend on a window, GPU or AI code, which keeps the crate testable headless.",
+          "tourOrder": 2
+        },
+        {
+          "title": "Public re-exports",
+          "lineRange": [11, 20],
+          "explanation": "Flattens the API: configuration, docking math, dictionaries, locale detection, motion types, the pause scheduler, `PetSwarm` and voice types are all reachable from the crate root, hiding the internal file layout.",
+          "tourOrder": 2
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-core/src/motion.rs": {
+      "overview": "The headless pet motion state machine, ported from the legacy Python app. `PetState::tick` advances one pet by one step through wander, follow, curious and rest states with inertia, jitter and edge escape. It performs pure math over injected randomness, so it is unit-tested without a window.",
+      "sections": [
+        {
+          "title": "Module intent",
+          "lineRange": [1, 16],
+          "explanation": "Documents scope: pause and drag are not modeled here. The shell simply does not call `tick()` while paused or dragged, which keeps this engine to pure motion math.",
+          "tourOrder": 2
+        },
+        {
+          "title": "Geometry, states and settings types",
+          "lineRange": [17, 100],
+          "explanation": "`Bounds` uses `left/top/right/bottom` fields for clarity over legacy naming. `MotionState` is the four-variant enum behind the state machine and `WanderStayMode` selects idle behavior. `MotionSettings` and `TickInput` carry per-tick data in, while `TickEvents` returns edge-triggered flags so the renderer can react (new animation, mirror sprite) without polling.",
+          "tourOrder": 2
+        },
+        {
+          "title": "PetState and spawn",
+          "lineRange": [102, 156],
+          "explanation": "`PetState` holds position, velocity, target, timers and flags; private fields keep internal timing out of callers' hands. `spawn` picks a random position and wander target, using `.max(bounds.left)` guards so a pet larger than the bounds does not panic on an empty range. An injected `impl Rng` makes behavior deterministic in tests.",
+          "tourOrder": 2
+        },
+        {
+          "title": "Tick: idle timer, random stop, rest",
+          "lineRange": [157, 198],
+          "explanation": "The idle-stop timer runs independently of the state machine, mirroring legacy's separately scheduled callback. A wandering, moving pet may randomly stop with probability `STOP_CHANCE`. In `Rest` state a countdown runs, after which the pet picks a new target and resumes wandering. Both paths return early."
+        },
+        {
+          "title": "Tick: follow, curious and wander logic",
+          "lineRange": [200, 261],
+          "explanation": "Detects whether the mouse moved and decides state transitions: far from the cursor means `Follow`, very near means `Curious`, and disabling follow-mouse drops back to `Wander`. When wandering near its target the pet either rests (with `REST_CHANCE`, respecting the stay mode) or picks a new target. A separate countdown re-rolls the target periodically."
+        },
+        {
+          "title": "Tick: velocity and movement",
+          "lineRange": [263, 299],
+          "explanation": "Each state scales speed. When following or curious, the target jumps near the cursor with a random offset. Velocity blends old and desired values (`INERTIA_FACTOR` and `INTENT_FACTOR`) so turns are gradual, and small jitter is re-rolled every few ticks to look organic. Position then advances by velocity."
+        },
+        {
+          "title": "Tick: edges and facing",
+          "lineRange": [301, 340],
+          "explanation": "`handle_edge` may respawn the pet from an opposite edge. Otherwise the pet is clamped into bounds with velocity reflected. Direction flips set `direction_changed` only when the velocity passes a 0.5 deadzone and no idle animation is playing, preventing sprite flicker. The `hit_edge` variable is kept only for parity with legacy."
+        },
+        {
+          "title": "Idle and move transitions",
+          "lineRange": [342, 385],
+          "explanation": "`switch_to_idle` resolves the stay mode: always move, stationary, or a probabilistic mix (sometimes idling in place, sometimes idling while moving). It arms the idle-stop timer and sets `started_idle`. `switch_to_move` resets the flags and sets `resumed_moving`."
+        },
+        {
+          "title": "Edge escape and random targets",
+          "lineRange": [387, 465],
+          "explanation": "A pet that leaves bounds either respawns just outside a random edge (30% chance) or bounces back with clamping. `random_target` sometimes places the wander goal slightly outside the bounds, deliberately provoking that edge-escape behavior so the pet occasionally wanders off and re-enters."
+        },
+        {
+          "title": "Unit tests",
+          "lineRange": [467, 641],
+          "explanation": "Seeded `StdRng` tests check spawn bounds, follow and curious thresholds, resetting when follow is disabled, rest countdown, stay modes, inertia smoothing, respawn placement and target distribution."
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-core/src/constants.rs": {
+      "overview": "Central tuning constants for pet motion, pause timing and default settings, ported unchanged from the legacy Python app so the pet's feel is identical. `motion.rs`, `pause.rs` and `config.rs` import these instead of embedding magic numbers.",
+      "sections": [
+        {
+          "title": "Speed, tick and stop tuning",
+          "lineRange": [1, 17],
+          "explanation": "Base per-axis speeds, the random stop chance and duration, and `MOVE_INTERVAL_MS` (30 ms, about 33 fps), which also drives the app's background tick thread. The header notes values must match legacy to keep the same feel.",
+          "tourOrder": 2
+        },
+        {
+          "title": "Edges, targets and inertia",
+          "lineRange": [19, 42],
+          "explanation": "Edge escape chance and respawn margin, wander target re-roll range, follow distance, the inertia blend (0.95 old plus 0.05 desired), jitter amount, and rest chance, duration and trigger distance.",
+          "tourOrder": 2
+        },
+        {
+          "title": "Pause-mode timing",
+          "lineRange": [44, 52],
+          "explanation": "Documents a deliberate product divergence from legacy: rest quietly for a fixed 10 seconds, then switch to a random screen-reaction animation every 30 to 120 seconds while paused, instead of cycling back to idle."
+        },
+        {
+          "title": "Follow thresholds and speed multipliers",
+          "lineRange": [54, 63],
+          "explanation": "Start and stop distances give the follow/curious hysteresis, per-state speed multipliers scale the base speed, and `STAY_PUT_CHANCE` governs the probabilistic idle mode."
+        },
+        {
+          "title": "Option lists and defaults",
+          "lineRange": [65, 76],
+          "explanation": "Scale (0.1x to 2.0x) and opacity (10% to 100%) option lists are generated by functions and referenced by index, which is why config stores indexes. Default indexes and defaults for screen, stay mode and voice follow.",
+          "tourOrder": 2
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-core/src/config.rs": {
+      "overview": "The typed, validated personalization config. Instead of deserializing straight into `Config`, it sanitizes a loose `serde_json::Value` field by field, so bad or missing values degrade to defaults rather than failing the whole load. File I/O stays in the shell, which keeps this module testable on strings.",
+      "sections": [
+        {
+          "title": "Module intent and imports",
+          "lineRange": [1, 28],
+          "explanation": "Explains the design: sanitization over `Value` matches legacy behavior, and path resolution is left to the shell. Constants define the option list lengths used for index validation.",
+          "tourOrder": 2
+        },
+        {
+          "title": "Config struct and defaults",
+          "lineRange": [30, 73],
+          "explanation": "`Config` lists every persisted setting (screen, scale and opacity indexes, snap, click-through, voice, language and more). `Default` pulls values from `constants.rs`, with auto-startup defaulting to true and `skip_version` as an `Option`.",
+          "tourOrder": 2
+        },
+        {
+          "title": "Coercion helpers",
+          "lineRange": [75, 111],
+          "explanation": "Small functions that read a JSON value with a default. Out-of-range numbers fall back to the default rather than being clamped, matching legacy's `_coerce_int`. `coerce_enum` deserializes any serde enum and falls back to its `Default`.",
+          "tourOrder": 2
+        },
+        {
+          "title": "sanitize",
+          "lineRange": [113, 155],
+          "explanation": "Builds a fully valid `Config` from raw JSON, applying a specific range to each field (for example instance count 1 to 80, display priority 1 to 3, volume 0 to 150). The voice language is resolved against the packs that actually contain clips, so an empty pack snaps back to Chinese.",
+          "tourOrder": 2
+        },
+        {
+          "title": "Loading, migration and serialization",
+          "lineRange": [157, 190],
+          "explanation": "`load_from_str` returns defaults on corrupt JSON, still resolving the voice language. `migrate_from_legacy` sanitizes the old config, drops music keys implicitly, and sets the two new language fields from detection. `to_json_string` pretty-prints, with `expect` justified since serialization cannot fail here."
+        },
+        {
+          "title": "Unit tests",
+          "lineRange": [192, 316],
+          "explanation": "Cover defaults, corrupt and partial input, out-of-range and wrong-typed values, voice pack fallback, legacy migration and JSON round trip."
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-core/src/swarm.rs": {
+      "overview": "Manages a bounded collection of pets that share one `MotionSettings`, supporting 1 to 80 instances. It owns only motion state; creating or destroying actual windows to match the count is the shell's job. It builds directly on the single-pet state machine in `motion.rs`.",
+      "sections": [
+        {
+          "title": "Limits and struct",
+          "lineRange": [1, 18],
+          "explanation": "Defines `MIN_INSTANCES` and `MAX_INSTANCES` and the `PetSwarm` struct holding a private pet vector plus public shared settings, so a settings change applies to every pet at once.",
+          "tourOrder": 3
+        },
+        {
+          "title": "Construction and accessors",
+          "lineRange": [20, 39],
+          "explanation": "`new` clamps the requested count to the allowed range and spawns each pet independently at random. Simple accessors expose length and a read-only slice of pets.",
+          "tourOrder": 3
+        },
+        {
+          "title": "Resizing the swarm",
+          "lineRange": [41, 58],
+          "explanation": "`set_instance_count` grows by spawning new pets or shrinks by truncating from the end, so existing pets keep their positions when the count increases.",
+          "tourOrder": 3
+        },
+        {
+          "title": "Ticking all pets",
+          "lineRange": [60, 77],
+          "explanation": "`tick_all` copies the shared settings and ticks every pet, collecting a `TickEvents` per pet. Bounds and size are passed per call rather than stored, leaving room for per-monitor confinement.",
+          "tourOrder": 3
+        },
+        {
+          "title": "Tests",
+          "lineRange": [79, 135],
+          "explanation": "Seeded tests verify clamping at both ends, growing, shrinking, and that after several ticks at least one pet has moved."
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-core/src/dock.rs": {
+      "overview": "Pure positioning math for pause-mode window docking. Given the rectangle of an eligible foreground window, it computes where the pet should sit, or returns `None`. Platform code decides which window is eligible before calling it.",
+      "sections": [
+        {
+          "title": "Module intent",
+          "lineRange": [1, 11],
+          "explanation": "Explains that the rewrite docks to whatever window is foreground rather than legacy's hardcoded app allowlist, so eligibility filtering lives in the platform-specific callers.",
+          "tourOrder": 3
+        },
+        {
+          "title": "ForeignWindowRect",
+          "lineRange": [13, 20],
+          "explanation": "A plain copyable rectangle in the same coordinate space as `Bounds`, giving platform backends a neutral type to hand over.",
+          "tourOrder": 3
+        },
+        {
+          "title": "compute_dock_position",
+          "lineRange": [22, 42],
+          "explanation": "Anchors the pet to the window's top-right corner (pet bottom sits 5 px below the window top). The result must lie strictly inside the bounds; otherwise it returns `None` instead of clamping, matching legacy. `bool::then_some` expresses this concisely and `?` handles the missing window.",
+          "tourOrder": 3
+        },
+        {
+          "title": "Tests",
+          "lineRange": [44, 70],
+          "explanation": "Cover no window, the exact legacy offset, and refusal when the window is so close to the top that the pet would leave the bounds."
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-core/src/pause.rs": {
+      "overview": "Schedules the special screen-reaction animations during pause mode. It only decides when to request a new animation; choosing the asset is a rendering concern. Timings come from `constants.rs`.",
+      "sections": [
+        {
+          "title": "Imports and event type",
+          "lineRange": [1, 18],
+          "explanation": "The module doc describes the cycle: a fixed idle rest, then a new random animation every 30 to 120 seconds. `PauseAnimEvent` is a two-variant, edge-triggered result of each tick.",
+          "tourOrder": 3
+        },
+        {
+          "title": "Scheduler",
+          "lineRange": [20, 40],
+          "explanation": "The scheduler is a single countdown that starts at `PAUSE_IDLE_MS`. Each `tick` subtracts elapsed time and, when it expires, re-arms with a random duration and returns `PlayRandomAnimation`. Randomness is injected so tests are deterministic.",
+          "tourOrder": 3
+        },
+        {
+          "title": "Tests",
+          "lineRange": [42, 91],
+          "explanation": "Check the fixed first delay, the continuing 30 to 120 second cycle and that nothing fires on the first tick."
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-core/src/i18n.rs": {
+      "overview": "Embeds the five locale JSON dictionaries into the binary and exposes them by language. Because it lives in the core crate, both the webview command and native tray and menu code share one lookup. The JSON files are the single source of truth for all UI strings.",
+      "sections": [
+        {
+          "title": "Embedded dictionaries",
+          "lineRange": [1, 16],
+          "explanation": "`include_str!` compiles the locale files from the repo root into constants, so no runtime file access is needed and a missing file fails the build.",
+          "tourOrder": 3
+        },
+        {
+          "title": "Raw JSON lookup",
+          "lineRange": [18, 30],
+          "explanation": "`dictionary_json` matches exhaustively on `UiLanguage` and returns the raw text, which the webview parses itself.",
+          "tourOrder": 3
+        },
+        {
+          "title": "Parsed dictionary",
+          "lineRange": [32, 40],
+          "explanation": "Parses the JSON into a `HashMap` for native label lookups. It panics on malformed JSON, justified because the files are authored, checked-in content, so failure is a build-time bug.",
+          "tourOrder": 3
+        },
+        {
+          "title": "Key parity test",
+          "lineRange": [42, 62],
+          "explanation": "Verifies every locale parses and has exactly the same key set as English, catching missing translations."
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-core/src/locale.rs": {
+      "overview": "Defines the supported UI languages and resolves a system locale string to one of them. The resolution is a pure function, with a thin wrapper that reads the real OS locale, so the logic is testable without touching the system.",
+      "sections": [
+        {
+          "title": "UiLanguage enum",
+          "lineRange": [1, 17],
+          "explanation": "Five languages: Traditional and Simplified Chinese, English, Japanese and Korean. `#[default]` makes Traditional Chinese the default and `rename_all = \"kebab-case\"` sets the serialized names used in config.",
+          "tourOrder": 3
+        },
+        {
+          "title": "resolve_ui_language",
+          "lineRange": [19, 49],
+          "explanation": "Normalizes the locale (lowercase, underscores to hyphens). For `zh`, TW, HK, MO or Hant map to Traditional, CN, SG or Hans to Simplified, and a bare `zh` falls to Traditional. Other languages match by their prefix before `-` or `.`, which also handles Linux strings like `en_US.UTF-8`. Anything unknown falls back to Traditional Chinese.",
+          "tourOrder": 3
+        },
+        {
+          "title": "detect_ui_language",
+          "lineRange": [51, 54],
+          "explanation": "Feeds `sys_locale::get_locale()` into the pure resolver. This is what app startup calls for first-run defaults.",
+          "tourOrder": 3
+        },
+        {
+          "title": "Tests",
+          "lineRange": [56, 99],
+          "explanation": "Cover regional Chinese mapping, prefix matching, Linux-style normalization, and the Traditional Chinese fallbacks for unknown, missing and bare `zh` locales."
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/src/manager.rs": {
+      "overview": "PetManager owns every pet window, the shared wgpu context (everywhere except Windows), the loaded animations, and the background tick that polls the mouse, advances each pet and renders it. It is the glue between the pure core crate (swarm sizing, motion settings, bounds) and real OS windows, and it is the central stateful object that the tray, chat and settings code lock through a Mutex. This file is the heart of tour step 4.",
+      "sections": [
+        {
+          "title": "Imports, TickActions and constants",
+          "lineRange": [1, 54],
+          "explanation": "Declares what a tick hands back to the caller: a pending quick-menu window and an `open_chat` flag. These are returned instead of acted on because the menu and chat window both read manager state, which would deadlock the non-reentrant `Mutex<PetManager>` the tick runs under. The file also fixes the double-click tuning constants (6 px tap threshold, 400 ms window) and a global atomic counter that makes unique `pet-N` window labels.",
+          "tourOrder": 4
+        },
+        {
+          "title": "Backend and coordinate helpers",
+          "lineRange": [56, 174],
+          "explanation": "`select_wgpu_backends` (Linux only) prefers Vulkan because the GL/EGL path on X11 only advertises opaque alpha, which would make pets non-transparent. `monitor_logical_bounds` and `physical_to_logical_cursor` convert physical pixels to logical points per monitor, since mixed-DPI setups break any single global scale factor. `compute_bounds` builds the roaming rectangle: the union of all monitors, one selected monitor, or the primary monitor, with a 1920x1080 fallback.",
+          "tourOrder": 4
+        },
+        {
+          "title": "PetManager struct",
+          "lineRange": [176, 251],
+          "explanation": "The manager's state, with heavy `cfg` gating. On Windows there is no wgpu `instance` or `gpu` field at all because rendering goes through GDI. Mouse polling is an `Option` (`DeviceState` or a Linux `MousePoller`) so the app degrades gracefully without input permissions. Other fields track drag ownership, the last tap for double-click pairing, display priority, fullscreen auto-hide, and the voice player.",
+          "tourOrder": 4
+        },
+        {
+          "title": "Construction and lazy animations",
+          "lineRange": [253, 344],
+          "explanation": "`new` computes initial bounds and builds `DeviceState` inside `catch_unwind`, because the library panics when macOS Accessibility permission is missing. It then seeds defaults that `lib.rs` overrides from the real config. `mouse_available` has one definition per platform, and `ensure_animations` lazily decodes the GIF set once and shares it through an `Arc`.",
+          "tourOrder": 4
+        },
+        {
+          "title": "Spawning and instance count",
+          "lineRange": [346, 447],
+          "explanation": "`spawn_one` builds an undecorated, always-on-top, skip-taskbar window parked off-screen. Non-Windows builds make it transparent and create a wgpu surface, bootstrapping the shared `GpuContext` from the first surface. Windows deliberately skips `.transparent(true)` and uses `make_layered`. `set_instance_count` clamps to the core crate's swarm limits and pushes or pops from the end of the vector, which keeps `pets[0]` stable.",
+          "tourOrder": 4
+        },
+        {
+          "title": "Setters and accessors",
+          "lineRange": [449, 626],
+          "explanation": "A long run of small setters that fan a setting out to every pet: bounds, scale, opacity, pause, visibility, click-through and display priority. `set_paused` clears dock bookkeeping when pause ends. `apply_visibility` combines the user's show/hide with the fullscreen auto-hide. `primary_pet_rect` uses `effective_position()` so the status bubble anchors to a docked pet. The voice and locale accessors forward to the core crate.",
+          "tourOrder": 4
+        },
+        {
+          "title": "Tick: mouse polling",
+          "lineRange": [628, 698],
+          "explanation": "The start of `tick` returns early if no GPU exists (non-Windows) and reads the global cursor and button state once per tick. Physical-to-logical conversion is applied on Windows and Linux. Button indices are 1-based in `device_query`, and edge detection against `was_left_down` and `was_right_down` produces press and release events.",
+          "tourOrder": 4
+        },
+        {
+          "title": "Tick: drag, double-click, right-click",
+          "lineRange": [699, 759],
+          "explanation": "When mouse polling works and click-through is off, a left press over a pet starts a drag and plays a voice clip. On release, movement under the threshold counts as a stationary tap, and two taps on the same pet within 400 ms set `open_chat`. A real drag clears `last_tap`. A right press over a pet queues the quick menu window for the caller, because pet windows get no native click events.",
+          "tourOrder": 4
+        },
+        {
+          "title": "Tick: throttled OS checks and render loop",
+          "lineRange": [761, 868],
+          "explanation": "Expensive OS queries (fullscreen detection for display mode 2, foreground-window docking) run about once per second via `tick_count % 33`. The chat window's rect takes priority over the OS foreground window, so a paused pet docks to the chat. The final loop drags the owning pet, or ticks the others and docks the paused ones, then renders each pet and returns the `TickActions`.",
+          "tourOrder": 4
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/src/pet.rs": {
+      "overview": "PetWindow is one pet: its Tauri window, its rendering surface (wgpu `PetSurface`, or a GDI `LayeredSurface` on Windows), and the display-side state layered on the core `PetState`. It turns core motion events into animation cues, window moves and sized frames. PetManager creates and ticks one of these per instance, as described in tour step 4.",
+      "sections": [
+        {
+          "title": "Backend alias and struct",
+          "lineRange": [1, 70],
+          "explanation": "The `Gpu` type alias is a real `GpuContext` on most platforms and `()` on Windows, so call sites share one signature without platform branches. The struct tracks the core `PetState`, the pause scheduler, docked and drag state, the current animation cue and frame timing, and a cached window size. `dock_position` overrides where the pet appears without touching the resting `state.x/y`.",
+          "tourOrder": 4
+        },
+        {
+          "title": "Constructors, scale and opacity",
+          "lineRange": [72, 181],
+          "explanation": "There are two `cfg`-gated `new` functions. The non-Windows one takes a prepared surface and sets its opacity. The Windows one calls `make_layered` and builds a default `LayeredSurface` that allocates lazily. Both spawn `PetState` at a random position and start with the Move cue. `set_scale` re-applies the window size, and `set_opacity` writes to the shader uniform (a no-op on Windows).",
+          "tourOrder": 4
+        },
+        {
+          "title": "Display priority, visibility, docking",
+          "lineRange": [183, 292],
+          "explanation": "`apply_display_priority` calls the per-OS platform module for desktop-only mode (3), or normal level with topmost otherwise. `apply_dock` only runs while paused. It uses core `compute_dock_position` to snap to a window's top-right corner, or releases back to the resting position. `clear_dock` exists as a bug fix: stale `dock_position` made hit-testing miss the pet after pause ended.",
+          "tourOrder": 4
+        },
+        {
+          "title": "Sizing and drag",
+          "lineRange": [294, 360],
+          "explanation": "`apply_window_size` re-sends the logical size every tick, because Windows DPI changes during a drag can resize a window behind the cache's back. Only the GPU surface resize stays gated on the cache. The drag functions compute an offset from `effective_position()` so a docked pet does not jump. `set_cue` resets frame timing only when the cue changes.",
+          "tourOrder": 4
+        },
+        {
+          "title": "Per-tick update",
+          "lineRange": [362, 448],
+          "explanation": "While dragging, the core state machine is skipped. While paused, the `PauseAnimationScheduler` picks a random screen clip that differs from the current one, and `frame_frozen` is cleared to avoid a stuck frame. Otherwise the core `PetState::tick` runs, idle variants are chosen on `started_idle`, the cue is mapped from the motion flags, and the window is resized and moved (except on Windows, where `render` positions it).",
+          "tourOrder": 4
+        },
+        {
+          "title": "Render and position queries",
+          "lineRange": [450, 521],
+          "explanation": "`render` advances the frame when its GIF delay elapses, so animation pacing is separate from tick pacing, then draws via wgpu or `LayeredSurface::update`. `effective_position` is the single source of truth for where the pet is visible: drag position, then dock position, then resting position. `bounds_contains` and `size` build on it for hit-testing and for anchoring the status bubble.",
+          "tourOrder": 4
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/src/tray.rs": {
+      "overview": "Builds the system tray icon and the menu it shares with the pet's right-click quick menu. Menu items read their labels from the localized dictionary and are refreshed after each toggle so they always reflect PetManager state. It is part of tour step 4, where the app crate links user controls to the pet windows.",
+      "sections": [
+        {
+          "title": "Module doc and MenuItemSet",
+          "lineRange": [1, 39],
+          "explanation": "The doc explains that follow-mouse and click-through persist to `Config` on toggle, since the tray and quick menu are the only places those can change. `MenuItemSet` holds typed handles to every item so labels and checkmarks can be updated in place later.",
+          "tourOrder": 4
+        },
+        {
+          "title": "Building the menu items",
+          "lineRange": [41, 111],
+          "explanation": "`MenuItemSet::build` copies the language and toggle state out of the locked manager first, then drops the lock before creating Tauri items. `build_menu` is shared by the tray and the quick menu, so the item list and order exist in one place. `translate` falls back to the key itself when the dictionary lacks it.",
+          "tourOrder": 4
+        },
+        {
+          "title": "Tray setup",
+          "lineRange": [113, 131],
+          "explanation": "`build` registers the item set as Tauri managed state, loads the small 32x32 icon with `include_bytes!` (the 512px app icon is too big for a menu bar), and builds the tray with left-click opening the menu.",
+          "tourOrder": 4
+        },
+        {
+          "title": "Menu event handling",
+          "lineRange": [133, 180],
+          "explanation": "Each menu id maps to a manager action. Follow-mouse and click-through also call `apply_and_save` to write the config. Locks are scoped in small blocks so they are released before other calls. Settings and quit return early, and the rest fall through to `refresh_labels`.",
+          "tourOrder": 4
+        },
+        {
+          "title": "Refreshing labels",
+          "lineRange": [182, 207],
+          "explanation": "Re-reads the manager state and updates each item's text and checkmark. Results are discarded with `.ok()`, so a failed UI update never panics.",
+          "tourOrder": 4
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/src/chat_pause.rs": {
+      "overview": "Connects chat activity to the global pet pause. While the chat window is open, a generation is pending, or an unread result exists, pets are forced to pause. The previous pause state is remembered and restored afterward. This is the chat-state side of tour step 4's pause behavior.",
+      "sections": [
+        {
+          "title": "ChatPauseState",
+          "lineRange": [1, 19],
+          "explanation": "A small managed state whose only field is `Mutex<Option<bool>>`. `Some(previous)` means chat is currently forcing a pause and records what the user's pause setting was. `None` means chat is not doing so.",
+          "tourOrder": 4
+        },
+        {
+          "title": "recompute",
+          "lineRange": [21, 48],
+          "explanation": "Computes `should_force_pause` from three conditions: the chat window exists, a generation is pending, or an unread result is waiting. On the first forced pause it saves the manager's current `paused` value and pauses. When all conditions clear, it restores the saved value. The `prior.is_none()` guard prevents a second overwrite of the saved value. Callers invoke it whenever any condition may have changed.",
+          "tourOrder": 4
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/src/gfx.rs": {
+      "overview": "Holds the shared wgpu state (instance-derived adapter, device, queue, pipeline, sampler) and the per-window `PetSurface` that draws a sprite frame to a transparent surface. One device serves all pets. The file is not compiled on Windows, which uses GDI instead. It is the main subject of tour step 5.",
+      "sections": [
+        {
+          "title": "GpuContext and alpha mode",
+          "lineRange": [1, 36],
+          "explanation": "`GpuContext` bundles everything created once for the whole app. `pick_alpha_mode` prefers PostMultiplied, then PreMultiplied, and logs a warning before falling back to Opaque, because without a non-opaque mode the pet window cannot be see-through.",
+          "tourOrder": 5
+        },
+        {
+          "title": "GpuContext::new",
+          "lineRange": [38, 144],
+          "explanation": "Uses the first pet's surface to select a low-power adapter and create a device with downlevel limits. It picks an sRGB format when available, compiles `pet_quad.wgsl` via `include_str!`, and defines a bind group layout (texture, sampler, opacity uniform). The pipeline has no vertex buffers and uses alpha blending. The sampler is nearest-neighbor for crisp pixel art.",
+          "tourOrder": 5
+        },
+        {
+          "title": "FrameResources and PetSurface",
+          "lineRange": [146, 205],
+          "explanation": "`FrameResources` caches the texture and bind group for the current clip size. `PetSurface::new` configures the surface with `AutoNoVsync`, and the comment explains why: Fifo waits for vblank, and with many pets rendering sequentially on one thread that stalled the UI. It also creates a 16-byte opacity uniform initialised to 1.0.",
+          "tourOrder": 5
+        },
+        {
+          "title": "resize and set_opacity",
+          "lineRange": [207, 217],
+          "explanation": "`resize` clamps to at least 1x1 and reconfigures the surface. `set_opacity` clamps the value to 0..1 and writes it into the uniform buffer.",
+          "tourOrder": 5
+        },
+        {
+          "title": "render",
+          "lineRange": [219, 325],
+          "explanation": "Rebuilds the texture and bind group only when the clip's pixel size changes (an earlier version created new GPU objects every frame and leaked memory). It uploads the RGBA frame with `write_texture`, then acquires the swapchain texture, reconfiguring on Lost or Outdated. One render pass clears to transparent and draws 6 vertices, and the result is presented. Scale comes from the window size, not from vertex math.",
+          "tourOrder": 5
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/src/animation.rs": {
+      "overview": "Decodes the bundled GIFs into in-memory clips of RGBA frames with per-frame delays, and defines the cue enum that selects which clip to show. Frames are kept at native resolution, and scale is handled by resizing the window. It is part of tour step 5.",
+      "sections": [
+        {
+          "title": "Frame and clip types",
+          "lineRange": [1, 46],
+          "explanation": "`AnimationFrame` holds raw RGBA bytes and a delay. `AnimationClip` takes its size from the first frame, and zero delays are replaced with 80 ms so a GIF with no timing still animates. `flipped_horizontally` builds the left-facing clip from the same decoded source rather than reloading.",
+          "tourOrder": 5
+        },
+        {
+          "title": "AnimationCue and AnimationSet",
+          "lineRange": [48, 85],
+          "explanation": "`AnimationCue` is the shell-side selector (Move, Idle(n), Drag, Paused, Screen(n)); the comment notes core has no notion of assets. `clip_for` maps a cue and direction to a clip, using modulo indexing with `.max(1)` to avoid a divide-by-zero.",
+          "tourOrder": 5
+        },
+        {
+          "title": "Decoding and loading",
+          "lineRange": [87, 122],
+          "explanation": "`decode_gif_frames` reads embedded bytes with the `image` GIF decoder and panics on failure, treating a broken bundled asset as a programmer error. `load_animation_set` loads move (plus a flipped copy), four idle clips, seven screen clips and drag. The paused pose reuses the already decoded idle2 clip.",
+          "tourOrder": 5
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/src/assets.rs": {
+      "overview": "Embeds the GIF and voice asset folders into the binary using `rust-embed`, and offers a helper to fetch GIF bytes by name. It is how animation.rs gets its data in step 5. Release builds are self-contained, while debug builds read from disk.",
+      "sections": [
+        {
+          "title": "Embedded asset folders",
+          "lineRange": [1, 25],
+          "explanation": "Two `RustEmbed` structs point at `assets/gifs/` and `assets/voice/` relative to the crate. In debug builds the files are read from disk at runtime, so editing a GIF needs no rebuild. In release builds they are embedded in the executable.",
+          "tourOrder": 5
+        },
+        {
+          "title": "gif_bytes",
+          "lineRange": [27, 33],
+          "explanation": "Looks up a GIF by file name and panics if missing. That is acceptable because every caller uses a fixed list of names, so a miss means the assets directory is broken, not that the user gave bad input.",
+          "tourOrder": 5
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/src/pet_quad.wgsl": {
+      "overview": "The WGSL shader used for every pet. The vertex stage generates a full-screen quad from the vertex index with no vertex buffer, and the fragment stage samples the sprite texture and multiplies alpha by an opacity uniform. It pairs with the pipeline built in gfx.rs for tour step 5.",
+      "sections": [
+        {
+          "title": "Vertex stage",
+          "lineRange": [1, 30],
+          "explanation": "Two hard-coded arrays hold the six clip-space positions of two triangles and matching UVs, and `vertex_index` picks from them. The V coordinate is flipped so the image is upright. Because no buffers are bound, the pipeline in Rust declares `buffers: &[]`.",
+          "tourOrder": 5
+        },
+        {
+          "title": "Bindings and fragment stage",
+          "lineRange": [32, 48],
+          "explanation": "Bindings 0 to 2 are the frame texture, its sampler and a uniform struct with one `opacity` f32. The fragment function samples the texture and scales alpha by opacity. The comment says opacity lives here because Tauri's windowless Window has no `set_opacity`.",
+          "tourOrder": 5
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/src/platform/mod.rs": {
+      "overview": "The entry point of the platform layer. It uses `cfg(target_os)` to compile exactly one backend module (linux, macos or windows) per build. The doc comment records what each backend provides and which are verified. It opens tour step 6.",
+      "sections": [
+        {
+          "title": "Module documentation",
+          "lineRange": [1, 10],
+          "explanation": "Explains that each platform module covers desktop-only placement, fullscreen detection, topmost and click-through. It notes that Linux is only compile-verified because the dev environment has no X11 display.",
+          "tourOrder": 6
+        },
+        {
+          "title": "Conditional module declarations",
+          "lineRange": [12, 17],
+          "explanation": "Three `#[cfg(target_os = ...)]` module declarations. Callers such as manager.rs and pet.rs use matching `cfg` blocks to call `crate::platform::<os>::...`. Despite the doc's mention of a trait, the code here is just these declarations.",
+          "tourOrder": 6
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/src/platform/macos.rs": {
+      "overview": "macOS backend: sets NSWindow levels for desktop-only and normal modes, and finds the frontmost normal window through CoreGraphics so the app can detect fullscreen and dock pets. It is one of the per-OS implementations in tour step 6.",
+      "sections": [
+        {
+          "title": "Imports and module doc",
+          "lineRange": [1, 25],
+          "explanation": "The doc says topmost and click-through come from Tauri, so this file covers only arbitrary window levels and the window list query. It imports `core_foundation` and `core_graphics` for the query and `objc2_app_kit` for `NSWindow`.",
+          "tourOrder": 6
+        },
+        {
+          "title": "Window level control",
+          "lineRange": [27, 58],
+          "explanation": "`set_desktop_level` and `set_normal_level` ask CoreGraphics for the level number via `CGWindowLevelForKey`, because the keys are stable across macOS versions but the numbers are not. `set_level` gets the raw `NSWindow` pointer from Tauri, null-checks it, and calls `setLevel` in an `unsafe` block.",
+          "tourOrder": 6
+        },
+        {
+          "title": "ForegroundWindow",
+          "lineRange": [60, 72],
+          "explanation": "A wrapper around `ForeignWindowRect` with `covers`, a fullscreen heuristic: width and height at least equal to the screen bounds.",
+          "tourOrder": 6
+        },
+        {
+          "title": "foreground_window query",
+          "lineRange": [74, 137],
+          "explanation": "Calls `copy_window_info` for on-screen windows excluding desktop elements. It skips non-zero layers (menu bar, overlays) and windows owned by this process. It then reads the bounds dictionary, which needs a downcast to the raw-pointer dictionary type and a re-wrap, and returns the first match as a rect. Every CF lookup returns an `Option`, so malformed entries are skipped.",
+          "tourOrder": 6
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/src/platform/windows.rs": {
+      "overview": "Windows backend. It attaches pets to the desktop WorkerW for desktop-only mode, finds the foreground window for docking and fullscreen detection, and owns pet rendering through `LayeredSurface` and `UpdateLayeredWindow`, because wgpu could not deliver per-pixel alpha here. A long module doc records the failed attempts. It is the largest implementation in tour step 6.",
+      "sections": [
+        {
+          "title": "Module doc and imports",
+          "lineRange": [1, 65],
+          "explanation": "The doc explains why Windows renders with GDI: real hardware reported only Opaque alpha modes under both Vulkan and DX12, and a GPU device per window cost memory and stalled the UI thread. `UpdateLayeredWindow` gives true per-pixel alpha, unlike the legacy chroma-key approach. The rest is the `windows` crate imports.",
+          "tourOrder": 6
+        },
+        {
+          "title": "DPI-aware position resolution",
+          "lineRange": [67, 125],
+          "explanation": "`resolve_monitor_scale_and_position` converts a logical point to physical pixels using the monitor that contains it, and returns that same monitor's scale. Using one lookup for both position and size avoids the flip-flopping monitor assignment seen when `GetDpiForWindow` lagged. `class_name` reads a window's class string.",
+          "tourOrder": 6
+        },
+        {
+          "title": "Layered style and click-through",
+          "lineRange": [127, 187],
+          "explanation": "`make_layered` sets `WS_EX_LAYERED` and disables DWM transitions so rapid resizes do not animate. `set_click_through` toggles only `WS_EX_TRANSPARENT`, bypassing tao's `set_ignore_cursor_events`, which rewrote the whole exstyle and dropped the layered bit, causing a flash.",
+          "tourOrder": 6
+        },
+        {
+          "title": "LayeredSurface struct and Drop",
+          "lineRange": [189, 235],
+          "explanation": "Holds a memory DC, a top-down 32bpp DIB section and the raw pixel pointer. It also stores the original stub bitmap, since deleting a GDI object while it is selected into a DC is undefined. `Send` is implemented unsafely, justified by main-thread-only use. `Drop` restores the stub bitmap before freeing resources.",
+          "tourOrder": 6
+        },
+        {
+          "title": "Margin and ensure_size",
+          "lineRange": [236, 318],
+          "explanation": "`MARGIN_FACTOR` of 3.0 renders the window larger than the sprite, with the sprite at the top-left, to hide an unexplained cropping bug found on real hardware. The doc admits the root cause was never found. `ensure_size` rebuilds the DIB only when the physical size changes, selecting and restoring bitmaps carefully.",
+          "tourOrder": 6
+        },
+        {
+          "title": "LayeredSurface::update",
+          "lineRange": [320, 459],
+          "explanation": "Sets per-thread DPI awareness, computes physical box and content sizes, zero-fills the buffer so stale pixels do not remain, then copies the sprite using nearest-neighbor scaling. Pixels are converted from straight RGBA to premultiplied BGRA as `AC_SRC_ALPHA` requires. `UpdateLayeredWindow` sets position, size, content and opacity in one atomic call.",
+          "tourOrder": 6
+        },
+        {
+          "title": "WorkerW desktop attachment",
+          "lineRange": [461, 535],
+          "explanation": "`desktop_workerw` sends the undocumented 0x052c message to Progman so Explorer creates a WorkerW, then enumerates windows to find the one behind `SHELLDLL_DefView`. `set_desktop_level` parents the pet window to it and sends it to the bottom, and `set_normal_level` detaches it when its parent is a WorkerW.",
+          "tourOrder": 6
+        },
+        {
+          "title": "Foreground window detection",
+          "lineRange": [537, 587],
+          "explanation": "`ForegroundWindow::covers` uses the same fullscreen heuristic as macOS. `foreground_window` rejects the desktop shell and this process's own windows, reads `GetWindowRect`, and divides by the window's own DPI scale to produce logical coordinates.",
+          "tourOrder": 6
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/src/platform/linux.rs": {
+      "overview": "Linux X11 platform layer. It gives the pet windows the same desktop-level and foreground-window behaviours that macOS and Windows get from their own modules: sitting behind normal windows, detecting the active window's rectangle for fullscreen-hide and window-snap docking, and polling the global mouse. GTK handles the window-type hint, while a small `x11rb` EWMH client handles what GTK cannot see. It belongs to the platform-specific part of the tour.",
+      "sections": [
+        {
+          "title": "Design notes and X11 atoms",
+          "lineRange": [1, 38],
+          "explanation": "The module doc explains the split of responsibilities. GTK's `_NET_WM_WINDOW_TYPE` hint covers desktop-only mode. Foreground-window detection has no GTK equivalent, because GTK only knows about its own windows, so it uses `x11rb`. Topmost and click-through need no code here because tao already implements them. The `atom_manager!` macro interns `_NET_ACTIVE_WINDOW` and `_NET_WM_PID` in one round trip. The doc also admits the code is unverified on a real X11 desktop.",
+          "tourOrder": 6
+        },
+        {
+          "title": "Desktop and normal window level",
+          "lineRange": [40, 59],
+          "explanation": "`set_desktop_level` and `set_normal_level` both delegate to `set_type_hint`, which fetches the GTK window from the Tauri window and sets a `gdk::WindowTypeHint`. Failures are silently ignored with `let Ok(..) else return`, so the call is best-effort. `Desktop` is the X11 counterpart of macOS's desktop window level and Windows' WorkerW attach.",
+          "tourOrder": 6
+        },
+        {
+          "title": "Foreground window query",
+          "lineRange": [61, 130],
+          "explanation": "`foreground_window` opens a fresh X connection, reads `_NET_ACTIVE_WINDOW` from the root, and returns `None` if the active window's `_NET_WM_PID` equals this process. That keeps the pet from reacting to its own windows. It then reads the geometry and translates coordinates to root-relative, because `GetGeometry` is relative to the parent frame on reparenting window managers. `ForegroundWindow::covers` is the fullscreen heuristic. A separate connection is used on purpose because GDK's Xlib display cannot be shared with XCB.",
+          "tourOrder": 6
+        },
+        {
+          "title": "Global mouse poller",
+          "lineRange": [132, 163],
+          "explanation": "`MousePoller` replaces `device_query` on Linux. `device_query`'s X11 backend holds an `Rc<Display>`, which is not `Send` and so cannot live in the `Mutex<PetManager>` Tauri state. `x11rb`'s `RustConnection` is thread-safe, so one long-lived connection works. `poll` calls `query_pointer` and returns the position with left (BUTTON1) and right (BUTTON3) states, or `None` if the server is gone.",
+          "tourOrder": 6
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/message.rs": {
+      "overview": "The wire-agnostic vocabulary shared by every AI provider and by the app crate's Tauri commands. It defines chat roles, messages with optional tool-call data, stream chunks, model info, provider kinds and the coarse `ProviderError`. Because these types cross IPC they derive serde traits. This is the foundation for the provider abstraction tour step.",
+      "sections": [
+        {
+          "title": "Role and tool call record",
+          "lineRange": [1, 37],
+          "explanation": "`Role` has four speakers, serialized in snake_case. The doc stresses that `Tool` exists only inside the agent loop and is never persisted or sent to plain providers, so those providers may treat it as `unreachable!`. `ToolCallRecord` mirrors the streamed `ToolCall` item so the loop can push a call straight back into history unchanged.",
+          "tourOrder": 7
+        },
+        {
+          "title": "Message struct and constructors",
+          "lineRange": [39, 121],
+          "explanation": "`Message` adds `tool_calls` and `tool_call_id` to role and content. Both use `skip_serializing_if` and `default`, so plain messages serialize byte-identically to before these fields existed and old session logs still load. Constructors cover system, user, assistant, assistant-with-tool-calls and tool results. `tool_result` carries the call id, which OpenAI and Anthropic require and Ollama ignores.",
+          "tourOrder": 7
+        },
+        {
+          "title": "Chunks, models and provider kinds",
+          "lineRange": [123, 145],
+          "explanation": "Small data types: `StreamChunk` holds one text delta, `ModelInfo` is an id plus display name from live model listing, and `ProviderKind` is the four-way provider enum serialized as snake_case (so `OpenAi` becomes `open_ai`).",
+          "tourOrder": 7
+        },
+        {
+          "title": "ProviderError",
+          "lineRange": [147, 199],
+          "explanation": "A coarse error enum the UI can render without knowing the provider. Several variants are deliberately distinct: `RuntimeUnavailable` (CLI missing), `SubscriptionExpired` (was logged in), `Auth` (bad key) and `QuotaExhausted` versus `RateLimited`, because each needs different user guidance. `Display` gives human-readable prefixes.",
+          "tourOrder": 7
+        },
+        {
+          "title": "Tests",
+          "lineRange": [201, 322],
+          "explanation": "The tests lock in backward compatibility (no `tool_calls` or `tool_call_id` field on plain messages, old JSON still deserializes), round-trips, snake_case names and the distinct error messages.",
+          "tourOrder": 7
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/provider.rs": {
+      "overview": "Defines the `AiProvider` trait, the single interface every concrete provider implements and the only thing the app crate needs to send chat messages. Optional methods have defaults so new capabilities such as login and availability checks do not force changes on existing providers.",
+      "sections": [
+        {
+          "title": "ChatStream and the trait",
+          "lineRange": [1, 74],
+          "explanation": "`ChatStream` is a boxed, `Send` stream of chunk results so it can be returned through `Box<dyn AiProvider>`. The trait uses `async_trait` to stay object-safe, since the active provider is chosen at runtime from config. Required methods are `kind`, `chat` and `list_models`. `check_availability`, `session_id` and `trigger_login` have default no-op implementations, and only CLI-backed subscription providers override them. The login trigger only spawns the CLI's flow, so the caller must re-check availability afterwards.",
+          "tourOrder": 7
+        },
+        {
+          "title": "Object-safety test",
+          "lineRange": [76, 109],
+          "explanation": "A trivial provider returning one chunk is used as `Box<dyn AiProvider>` to prove the trait stays object-safe, which is easy to break by accident.",
+          "tourOrder": 7
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/tool_provider.rs": {
+      "overview": "An opt-in extension trait for providers that can call tools mid-conversation. It is kept separate from `AiProvider` so the CLI providers (`ClaudeCodeCli`, `Codex`), which own their own tool loops, never receive Aemeath's tool definitions. Ollama, OpenAI-compatible and Anthropic implement it.",
+      "sections": [
+        {
+          "title": "Why a separate trait",
+          "lineRange": [1, 27],
+          "explanation": "The module doc explains that changing `chat()`'s stream item type would touch every provider. A separate trait is additive. Each API-key provider parses its own streaming tool-call wire format independently, and `ProviderProfile::supports_tool_calling` decides whether a profile gets the capability.",
+          "tourOrder": 7
+        },
+        {
+          "title": "Tool definitions and stream items",
+          "lineRange": [29, 67],
+          "explanation": "`ToolDefinition` is a provider-agnostic name, description and JSON Schema. OpenAI-style providers use it as is, while Anthropic renames `parameters` to `input_schema`. `ToolCallStreamItem` interleaves text deltas, complete tool calls and a `PromptTokens` count that the loop uses to spot silent prompt truncation. `ToolCallStream` is boxed like `ChatStream`.",
+          "tourOrder": 7
+        },
+        {
+          "title": "ToolCallingProvider trait",
+          "lineRange": [69, 96],
+          "explanation": "`chat_with_tools` takes messages and tool definitions. Because it extends `AiProvider`, a tool-capable provider works wherever a plain one does. `set_reply_allowance` lets the context fit check shrink the reply budget, and `context_window` is an optional query that local servers answer and cloud providers leave as `None`.",
+          "tourOrder": 7
+        },
+        {
+          "title": "Tests",
+          "lineRange": [98, 148],
+          "explanation": "Mirrors the object-safety test in `provider.rs` and checks that a `chat_with_tools` stream can be consumed through `Box<dyn ToolCallingProvider>`.",
+          "tourOrder": 7
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/providers/anthropic.rs": {
+      "overview": "The native Anthropic Messages API provider, API-key only. It differs from the OpenAI-compatible provider in its auth headers, its top-level system field and its typed SSE events. It also implements `ToolCallingProvider`, including conversion of tool turns into Anthropic's content-block format and an incremental parser for streamed `tool_use` blocks.",
+      "sections": [
+        {
+          "title": "Constants and provider struct",
+          "lineRange": [14, 59],
+          "explanation": "Defines the default base URL and the pinned `anthropic-version` header. The struct stores the key, base URL and model, plus a reusable `reqwest::Client`. The doc records a design correction: subscription auth is a separate CLI-wrapping provider, because sending subscription OAuth tokens to this HTTP client was rejected and violated terms.",
+          "tourOrder": 7
+        },
+        {
+          "title": "Plain chat request body",
+          "lineRange": [61, 101],
+          "explanation": "`build_chat_body` joins all system messages into the top-level `system` field, because Anthropic rejects a system role inside `messages`. The rest become user and assistant turns. A `Role::Tool` message is `unreachable!` here, since only the tool-aware path may see it. `max_tokens` comes from `MAX_RESPONSE_TOKENS` and `stream` is always true.",
+          "tourOrder": 7
+        },
+        {
+          "title": "Tool-aware message conversion",
+          "lineRange": [103, 156],
+          "explanation": "`to_anthropic_messages` converts assistant tool calls into content blocks (text only if non-empty, then one `tool_use` per call). It merges consecutive `Role::Tool` messages into a single user message of `tool_result` blocks, because Anthropic requires all results for a turn in the very next user message. The inner `flush` helper emits the pending results whenever another kind of turn arrives.",
+          "tourOrder": 7
+        },
+        {
+          "title": "Body with tools",
+          "lineRange": [158, 199],
+          "explanation": "`build_chat_with_tools_body` reuses the converter and adds a `tools` array that renames `parameters` to `input_schema`. The `tools` field is omitted when there are none. Plain chat keeps its own builder, so it is unaffected.",
+          "tourOrder": 7
+        },
+        {
+          "title": "Streaming tool-call parser",
+          "lineRange": [201, 312],
+          "explanation": "`ToolStreamParser` is a stateful `LineParser`. Text deltas pass through the shared `extract_chunk`. A `tool_use` block opens on `content_block_start`, its JSON accumulates from `input_json_delta` pieces keyed by block index, and the finished call is emitted at `content_block_stop`. Empty input becomes `{}`, and malformed JSON is an `InvalidResponse`. `finish` turns a stream that ends mid-block into an error rather than a partial call.",
+          "tourOrder": 7
+        },
+        {
+          "title": "URLs, errors and parsing helpers",
+          "lineRange": [314, 379],
+          "explanation": "Small pure functions build the messages and models URLs (tolerating trailing slashes), map HTTP status to `ProviderError` (401 and 403 to Auth, 429 to RateLimited, anything else to InvalidResponse), parse one SSE line and parse the model list. Keeping them as free functions makes them easy to unit test.",
+          "tourOrder": 7
+        },
+        {
+          "title": "Trait implementations",
+          "lineRange": [381, 425],
+          "explanation": "`AiProvider::chat` and `list_models` attach `x-api-key` and `anthropic-version` and hand off to the shared `http_stream` helpers. `ToolCallingProvider::chat_with_tools` does the same with the tools body and a fresh `ToolStreamParser` via `stream_lines_stateful`.",
+          "tourOrder": 7
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/settings.rs": {
+      "overview": "Defines `AiSettings`, the shape of `ai-config.json`, along with provider profiles and their keys, router mode and per-tool Claude Code access. Loading is tolerant. Each field falls back to its default instead of discarding the whole file, and old configs are migrated. It is the settings model behind the AI provider step in the tour.",
+      "sections": [
+        {
+          "title": "Auth, router mode and tool access types",
+          "lineRange": [22, 145],
+          "explanation": "`AuthMethod` has `ApiKey`, `Subscription` and `Local`, where `Local` covers Ollama and Mock. `TaskRouterMode` is `Single` (default) or `Mix`. `NativeToolAccess` is only `Auto` or `Deny`, since a CLI-owned tool cannot prompt interactively. `ClaudeCodeToolAccess` has one field per Claude Code built-in tool. Read-only tools default to Auto and anything that writes, executes or orchestrates defaults to Deny. Serde defaults need named functions, hence the `auto` and `deny` helpers.",
+          "tourOrder": 7
+        },
+        {
+          "title": "Tool access to CLI flags",
+          "lineRange": [146, 190],
+          "explanation": "The `Default` impl and the `entries`, `allowed_tools` and `disallowed_tools` methods turn the per-tool settings into the string lists passed to the `claude` CLI.",
+          "tourOrder": 7
+        },
+        {
+          "title": "ProfileKey and ProviderProfile",
+          "lineRange": [191, 276],
+          "explanation": "A profile is a provider plus an auth method, and that pair is its identity (`ProfileKey`). `supports_tool_calling` decides capability from what the profile is. Local Ollama and API-key OpenAI or Anthropic on their default endpoint qualify, while custom endpoints stay plain chat so a rejected `tools` field cannot break every message. `uses_cli` and `is_experimental` are other profile-level facts the UI can read without building a provider.",
+          "tourOrder": 7
+        },
+        {
+          "title": "Defaults and disclosure migration",
+          "lineRange": [278, 329],
+          "explanation": "`Default` starts disabled with no profiles. `migrate_disclosures` runs once when the stored `disclosure_version` is older, and drops OpenAI and Anthropic acknowledgements so the updated disclosure is shown again. Local acknowledgements are kept. `is_default_endpoint` treats blank, trailing slash and case differences as the default URL.",
+          "tourOrder": 7
+        },
+        {
+          "title": "AiSettings struct and lookups",
+          "lineRange": [331, 456],
+          "explanation": "The struct holds the master switch, enabled profiles, the default profile, acknowledged disclosures (kept separate so a disable and re-enable cycle does not re-ask), router mode, project root, Claude Code tool access and the memory switch. `background_profile` prefers the local Ollama profile for summaries and memory so text stays on the machine. Lookup helpers find profiles by key.",
+          "tourOrder": 7
+        },
+        {
+          "title": "Legacy migration",
+          "lineRange": [458, 526],
+          "explanation": "`migrate_legacy_active_provider` converts a Stage 1 file (with `active_provider` and no `enabled_profiles`) into exactly one profile. Stage 1 could only be API-key (or Local), so the auth method is known, not guessed. Only the previously active provider's model and base URL are carried over.",
+          "tourOrder": 7
+        },
+        {
+          "title": "sanitize and serialization",
+          "lineRange": [528, 625],
+          "explanation": "`sanitize` reads the loosely-typed JSON field by field. Invalid profiles are dropped, a default profile that is not enabled is cleared, and missing flags take defaults (memory is on). The result goes through `migrate_disclosures`. `load_from_str` falls back to full defaults on invalid JSON, and `to_json_string` pretty-prints for writing.",
+          "tourOrder": 7
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/agent_runtime.rs": {
+      "overview": "The tool-calling conversation loop. `AemeathAgentRuntime::run` sends messages to a `ToolCallingProvider`, streams text, classifies the requested tool calls, executes the permitted ones (concurrently for auto-tier ones), feeds results back and repeats up to a fixed iteration limit. It also holds the reserved tools that need access to the loop itself (delegation, MCP connect, tool search) and the `ToolRegistry`.",
+      "sections": [
+        {
+          "title": "Module doc and limits",
+          "lineRange": [1, 60],
+          "explanation": "Explains that this is the only runtime implementation, so no heavier execution wrapper exists yet. Delegation is special-cased inside `run()`. Constants cap the stored size of rejected arguments and the number of concurrent tool calls (3). Extra calls queue rather than being dropped.",
+          "tourOrder": 8
+        },
+        {
+          "title": "Outcomes and call plans",
+          "lineRange": [61, 163],
+          "explanation": "`capped_arguments_preview` bounds a rejected call's arguments on a UTF-8 boundary. `ToolOutcome` and `ToolInvocation` form the trace kept after the turn, and only `Rejected` keeps content. `PendingToolCall` is the unit that permission batching works on. `CallPlan` is the classification result for each call, so classification (ordered, synchronous) is separate from execution (concurrent).",
+          "tourOrder": 8
+        },
+        {
+          "title": "Delegation tool",
+          "lineRange": [164, 231],
+          "explanation": "`delegate_task` is registered like any tool so the model can discover it, but its `execute` is unreachable in correct operation, because `run()` intercepts the name and recurses with a child registry. The description tells the model to issue independent sub-tasks in one turn so they run concurrently.",
+          "tourOrder": 8
+        },
+        {
+          "title": "MCP connect tool",
+          "lineRange": [232, 443],
+          "explanation": "Defines the `connect_mcp_server` request and outcome types, the `McpConnector` trait (so the loop does not depend on Tauri) and a `NeverConnectMcp` stub used for children. It also holds the tool definition and the argument parser. Like delegation, dispatch happens inside `run()`.",
+          "tourOrder": 8
+        },
+        {
+          "title": "Lazy tool search",
+          "lineRange": [445, 527],
+          "explanation": "`search_tools` lets the model unlock tools that are only listed as short stubs. Stub descriptions are truncated and the tool's own description lists what is searchable. The unlock lasts for one `run()` call only, which the doc calls a deliberate v1 simplification.",
+          "tourOrder": 8
+        },
+        {
+          "title": "PermissionDecider and ToolRegistry",
+          "lineRange": [528, 733],
+          "explanation": "`PermissionDecider` batches approval of `Confirm`-tier calls and returns the approved ids, so tests can swap in simple deciders. `ToolRegistry` splits tools into eager and lazy. Locked lazy tools are sent as stubs, because Ollama silently drops calls to tools missing from the request. `for_child` removes delegation, MCP connection and any tool that is not available to children, so recursion is impossible by construction.",
+          "tourOrder": 8
+        },
+        {
+          "title": "Errors, outcome and runtime config",
+          "lineRange": [735, 849],
+          "explanation": "`AgentError` distinguishes provider failure from hitting the iteration limit, which carries the partial text. `AgentOutcome` is the final text plus the trace. The `AgentRuntime` trait takes a text-delta callback that fires on every iteration, so narration streams live. The default runtime allows 8 iterations, and output bound and context window are builder options.",
+          "tourOrder": 8
+        },
+        {
+          "title": "run: stream and classify calls",
+          "lineRange": [851, 1005],
+          "explanation": "Each iteration builds tool definitions, shrinks old tool results if a window is known, and streams the reply while collecting text and calls. It warns if the server's reported prompt tokens fall far below the estimate. With no calls it returns. Otherwise it pushes the assistant turn and builds a `CallPlan` for each call in a single ordered pass (unknown, malformed, lazy-locked, denied, auto, confirm and the special tools).",
+          "tourOrder": 8
+        },
+        {
+          "title": "run: execute auto-tier calls",
+          "lineRange": [1006, 1175],
+          "explanation": "Search results are resolved synchronously. Auto tools, delegated sub-tasks and MCP connects become futures that run through `buffer_unordered(MAX_CONCURRENT_TOOL_CALLS)`. Results are stored by original index, because completion order differs from request order and Ollama pairs results with calls by position. A delegated child gets its own registry and a no-op text callback.",
+          "tourOrder": 8
+        },
+        {
+          "title": "run: write back and confirm",
+          "lineRange": [1176, 1312],
+          "explanation": "Results are written back in the original order with matching trace entries, and all rejection cases become model-visible error messages. `Confirm`-tier calls are collected and sent to the decider in one batch. Approved ones run, and declined ones are recorded as `DeclinedByUser`. After the loop, `MaxIterationsReached` is returned. The small `execute` helper turns a `ToolError` into an error `ToolResult`.",
+          "tourOrder": 8
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/agent_tool.rs": {
+      "overview": "Defines the `Tool` trait and its supporting types for native tools that the agent loop offers to tool-capable providers. It deliberately has no Tauri types, so tools stay portable and testable. It is the contract that `run_command` and other tools implement in the agent core step.",
+      "sections": [
+        {
+          "title": "Permission tier and context",
+          "lineRange": [1, 41],
+          "explanation": "`PermissionTier` (`Auto`, `Confirm`, `Deny`) is decided per call, not per tool, because path-based tools vary by argument. `ToolContext` carries only the optional project root and the conversation id. Popup and window orchestration lives in the loop's caller, not here.",
+          "tourOrder": 8
+        },
+        {
+          "title": "Results and errors",
+          "lineRange": [43, 77],
+          "explanation": "`ToolResult` is a model-visible outcome (`is_error` marks a failure inside a permitted run, such as a missing file). `ToolError` means the tool could not run at all. The loop converts the latter into an error result, so both reach the model.",
+          "tourOrder": 8
+        },
+        {
+          "title": "Tool trait",
+          "lineRange": [79, 105],
+          "explanation": "A tool provides a definition, an args-aware `required_permission` and an async `execute`. Two defaults are opt-in. `allows_session_remember` is false so remembering stays safe, and `available_to_children` is true except for tools that write shared state, which keeps sub-tasks read-only.",
+          "tourOrder": 8
+        },
+        {
+          "title": "Tests",
+          "lineRange": [107, 204],
+          "explanation": "An `EchoTool` exercises the contract and the defaults, and checks that missing arguments produce a `ToolError` with the expected message.",
+          "tourOrder": 8
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/task_router.rs": {
+      "overview": "Task Router domain types. The router picks which provider profile handles a message, and `mix` mode also defines the escalation marker protocol for a local model that hands hard tasks to the default profile. It is called once per message to produce the initial route. Retries and escalation belong to the execution layer in `chat_commands.rs`.",
+      "sections": [
+        {
+          "title": "Escalation marker and rules",
+          "lineRange": [1, 70],
+          "explanation": "The module doc sets the boundary: `route()` only produces the initial route. `ESCALATE_MARKER` is shared by the bundled rules file (loaded with `include_str!`, so the file and the fallback cannot drift) and the detector. `with_task_router_rules` appends the rules to the leading system message, and does nothing if the shape is unexpected.",
+          "tourOrder": 8
+        },
+        {
+          "title": "Escalation detection",
+          "lineRange": [72, 111],
+          "explanation": "`detect_escalation` works on a streaming prefix. It trims leading whitespace, then returns `Escalate` for a full match, `Undecided` while the text is still a strict prefix of the marker, and `Simple` once it diverges. A stream that ends while `Undecided` must be treated as simple.",
+          "tourOrder": 8
+        },
+        {
+          "title": "Task and route types",
+          "lineRange": [113, 183],
+          "explanation": "`TaskRequirements` and `Task` are defined for a future capability-based router but are not consumed yet. `RoutingContext` bundles the task, the mode, the default profile and the optional local profile. `SessionStrategy` and `ExecutionRoute` form the output, kept minimal on purpose.",
+          "tourOrder": 8
+        },
+        {
+          "title": "TaskRouter trait and default router",
+          "lineRange": [185, 210],
+          "explanation": "`DefaultTaskRouter` resolves `Single` to the default profile and `Mix` to the local profile when Ollama is enabled, otherwise to the default profile. Missing Ollama is known upfront from settings, so it is handled in the initial route rather than as a runtime fallback.",
+          "tourOrder": 8
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/native_tools/run_command.rs": {
+      "overview": "The `run_command` native tool, the highest-risk tool the agent can use. It runs a shell command pinned to the project directory with a timeout and a capped output, and it always requires confirmation. Without a configured project root it is denied outright. It is a concrete `Tool` implementation in the agent core step.",
+      "sections": [
+        {
+          "title": "Constants and output truncation",
+          "lineRange": [8, 34],
+          "explanation": "A 30-second default timeout and a 20 KiB output cap. `truncate_output` backs the cut up to a UTF-8 character boundary and appends a marker, so truncation never produces invalid UTF-8.",
+          "tourOrder": 8
+        },
+        {
+          "title": "Command construction",
+          "lineRange": [36, 58],
+          "explanation": "Uses `sh -c` or `cmd /C` depending on OS, closes stdin, pipes stdout and stderr, pins the working directory and sets `kill_on_drop(true)`. The last one matters, because a timeout drops the future that owns the child, and this makes that actually terminate the process.",
+          "tourOrder": 8
+        },
+        {
+          "title": "Tool implementation",
+          "lineRange": [60, 127],
+          "explanation": "`required_permission` returns `Confirm` only when a project root exists and `Deny` otherwise, with no popup escalation for shell access. Session-remember is deliberately left at the default `false`, so approving one command never trusts later ones. `execute` runs the child under `tokio::time::timeout`, combines exit code, stdout and stderr, and marks a non-zero exit as an error result. Timeouts and wait errors are returned as error results rather than `ToolError`.",
+          "tourOrder": 8
+        },
+        {
+          "title": "Tests",
+          "lineRange": [129, 244],
+          "explanation": "Cover permission tiers, a normal command, refusal without a root, a command killed after a short timeout (with an outer guard so the test itself cannot hang) and truncation behaviour.",
+          "tourOrder": 8
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/src/chat_commands.rs": {
+      "overview": "The Tauri commands behind the chat window, and the orchestration that connects them to the AI crate. It holds the per-app chat runtime state, handles sending a message, routes it through the task router, and runs a generation in one of three ways: plain streaming chat, a tool-calling agent loop, or mix mode's local-first attempt with fallback. The session log is the source of truth, and the `Channel` is best-effort live delivery.",
+      "sections": [
+        {
+          "title": "Module role and context helpers",
+          "lineRange": [1, 61],
+          "explanation": "The module doc states the key design: generation is decoupled from window lifetime. A reopened window recovers from `partial_text` and `is_pending` instead of reattaching to the old channel. Helpers build the context manager, optionally with memory.",
+          "tourOrder": 8
+        },
+        {
+          "title": "Chat runtime state",
+          "lineRange": [62, 300],
+          "explanation": "`ChatRuntimeState` is Tauri-managed shared state. It holds the session path, the single pending generation (a join handle plus accumulated partial text), the unread badge kind, warm CLI sessions keyed by conversation and profile, and session-scoped tool approvals. `RememberKey` folds a `path` argument into the key, so approving one path does not trust all paths. `record_turn_outcome` persists CLI session state, and the unread helpers drive the status bubble.",
+          "tourOrder": 8
+        },
+        {
+          "title": "Events, state snapshot and conversations",
+          "lineRange": [301, 481],
+          "explanation": "Defines `ChatEvent` (the streamed message type) and the state snapshot a reopened window uses. It also covers readiness checks, session path resolution, listing, opening and deleting conversations, and mapping UI language to persona language.",
+          "tourOrder": 8
+        },
+        {
+          "title": "send_chat_message",
+          "lineRange": [485, 704],
+          "explanation": "Rejects a second in-flight generation, snapshots settings and credentials, and sends short error codes (`disabled`, `no_provider`, `disclosure_pending`) back through the channel. It routes once through `DefaultTaskRouter`. `routed_to_local` also requires `Mix` mode, since Ollama as the default profile would otherwise wrongly trigger the escalation protocol. It builds the persona and memory context per audience, so an escalated request never carries local-only memory. It then logs the user entry and spawns either the mix-local path or the routed path, storing the handle as the pending generation.",
+          "tourOrder": 8
+        },
+        {
+          "title": "Routed and plain generation",
+          "lineRange": [706, 985],
+          "explanation": "`TurnCtx` bundles per-turn persistence facts. `FallbackAttempt` packages what the default profile needs if the local attempt escalates or fails. `run_generation_routed` starts an execution recorder and asks `route_provider` for either a plain chat provider or a tool-capable one. The plain path streams chunks into `partial_text` and the channel, records the turn outcome and finishes with `Done` or an error entry.",
+          "tourOrder": 8
+        },
+        {
+          "title": "Tool setup and tool-calling generation",
+          "lineRange": [987, 1313],
+          "explanation": "Builds the native tool list, with compaction and memory tools inserted before the MCP connect tool. `prepare_tool_request` finds the context window (asked of Ollama, looked up by name for cloud providers) and fits the request, shedding few-shot examples, history or stubs as needed. It tells compaction when history was trimmed. `mix_local_tool_registry` gives the local attempt a small read-only set. `run_generation_with_tools` then drives `AemeathAgentRuntime`.",
+          "tourOrder": 8
+        },
+        {
+          "title": "Mix-mode local-first attempt",
+          "lineRange": [1315, 1767],
+          "explanation": "Implements the escalation protocol. `read_mix_local_first_iteration` reads the first stream while watching for `<<ESCALATE>>`, and `classify_mix_local_calls` finds the tier for each call. These two are unit-testable because they take no `AppHandle`. `run_generation_mix_local` is hand-rolled rather than going through `run()`, because it must drop the stream the instant the marker appears. If anything needing confirmation shows up before commitment, the attempt is discarded and the fallback runs. After commitment it runs locally, with later confirm-tier calls always denied (`AlwaysDenyConfirm`) and iteration 2 onwards handed to the normal runtime.",
+          "tourOrder": 8
+        },
+        {
+          "title": "Finish and cancel commands",
+          "lineRange": [1769, 1821],
+          "explanation": "`finish_with_error` logs an error entry, notifies the channel, clears the pending state and marks the bubble unread as a failure. `clear_pending` also tells the compaction scheduler the reply finished. `stop_generation` aborts the task, so nothing more is written to the log for that turn. `new_chat_session` resets runtime state, which cancels any pending generation, and creates a new session file.",
+          "tourOrder": 8
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/prompt.rs": {
+      "overview": "Pure prompt assembly: turns a persona, a language, prior history and the new user message into the final message list every provider consumes. It also decides how much history fits via token budgets and splices in the rolling conversation summary. It is the first half of the 'Prompt Context and Memory' step, and context_manager.rs calls it.",
+      "sections": [
+        {
+          "title": "Imports and module intent",
+          "lineRange": [1, 14],
+          "explanation": "The module doc states the design rule: no I/O, no network, only pure functions, so everything is testable without a model. The imports pull budget constants from `limits` and a token estimator.",
+          "tourOrder": 9
+        },
+        {
+          "title": "History limits",
+          "lineRange": [16, 46],
+          "explanation": "`HistoryLimits` bundles three knobs: a token budget, an extra allowance for turns not yet summarized, and a hard message cap. `for_window` shrinks the fixed budget to a percentage of the model's context window when that is smaller, and caps the allowance at half the budget so a tiny window stays sane. `None` (unknown window or CLI profile) falls back to the fixed budget.",
+          "tourOrder": 9
+        },
+        {
+          "title": "Choosing where history starts",
+          "lineRange": [48, 78],
+          "explanation": "`select_history_start` walks backwards from the newest message, adding estimated tokens until the cap is hit. Messages before `covered_through` (already summarized) use only the budget, while newer uncovered ones may use budget plus allowance. The loop stops at the first message that does not fit, so one huge message drops itself and everything older instead of being skipped.",
+          "tourOrder": 9
+        },
+        {
+          "title": "System prompt builders",
+          "lineRange": [80, 126],
+          "explanation": "`language_name` maps the `Language` enum to the name written into the prompt. `build_system_prompt` composes persona name, personality, speech style, optional emotional core and boundaries, then pins the reply language. `delegated_task_system_prompt` is deliberately persona-free because a sub-agent's output is read by another model, not the user.",
+          "tourOrder": 9
+        },
+        {
+          "title": "Plain assembly and summary block",
+          "lineRange": [128, 171],
+          "explanation": "`assemble_messages` is the simple entry point and delegates with a default `HistoryPlan`. `HistoryPlan` carries how many leading messages the summary covers, the limits and the summary text. `render_summary_block` wraps the summary in a `<conversation_summary>` tag and says it is reference information, so text inside cannot be mistaken for an instruction.",
+          "tourOrder": 9
+        },
+        {
+          "title": "Assembling with a plan",
+          "lineRange": [173, 210],
+          "explanation": "Builds system prompt, then few-shot examples for only the requested language (avoiding language leakage), then the selected history tail, then the new user message. The summary is merged into the first user message after the persona rather than added as a new message, so roles keep alternating and the system prompt is never modified. The `expect` is safe because the new user message is always present.",
+          "tourOrder": 9
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/context_manager.rs": {
+      "overview": "Defines the ContextManager trait and its AemeathContextManager implementation, which gathers everything for one turn: session history, a validated summary, a note about earlier tool use, and an optional memory block. It uses small traits (SessionLog, ExecutionLog, SummaryStore, MemoryService) so this crate never depends on Tauri paths. It sits on top of prompt.rs and the memory subsystem.",
+      "sections": [
+        {
+          "title": "Request and null summary store",
+          "lineRange": [22, 79],
+          "explanation": "`ContextRequest` bundles per-turn inputs, including the model's window size and a `memory_audience`. Leaving the audience `None` adds no memory block, so forgetting to set it cannot leak data. `NoSummaries` is a do-nothing `SummaryStore` used when a manager is built without summaries.",
+          "tourOrder": 9
+        },
+        {
+          "title": "Storage seam traits",
+          "lineRange": [81, 123],
+          "explanation": "`SessionLog` and `ExecutionLog` are the seams that let the app crate supply file-backed logs, since path resolution needs a Tauri `AppHandle` this crate must not depend on. They are separate traits because the two logs have different formats and readers. `ContextManager` itself separates 'what to bring' from routing and session management.",
+          "tourOrder": 9
+        },
+        {
+          "title": "Manager and builders",
+          "lineRange": [125, 155],
+          "explanation": "`AemeathContextManager` holds trait objects for the logs, the summary store and an optional shared memory service. `with_memory` and `with_summary_store` are builder-style methods that keep `new` minimal and make both features opt-in.",
+          "tourOrder": 9
+        },
+        {
+          "title": "Tool activity note",
+          "lineRange": [157, 187],
+          "explanation": "Renders the previous turn's tool calls as a short 'Tools were used earlier' note. `tool_activity_note` returns `None` when there is no previous execution, it is unfinished, or it made no tool calls, so ordinary conversations produce exactly the same context as before.",
+          "tourOrder": 9
+        },
+        {
+          "title": "build_context",
+          "lineRange": [189, 243],
+          "explanation": "Reads the log, converts it to context messages, and ignores any stored summary that no longer matches the transcript. It prepends the tool note to the user message, builds a `HistoryPlan` and calls `assemble_messages_with`. Finally, if memory is enabled, the memory block is put at the front of the newest user message, never in the system prompt.",
+          "tourOrder": 9
+        },
+        {
+          "title": "record_execution",
+          "lineRange": [245, 266],
+          "explanation": "Appends the assistant reply to the session log. The long comment explains why it does not also write an execution end event: the execution recorder in the app has already written all of those fields, so there is nothing left to add.",
+          "tourOrder": 9
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/memory/store.rs": {
+      "overview": "The SQLite implementation of MemoryService. It stores memories in one table with an FTS5 keyword index over text tokenized by this crate, and runs blocking rusqlite work on a blocking thread. Its design priorities are graceful failure, real erasure and sensible relevance scoring in small stores. It is the persistence layer for the memory part of the 'Prompt Context and Memory' step.",
+      "sections": [
+        {
+          "title": "Design notes and schema",
+          "lineRange": [1, 59],
+          "explanation": "The module doc lists the key decisions: lazy opening so a broken database cannot stop startup, secure erase, and a relevance floor that scales with store size. `SCHEMA_V1` defines the `memories` table, an FTS5 virtual table using porter and unicode61 tokenizing, and a status index. `norm_text` keeps normalized text for LIKE-based lookups.",
+          "tourOrder": 9
+        },
+        {
+          "title": "Connection handling and migration",
+          "lineRange": [61, 138],
+          "explanation": "`SqliteMemory` wraps an `Arc<Mutex<Inner>>` and `with_connection` runs each closure on `spawn_blocking`, opening the connection on first use. `open` turns on `secure_delete` and WAL mode. `migrate` checks `PRAGMA user_version`, creates schema v1 on a fresh file and refuses a database newer than the app understands rather than misreading it.",
+          "tourOrder": 9
+        },
+        {
+          "title": "Row mapping and insert helpers",
+          "lineRange": [140, 231],
+          "explanation": "`record_from_row` maps columns to `MemoryRecord`, clamping importance and tolerating bad tag JSON. `insert` writes both the row and its FTS entry, keyed by rowid, and returns the saved record. `select_one` fetches by id.",
+          "tourOrder": 9
+        },
+        {
+          "title": "Search helpers",
+          "lineRange": [233, 258],
+          "explanation": "`like_pattern` escapes `%`, `_` and backslash so user text is matched literally. `effective_floor` lowers the BM25 cutoff for small stores, because a term in one of N documents scores at most ln((N-0.5)/1.5). `checkpoint` truncates the WAL so deleted data is not left behind.",
+          "tourOrder": 9
+        },
+        {
+          "title": "Add, get and search",
+          "lineRange": [260, 352],
+          "explanation": "`add` inserts inside a transaction. `get` hides sensitive records from non-local audiences. `search` builds an OR query of quoted tokens, ranks by BM25 with a negated score, applies the dynamic floor, and filters sensitive rows via an `?2 OR sensitive = 0` parameter. Single CJK characters have no bigram, so they fall back to a LIKE scan on normalized text.",
+          "tourOrder": 9
+        },
+        {
+          "title": "Listing and history",
+          "lineRange": [354, 389],
+          "explanation": "`active` returns all active memories for the audience (the input to ranking), `list` supports an optional substring filter, and `history` shows superseded memories newest first.",
+          "tourOrder": 9
+        },
+        {
+          "title": "Edit and supersede",
+          "lineRange": [391, 478],
+          "explanation": "`edit` applies only the provided fields and re-indexes in FTS only if text or tags changed. `supersede` marks an active memory superseded, inserts the replacement and removes the old one from the keyword index, all in one transaction, so the old fact leaves retrieval but stays in history.",
+          "tourOrder": 9
+        },
+        {
+          "title": "Forget, erase and mark used",
+          "lineRange": [480, 528],
+          "explanation": "`forget` and `erase_all` delete from both tables then checkpoint the WAL, which together with `secure_delete` makes erasure genuine. `mark_used` stamps `last_used_at` for the memories shown in a prompt.",
+          "tourOrder": 9
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/memory/rank.rs": {
+      "overview": "Chooses which memories go into the always-present digest. It scores each active memory by importance plus an exponentially fading recency bonus, with pinned memories forced to the top, and packs them into a token budget. It needs no embeddings, so it behaves the same in every language.",
+      "sections": [
+        {
+          "title": "Constants",
+          "lineRange": [1, 18],
+          "explanation": "The doc explains that the digest replaces search for baseline context. `DIGEST_BUDGET_TOKENS` is 400, recency decays with a 30-day half-life, and a pinned bonus of 1000 guarantees pinned memories outrank anything else.",
+          "tourOrder": 9
+        },
+        {
+          "title": "Scoring",
+          "lineRange": [20, 35],
+          "explanation": "`age_days` parses an RFC 3339 timestamp and treats failures as age zero, so a bad timestamp never breaks ranking. `score` adds pinned bonus, importance (1 to 3) and a recency term that starts at 2 and halves every 30 days. The comment admits the weights are unvalidated guesses. `render_line` is the single bullet format shared by digest and matches.",
+          "tourOrder": 9
+        },
+        {
+          "title": "Digest selection",
+          "lineRange": [37, 62],
+          "explanation": "`digest` sorts by score with deterministic tie-breakers (newer first, then id), then greedily takes records while they fit the budget. A record too large is skipped with `continue`, not `break`, so one long memory cannot block shorter ones. The `+ 1` accounts for the newline.",
+          "tourOrder": 9
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/memory/block.rs": {
+      "overview": "Builds the labeled memory block that is sent with the newest user message. It combines the ranked digest with keyword matches for the current message and wraps them in tags that state the content is reference data. It degrades silently if the store fails.",
+      "sections": [
+        {
+          "title": "Limits and escaping",
+          "lineRange": [1, 30],
+          "explanation": "The doc stresses the block rides in the user message, never the system prompt. `MAX_MATCHES` and `MATCHES_BUDGET_TOKENS` cap the matches. `defang` replaces angle brackets with full-width look-alikes so a stored memory cannot close the block or open a tag, a prompt-injection defence. `lines` renders records through that escaping.",
+          "tourOrder": 9
+        },
+        {
+          "title": "Rendering the block",
+          "lineRange": [32, 51],
+          "explanation": "`render` returns `None` when both sections are empty. Otherwise it emits a `<retrieved_memory>` wrapper whose first sentence says the contents are reference information, not instructions, followed by optional `<digest>` and `<matches>` sections.",
+          "tourOrder": 9
+        },
+        {
+          "title": "Gathering memories for a message",
+          "lineRange": [53, 94],
+          "explanation": "`for_message` fetches active memories for the audience, builds the digest, then searches for matches, skipping those already in the digest and respecting count and token caps. A store error on `active` logs a warning and returns no block, so chat continues without memory. Shown memories are marked used on a best-effort basis.",
+          "tourOrder": 9
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/compaction.rs": {
+      "overview": "Implements conversation compaction: folding turns that left the history budget into the rolling summary. `run_compaction` is nearly a pure function of transcript and existing summary, and it only writes the new summary after the model output is screened and truncated, so any failure leaves state unchanged. It is the core of the 'Conversation Compaction' step.",
+      "sections": [
+        {
+          "title": "Limits and errors",
+          "lineRange": [1, 59],
+          "explanation": "The doc gives the key guarantee: any failure leaves the stored summary untouched, so the next attempt covers the same turns. `FOLD_INPUT_MAX_TOKENS` bounds what is sent to the writer and `SUMMARY_MAX_TOKENS` bounds the stored result. `CompactionError` distinguishes writer failure, empty output and store failure.",
+          "tourOrder": 10
+        },
+        {
+          "title": "Summary writer",
+          "lineRange": [61, 150],
+          "explanation": "`SummaryWriter` abstracts the model so tests can script it. The system prompt asks for neutral third-person notes, drops small talk, excludes sensitive topics and caps length at 150 words. `summary_user_message` formats existing notes, newer messages and an optional focus. `ProviderSummaryWriter` streams a chat from any `AiProvider` and concatenates the deltas.",
+          "tourOrder": 10
+        },
+        {
+          "title": "Requester and job types",
+          "lineRange": [152, 180],
+          "explanation": "`CompactionRequester` lets a tool trigger a compaction on demand, implemented by the app. `CompactionJob` carries the session path, entries, language, limits and focus. `CompactionOutcome` is either `NothingToFold` or the updated summary.",
+          "tourOrder": 10
+        },
+        {
+          "title": "Truncation and pending size",
+          "lineRange": [182, 216],
+          "explanation": "`truncate_to_tokens` keeps whole leading sentences, splitting on CJK and ASCII punctuation, until the budget is reached. `pending_fold_tokens` estimates how many tokens lie between the summary's coverage and the start of the budgeted history; the scheduler compares it to its batch threshold.",
+          "tourOrder": 10
+        },
+        {
+          "title": "run_compaction",
+          "lineRange": [218, 279],
+          "explanation": "Validates the existing summary against the transcript, finds where verbatim history begins using only the budget, and returns `NothingToFold` if already covered. It reads newest-first up to the input cap, so a huge backlog reads its recent part but the summary still advances over all of it. The result is screened for sensitive sentences, truncated and written; an empty result becomes `CompactionError::Empty`.",
+          "tourOrder": 10
+        },
+        {
+          "title": "Folded messages",
+          "lineRange": [281, 303],
+          "explanation": "`folded_messages` recomputes the same newest-first slice the writer saw, so memory extraction examines exactly the turns that were just summarized.",
+          "tourOrder": 10
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/scheduler.rs": {
+      "overview": "Decides when compaction runs. The decision logic (`decide`) is a pure function of session state and time, which makes it testable with a synthetic clock, while `CompactionScheduler` holds per-session state and spawns runner tasks. Batching, quiet periods, idle and close triggers and exponential backoff keep model calls rare and unobtrusive.",
+      "sections": [
+        {
+          "title": "Rationale and constants",
+          "lineRange": [1, 38],
+          "explanation": "The module doc explains why compaction is batched instead of per reply: model cost, CLI quotas and a busy local model. Constants set the 1,200 token batch threshold, 20 second quiet period, 10 minute idle timeout and 60 second to 30 minute backoff range.",
+          "tourOrder": 10
+        },
+        {
+          "title": "Config, triggers and state",
+          "lineRange": [40, 103],
+          "explanation": "`SchedulerConfig` holds the tunables with defaults from the constants. `Trigger` is Batch, Idle or Close. `SessionState` tracks limits, uncovered tokens, last activity, in-flight flags, failure count, and pending close and idle flags.",
+          "tourOrder": 10
+        },
+        {
+          "title": "Backoff and decide",
+          "lineRange": [105, 131],
+          "explanation": "`backoff` doubles the delay per failure, capped at 16 doublings and the maximum. `decide` returns nothing while a reply or compaction is running, when nothing is uncovered, or during backoff. Then close beats idle, and idle beats batch, which requires both enough tokens and a quiet period.",
+          "tourOrder": 10
+        },
+        {
+          "title": "Clock and runner abstractions",
+          "lineRange": [133, 176],
+          "explanation": "`Clock` is injectable so tests control time. `CompactionRunner` performs one compaction and returns remaining unsummarized tokens. `CompactionScheduler` keeps a mutex-protected map of session paths to state.",
+          "tourOrder": 10
+        },
+        {
+          "title": "Note methods",
+          "lineRange": [178, 236],
+          "explanation": "`update` is a short-lock helper that creates state on demand. `note_reply_started` records the limits the request used and blocks compaction while the reply streams. `note_reply_finished` records uncovered tokens. `note_limits` handles a request trimmed further by the fit check. `note_window_closed` and `request_now` both set `close_pending`.",
+          "tourOrder": 10
+        },
+        {
+          "title": "Tick",
+          "lineRange": [238, 279],
+          "explanation": "`tick` locks the map, marks due sessions in flight and collects them, then releases the lock before spawning tasks. On success a task stores remaining tokens and clears failures; on error it increments the failure count and timestamp so `decide` applies backoff. Returned join handles exist for tests.",
+          "tourOrder": 10
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/summary.rs": {
+      "overview": "Defines the rolling `ConversationSummary` and where it lives. The summary is kept in a sidecar JSON file beside the session, so the transcript stays untouched and a missing or corrupt file simply means no summary.",
+      "sections": [
+        {
+          "title": "Why a sidecar",
+          "lineRange": [1, 22],
+          "explanation": "The module doc justifies the design: no new log role, no UI changes, safe failure state. The summary is restartable because it only claims to cover the first `covered_through` context-visible messages.",
+          "tourOrder": 10
+        },
+        {
+          "title": "ConversationSummary and matches",
+          "lineRange": [24, 56],
+          "explanation": "The struct stores coverage count, text, update time and the timestamp of the last covered message. `matches` rejects a summary that claims more messages than exist or whose last covered timestamp no longer lines up, detecting an edited or replaced log. A missing timestamp (older files) is trusted.",
+          "tourOrder": 10
+        },
+        {
+          "title": "SummaryStore trait and path",
+          "lineRange": [58, 74],
+          "explanation": "The trait abstracts reading and writing so compaction tests need no filesystem. `summary_path` appends `.summary.json` to the session file name; the `.json` extension keeps session listing, which looks for `.jsonl`, from treating it as a conversation.",
+          "tourOrder": 10
+        },
+        {
+          "title": "File-backed store",
+          "lineRange": [76, 99],
+          "explanation": "`read` swallows IO and parse errors into `None`. `write` creates the parent directory, writes to a `.tmp` file and renames it into place, so a crash leaves either the old summary or none, never a partial file.",
+          "tourOrder": 10
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/memory/extraction.rs": {
+      "overview": "After a compaction, asks the background model to propose durable memories from the turns just folded. It only proposes: candidates are screened and saved as automatic memories and never replace existing ones.",
+      "sections": [
+        {
+          "title": "Purpose",
+          "lineRange": [1, 14],
+          "explanation": "The doc says extraction runs once per compaction on the same background model and goes through the sensitive-topic screen and write policy. A budget limits how many known facts are shown to the model.",
+          "tourOrder": 10
+        },
+        {
+          "title": "extract_after_compaction",
+          "lineRange": [16, 50],
+          "explanation": "`transcript` keeps only user and assistant messages. The function returns 0 for an empty transcript, lists known facts so the model avoids repeats, asks the model to complete, parses candidates and saves them with a source tag and persona name. Errors are returned as strings for the caller to log, since compaction has already succeeded.",
+          "tourOrder": 10
+        },
+        {
+          "title": "Known facts",
+          "lineRange": [52, 60],
+          "explanation": "`known_facts` uses the same ranking digest on local-audience active memories, with a fallback text when the store is empty.",
+          "tourOrder": 10
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/src/compaction_runtime.rs": {
+      "overview": "The app-side glue for compaction. It builds the real `CompactionRunner` and `CompactionRequester`, runs a ticker that polls the scheduler every 5 seconds, and exposes small hooks the chat code calls when replies start and finish or the window closes. Everything is best effort and off the reply path.",
+      "sections": [
+        {
+          "title": "Overview and imports",
+          "lineRange": [1, 30],
+          "explanation": "The doc promises that compaction never delays a reply and that unrunnable cases are skipped silently, since the transcript on disk is unchanged. `TICK_INTERVAL` sets the 5 second poll.",
+          "tourOrder": 10
+        },
+        {
+          "title": "compact_session",
+          "lineRange": [32, 85],
+          "explanation": "Reads AI settings and credentials, then bails with `Ok(None)` if AI is off, there is no background profile, or the cloud disclosure is unacknowledged. Otherwise it reads the session, records the summary coverage before, builds a fresh provider (CLI profiles get a throwaway session) and runs `run_compaction`. On an update it kicks off memory extraction.",
+          "tourOrder": 10
+        },
+        {
+          "title": "Memory extraction after compaction",
+          "lineRange": [87, 128],
+          "explanation": "`extract_memories` runs only if memory is enabled and something was folded. It builds a source label from the file name and covered range, then spawns a background task that runs extraction and notifies the UI if anything was stored. Failures are only debug-logged.",
+          "tourOrder": 10
+        },
+        {
+          "title": "Runner and requester",
+          "lineRange": [130, 183],
+          "explanation": "`AppCompactionRunner` implements `CompactionRunner`, mapping outcomes to remaining pending tokens and returning 0 when it cannot run to avoid pointless retries. `AppCompactionRequester` serves the on-demand tool, using the scheduler's last limits and focus, and turns 'no model' into an error.",
+          "tourOrder": 10
+        },
+        {
+          "title": "Scheduler startup and hooks",
+          "lineRange": [185, 256],
+          "explanation": "`start` creates the scheduler, registers it as managed Tauri state and spawns the loop that calls `tick`. The hook functions (`reply_started`, `history_was_trimmed`, `reply_finished_for`, `reply_finished`, `window_closed`) look up the scheduler and forward state. `history_was_trimmed` sets a budget of the tokens actually kept so later compaction covers what was dropped.",
+          "tourOrder": 10
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/mcp/protocol.rs": {
+      "overview": "The transport-independent MCP client protocol: the `initialize` handshake, `tools/list` and `tools/call`, over any `McpTransport`. It also defines the wire types and converts a tool-call result into the agent's `ToolResult`.",
+      "sections": [
+        {
+          "title": "Version and identity",
+          "lineRange": [1, 28],
+          "explanation": "The doc notes the calls are the same for all compliant servers regardless of transport. A fixed protocol version `2025-06-18` is sent and the server is trusted to negotiate down. `client_info` supplies the name and crate version.",
+          "tourOrder": 11
+        },
+        {
+          "title": "Wire types and result conversion",
+          "lineRange": [30, 94],
+          "explanation": "`McpToolDescriptor` mirrors a `tools/list` entry, with `inputSchema` renamed. `McpContentBlock` is tagged by `type` with a catch-all `Other` so unknown block types do not fail the call. `McpToolCallResult::into_tool_result` joins text blocks and maps `isError` to `ToolResult::error`, keeping tool-level failures distinct from JSON-RPC errors.",
+          "tourOrder": 11
+        },
+        {
+          "title": "McpClient",
+          "lineRange": [96, 149],
+          "explanation": "`McpClient` is a thin clone-able wrapper over an `Arc<dyn McpTransport>`. `initialize` sends the request then the `notifications/initialized` notification; ordering before other calls is a convention, not enforced by types. `list_tools` tolerates a missing `tools` field, and `call_tool` serializes name and arguments, with deserialization errors mapped to `McpError`.",
+          "tourOrder": 11
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/mcp/transport.rs": {
+      "overview": "Defines the McpTransport trait, the single seam between MCP protocol logic (McpClient) and however a server is reached. It lets McpClient be written once while stdio and HTTP/SSE transports plug in behind it. It is the abstraction the MCP Client tour step builds on.",
+      "sections": [
+        {
+          "title": "Design rationale",
+          "lineRange": [1, 16],
+          "explanation": "The module docs explain why the trait works at request/response level rather than raw bytes. Matching a response to its request id is a transport concern: stdio must correlate lines on a shared stream, while HTTP gets pairing for free. Keeping that out of McpClient avoids duplicating bookkeeping in every transport.",
+          "tourOrder": 11
+        },
+        {
+          "title": "McpTransport trait",
+          "lineRange": [18, 35],
+          "explanation": "An async trait with two methods matching JSON-RPC 2.0's message shapes: `request` returns the `result` value or an McpError, and `notify` is fire-and-forget. `Send + Sync` lets an `Arc<dyn McpTransport>` be shared across tasks, and `async_trait` makes the async methods object-safe.",
+          "tourOrder": 11
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/mcp/stdio_transport.rs": {
+      "overview": "Implements McpTransport over a spawned subprocess's stdin/stdout using newline-delimited JSON-RPC, as MCP's stdio spec defines. It handles process lifetime (kill on drop) and request/response id matching. The tests run a real Python fixture server and verify that dropping the transport kills the child.",
+      "sections": [
+        {
+          "title": "Module docs and imports",
+          "lineRange": [1, 33],
+          "explanation": "The docs state two key decisions: `kill_on_drop(true)` so an abandoned connection never leaves a server running, and one in-flight request per connection. The single-request limit is justified because every MCP tool is Confirm-tier and the agent runtime executes those serially.",
+          "tourOrder": 11
+        },
+        {
+          "title": "JSON-RPC response types",
+          "lineRange": [35, 49],
+          "explanation": "Minimal serde structs for decoding a server line. Every field is `#[serde(default)]` and optional, so notifications (no id) or responses with only `result` or only `error` all deserialize without failing."
+        },
+        {
+          "title": "Struct and spawn",
+          "lineRange": [51, 91],
+          "explanation": "`StdioTransport` keeps the child, stdin and a line reader each behind a tokio `Mutex`, plus an atomic id counter. `spawn` pipes stdin/stdout, discards stderr, sets `kill_on_drop`, and returns before any MCP handshake. The `_child` field is held only so dropping it terminates the process.",
+          "tourOrder": 11
+        },
+        {
+          "title": "Writing a line",
+          "lineRange": [93, 104],
+          "explanation": "Serializes a JSON value, appends a newline, then writes and flushes under the stdin lock. Flushing is required because the server will not see a partial buffered line."
+        },
+        {
+          "title": "Request and notify",
+          "lineRange": [106, 151],
+          "explanation": "`request` takes a fresh id from the atomic counter, writes the call, then holds the reader lock and loops until a line whose `id` matches arrives, skipping blank lines, notifications and foreign ids. A JSON-RPC `error` becomes an McpError that includes its code, and EOF becomes a 'server closed the connection' error. `notify` omits the id and reads nothing back.",
+          "tourOrder": 11
+        },
+        {
+          "title": "Tests with a real subprocess",
+          "lineRange": [153, 244],
+          "explanation": "Unix-only tests. The first writes a tiny Python script acting as an MCP server and round-trips `initialize` and `tools/list` through McpClient, skipping if Python is missing. The second spawns `cat` and polls `ps` to prove that dropping the transport terminates the child."
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/mcp/oauth.rs": {
+      "overview": "The OAuth 2.1 building blocks for HTTP MCP servers: discovery via 401 and WWW-Authenticate, Dynamic Client Registration, PKCE, token exchange and refresh, and a one-shot loopback redirect listener. It deliberately does not open a browser, since this crate has no tauri dependency. The app crate opens the URL this module builds.",
+      "sections": [
+        {
+          "title": "Scope and imports",
+          "lineRange": [1, 35],
+          "explanation": "The docs map each OAuth feature to its function and explain the crate boundary. This crate decides what should happen and the app crate launches the browser, the same split used by the agent's streaming callback.",
+          "tourOrder": 11
+        },
+        {
+          "title": "Authorization probe",
+          "lineRange": [37, 64],
+          "explanation": "Sends one unauthenticated `initialize` and classifies the result as NotRequired or Required (carrying the WWW-Authenticate header). Other failures propagate as errors instead of being mistaken for either outcome."
+        },
+        {
+          "title": "PKCE, state and URL building",
+          "lineRange": [66, 138],
+          "explanation": "Generates a random 32-byte verifier, its SHA-256 S256 challenge, and a random `state` value used for CSRF protection. `build_authorization_url` percent-encodes every parameter and includes the `resource` parameter (RFC 8707) to bind the token to one MCP server. The redirect wait is capped at 300 seconds.",
+          "tourOrder": 11
+        },
+        {
+          "title": "Discovery",
+          "lineRange": [140, 224],
+          "explanation": "Two hops: the protected-resource metadata (URL taken from the `resource_metadata` header parameter, or the well-known path on the server's origin as a fallback), then the first listed authorization server's own metadata. Only the endpoints this client needs are deserialized.",
+          "tourOrder": 11
+        },
+        {
+          "title": "Dynamic client registration",
+          "lineRange": [226, 283],
+          "explanation": "Registers a public client (`token_endpoint_auth_method: none`) with a loopback redirect URI. If the server advertises no registration endpoint, the wrapper returns a clear error naming the server rather than failing obscurely."
+        },
+        {
+          "title": "Token exchange and refresh",
+          "lineRange": [285, 353],
+          "explanation": "Posts form-encoded grant requests to the token endpoint. The code exchange sends the PKCE verifier, and a manually pasted code takes the same path as one caught by the listener. Refresh returns a new TokenResponse whose refresh token may rotate."
+        },
+        {
+          "title": "Redirect parsing helpers",
+          "lineRange": [355, 401],
+          "explanation": "Hand-written percent decoding and request-line parsing keep the loopback listener dependency-free. The query is read from the first HTTP line only, read byte by byte until a newline."
+        },
+        {
+          "title": "RedirectListener",
+          "lineRange": [403, 466],
+          "explanation": "Binds to 127.0.0.1 on an OS-chosen port, answers exactly one request with a 'you can close this tab' page, and consumes `self`. It returns the code only if `state` matches the expected value, so forged or stale redirects are rejected. The whole wait is wrapped in a timeout.",
+          "tourOrder": 11
+        },
+        {
+          "title": "Tests",
+          "lineRange": [468, 779],
+          "explanation": "Cover PKCE correctness, URL encoding, the probe, both discovery hops against mocked servers, registration, token exchange and refresh, and the listener's success and state-mismatch paths."
+        }
+      ]
+    },
+    "crates/fleet-snowfluff-ai/src/mcp/tool.rs": {
+      "overview": "Adapts one discovered MCP tool to the agent's native Tool trait, so the agent loop cannot tell it apart from a built-in tool. It always requires user confirmation and never offers 'remember for this session'. This is the final step of the MCP Client tour stop, connecting it back to the agent runtime.",
+      "sections": [
+        {
+          "title": "McpTool struct",
+          "lineRange": [1, 31],
+          "explanation": "Holds a tool descriptor plus an McpClient handle. The client is cheap to clone because it wraps an Arc'd transport, so a server's whole tool list shares one connection.",
+          "tourOrder": 11
+        },
+        {
+          "title": "Tool trait implementation",
+          "lineRange": [33, 65],
+          "explanation": "`definition` maps the discovered name, description (empty if absent) and JSON input schema into a ToolDefinition. `required_permission` is always Confirm and `allows_session_remember` is always false, because MCP carries no risk metadata. `execute` calls `tools/call` and converts the result or error into the agent's ToolResult or ToolError.",
+          "tourOrder": 11
+        },
+        {
+          "title": "Unit tests",
+          "lineRange": [67, 172],
+          "explanation": "Use a ScriptedTransport test double to verify schema translation, the empty-description fallback, the fixed permission behavior, and both success and transport-failure execution paths."
+        }
+      ]
+    },
+    "ui/src/main.ts": {
+      "overview": "The single TypeScript entry point for every Tauri webview window. At startup it branches on the window label to render the chat window, status bubble, tool-confirmation popup, or the tabbed settings UI. It talks to the Rust backend through `invoke` and events, and uses an embedded dictionary for localization.",
+      "sections": [
+        {
+          "title": "Imports and shared types",
+          "lineRange": [1, 277],
+          "explanation": "Imports Tauri APIs and Pico.css, then declares TypeScript mirrors of the Rust-side data: config, AI provider profiles, memory records, MCP server records, and chat and confirmation payloads. These types are the contract for `invoke` calls.",
+          "tourOrder": 12
+        },
+        {
+          "title": "Localization helper",
+          "lineRange": [279, 294],
+          "explanation": "`t()` looks up a key in a dictionary loaded once via the `locale_dictionary` command, falls back to the key itself, and substitutes `{name}` placeholders. Translation is resolved on the Rust side, so the frontend only holds one flat dictionary.",
+          "tourOrder": 12
+        },
+        {
+          "title": "State and window opacity",
+          "lineRange": [296, 321],
+          "explanation": "Tracks the active settings tab and any update found by the startup check. Window opacity is fetched once and kept in sync by an `opacity-changed` event instead of polling, and is applied to `#app` as an inline style.",
+          "tourOrder": 12
+        },
+        {
+          "title": "Entry dispatch (main)",
+          "lineRange": [323, 390],
+          "explanation": "All windows share one index.html, so `main` branches on `getCurrentWindow().label` for chat, status-bubble and tool-confirmation. The settings path loads the dictionary, renders, and registers listeners for tab switches, MCP server changes (from a detached OAuth task) and memory changes. A failure paints an error rather than leaving a blank window.",
+          "tourOrder": 12
+        },
+        {
+          "title": "Settings shell and tabs",
+          "lineRange": [392, 461],
+          "explanation": "`render` builds the tab strip and four panels, then fills each with `Promise.allSettled` so one failing panel shows its own error without blocking others. Opening the AI tab refreshes only provider status, which avoids discarding unsaved edits."
+        },
+        {
+          "title": "Personalization and AI panels",
+          "lineRange": [463, 746],
+          "explanation": "`renderPersonalization` builds the settings form, and `renderAi` and `renderAiPanel` build the provider, router, MCP and memory sections as HTML strings with event wiring afterward."
+        },
+        {
+          "title": "Memory and MCP management",
+          "lineRange": [748, 1154],
+          "explanation": "Renders the long-term memory list (search, edit, history rows) and refreshes only the list when `memories-changed` fires, so typing is not lost. The MCP section lists servers and their tools and provides add and connect forms, including the OAuth code-submission flow."
+        },
+        {
+          "title": "Provider profiles, update and about tabs",
+          "lineRange": [1156, 1523],
+          "explanation": "Each provider and auth-method slot gets a collapsible row with save, login and live status checks. The update tab reuses the startup result and can check GitHub on demand, and the about tab shows version and external links."
+        },
+        {
+          "title": "Status bubble window",
+          "lineRange": [1538, 1573],
+          "explanation": "A tiny window that polls `get_chat_state` every 500 ms and shows a fixed glyph: '...' while pending, a happy face after an assistant reply, and a failure face after an error. It reuses the chat snapshot instead of adding bubble-specific IPC.",
+          "tourOrder": 12
+        },
+        {
+          "title": "Chat and tool-confirmation windows",
+          "lineRange": [1575, 1887],
+          "explanation": "`mainChat` renders the transcript, input form and conversation list. The tool-confirmation popup builds DOM nodes (not HTML strings) per pending tool call, with approve-all and deny-all, an optional remember checkbox, and submits via `resolve_tool_confirmations`, then fetches the next batch. The file ends by calling `main()`.",
+          "tourOrder": 12
+        }
+      ]
+    },
+    "ui/src/style.css": {
+      "overview": "Small stylesheet layered on Pico.css for the Fleet Snowfluff windows. It sets a fixed pink theme by overriding Pico variables, loads the pixel font, and styles the settings tabs, chat, confirmation popup, status bubble, and AI and memory sections.",
+      "sections": [
+        {
+          "title": "Font and fallback chain",
+          "lineRange": [1, 29],
+          "explanation": "Declares the zpix pixel font and puts it first in Pico's `--pico-font-family`, with Noto fonts as fallbacks. The comment notes zpix has no Hangul glyphs, so the fallbacks keep Korean from rendering as tofu boxes.",
+          "tourOrder": 12
+        },
+        {
+          "title": "Fixed pink theme",
+          "lineRange": [31, 87],
+          "explanation": "Overrides Pico's color variables with a pink-and-white palette regardless of OS theme. Each value uses `!important` because Pico's `:root:not([data-theme=dark])` selector is more specific than a plain `:root`.",
+          "tourOrder": 12
+        },
+        {
+          "title": "Transparent window base",
+          "lineRange": [89, 119],
+          "explanation": "Makes html and body transparent and puts the background on `#app`, so the opacity set by main.ts fades the background together with the content and the desktop shows through."
+        },
+        {
+          "title": "Settings tabs and rows",
+          "lineRange": [121, 245],
+          "explanation": "Flex column layout for the settings window, the tab strip, active-panel toggling, compact label-left rows, about-panel styling, and error and hint text."
+        },
+        {
+          "title": "Chat window",
+          "lineRange": [246, 375],
+          "explanation": "Styles the transcript and its user, assistant, pending and error entries, the input form, and the conversation list with its open and delete buttons."
+        },
+        {
+          "title": "Confirmation popup and bubble",
+          "lineRange": [376, 439],
+          "explanation": "Layout for the tool-confirmation items and actions, plus the status bubble, which gets its own `#app` treatment on the bubble window body."
+        },
+        {
+          "title": "AI, MCP and memory sections",
+          "lineRange": [440, 622],
+          "explanation": "Styles AI fieldsets, per-profile details rows with an experimental badge and connection status colors, the MCP server and tool lists, and the memory rows and badges."
+        }
+      ]
+    },
+    "ui/vite.config.ts": {
+      "overview": "Minimal Vite configuration for the Tauri frontend. It fixes the dev server port so tauri.conf.json's devUrl always matches, and keeps Vite from watching Rust sources.",
+      "sections": [
+        {
+          "title": "Vite config for Tauri",
+          "lineRange": [1, 13],
+          "explanation": "`clearScreen: false` keeps Rust compiler output visible. Port 1420 with `strictPort` makes Vite fail rather than pick another port, since Tauri expects exactly that URL. The watcher ignores `**/crates/**` so Rust edits do not trigger frontend reloads.",
+          "tourOrder": 12
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/tauri.conf.json": {
+      "overview": "Tauri's main configuration for the desktop app: product identity, how the frontend is built and served, bundle targets, signing, and the auto-updater. The window list is empty because windows are created in Rust code.",
+      "sections": [
+        {
+          "title": "Identity and build hooks",
+          "lineRange": [1, 10],
+          "explanation": "Names the product and points `frontendDist` at ui/dist and `devUrl` at the Vite server on port 1420. The before-dev and before-build commands run npm scripts in the ui folder.",
+          "tourOrder": 12
+        },
+        {
+          "title": "macOS dylib fix hook",
+          "lineRange": [11, 11],
+          "explanation": "The `beforeBundleCommand` runs a repo script to fix dylib paths, but only on Darwin. Other platforms exit immediately."
+        },
+        {
+          "title": "App and security",
+          "lineRange": [13, 19],
+          "explanation": "Enables the macOS private API (needed for transparent windows) and declares no static windows, because pet and chat windows are created at runtime. The CSP is set to null, so no content security policy is applied."
+        },
+        {
+          "title": "Bundling",
+          "lineRange": [20, 34],
+          "explanation": "Builds NSIS, deb, AppImage, dmg and app targets, produces updater artifacts, lists icons, and signs the macOS build with a self-signed identity."
+        },
+        {
+          "title": "Updater plugin",
+          "lineRange": [35, 42],
+          "explanation": "Points the updater at the GitHub releases `latest.json` and embeds the public key used to verify update signatures.",
+          "tourOrder": 12
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/capabilities/default.json": {
+      "overview": "The Tauri capability file that grants webview windows their permissions. It follows least privilege by naming only the windows that need access and a short list of permissions.",
+      "sections": [
+        {
+          "title": "Default capability",
+          "lineRange": [1, 7],
+          "explanation": "Applies to the settings, chat, status-bubble windows and any `pet-*` window (glob). It grants `core:default`, `shell:allow-open` (used by the UI to open external links) and `dialog:default` (folder picker and confirm dialogs). Note the tool-confirmation window label that main.ts handles is not listed here.",
+          "tourOrder": 12
+        }
+      ]
+    },
+    "crates/fleet-snowfluff/src/ai_commands.rs": {
+      "overview": "Tauri commands for AI settings: enabling provider profiles, disclosure acknowledgement, API keys, model listing, login status, and routing to concrete AI providers.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/ai_config_store.rs": {
+      "overview": "Loads and saves the AI configuration file in the app data directory.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/chat_log_store.rs": {
+      "overview": "Persists chat transcripts as dated per-session log files with append, read, latest-session lookup, and conversation listing.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/chat_window.rs": {
+      "overview": "Opens or focuses the chat webview window, positioned relative to the pet.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/cli_workdir.rs": {
+      "overview": "Resolves the working directory used by CLI-based AI providers.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/commands.rs": {
+      "overview": "Tauri commands for personalization settings, display options, voice, autostart and app update checks.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/config_store.rs": {
+      "overview": "Loads, saves, and migrates the main app configuration, including legacy autostart cleanup.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/execution_log_store.rs": {
+      "overview": "Append-only log store for execution events, supporting lookup of the latest usable session.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/execution_recorder.rs": {
+      "overview": "Records execution lifecycle outcomes (completed, errored, escalated) to the execution log, finalizing on drop.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/mcp_commands.rs": {
+      "overview": "Tauri commands managing MCP servers: add, remove, OAuth code submission, tool enablement, credential refresh, and tool listing.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/mcp_connection.rs": {
+      "overview": "Caches MCP connections and tracks pending OAuth attempts.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/mcp_servers_store.rs": {
+      "overview": "Loads and saves the persisted MCP server configuration.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/memory_commands.rs": {
+      "overview": "Tauri commands for listing, editing, deleting, and toggling stored memories.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/memory_runtime.rs": {
+      "overview": "Runtime state for the memory service: tool registries for top-level and local agents, enablement, and post-reply memory processing.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/persona_store.rs": {
+      "overview": "Seeds and loads the persona prompt file, reading fresh on each call.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/quick_menu.rs": {
+      "overview": "Shows the quick context popup menu for the pet.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/secrets_store.rs": {
+      "overview": "Stores API secrets in a file with owner-only permissions.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/session_domain.rs": {
+      "overview": "Domain types for external CLI session references and session entries.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/settings_window.rs": {
+      "overview": "Opens or focuses the settings window and refreshes its title.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/status_bubble.rs": {
+      "overview": "Positions and updates the status bubble shown beside the pet.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/task_router_rules_store.rs": {
+      "overview": "Seeds and loads task router rules, reading fresh on each call.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/tool_confirmation.rs": {
+      "overview": "Tool confirmation flow: popup-based permission decisions, pending batches, remembered approvals, MCP connect and OAuth flows.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/updater.rs": {
+      "overview": "Checks for app updates and runs the startup update check.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/src/voice.rs": {
+      "overview": "VoicePlayer plays random voice clips on a dedicated audio thread with volume, language, and enable controls.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/providers/anthropic_stream_event.rs": {
+      "overview": "Extracts text deltas and surfaces error events from Anthropic streaming JSON events.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/providers/claude_code_cli.rs": {
+      "overview": "Provider that drives the Claude Code CLI as a subprocess with stream-json parsing, session resume, history seeding, tool allow/deny args and login checks; heavily tested with fake CLIs.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/providers/cli_context.rs": {
+      "overview": "Carries per-request context (history and seen-turn state) for CLI-backed providers.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/providers/cli_locator.rs": {
+      "overview": "Locates CLI executables via cached PATH search, platform fallback directories, Windows registry and login-shell PATH extraction.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/providers/cli_process.rs": {
+      "overview": "Shared helpers for spawning CLI chat processes: spawn settings, error mapping and liveness checks.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/providers/codex.rs": {
+      "overview": "Provider driving the Codex CLI as a subprocess with JSON line parsing, temp instruction files, session resume and error classification.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/providers/history_preamble.rs": {
+      "overview": "Renders conversation history into a budgeted text preamble for CLI sessions that lack native history, with resume-aware turn selection.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/providers/http_stream.rs": {
+      "overview": "Shared HTTP streaming helpers that turn response bodies into line streams, with single, multi and stateful parser variants.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/providers/line_buffer.rs": {
+      "overview": "Buffers byte chunks and yields complete lines, reassembling lines split across chunks.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/providers/mock.rs": {
+      "overview": "Mock provider that echoes the last user message in multiple chunks for offline use and tests.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/providers/mod.rs": {
+      "overview": "Module declaration file wiring all provider implementations and shared helpers.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/providers/ollama.rs": {
+      "overview": "Ollama local provider using NDJSON chat streaming, tool-calling, model listing and loaded-context-window detection with caching.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/providers/openai.rs": {
+      "overview": "OpenAI-compatible provider with chat and tool-call request building, SSE parsing and a streaming tool-call parser that reassembles fragmented arguments.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/providers/test_server.rs": {
+      "overview": "Tiny in-process HTTP server for tests that captures a request and serves a canned response.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/context_budget.rs": {
+      "overview": "Resolves a model name to its context window and provides the in-run safety net that replaces the oldest tool results when a long agent run fills the window.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/credentials.rs": {
+      "overview": "Serde shape of secrets.json holding provider API keys and per-MCP-server credentials, kept apart from AiSettings so config files never contain secrets.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/execution.rs": {
+      "overview": "Persisted Execution records (start/end events, route, status, tool invocations) with JSONL serialization, parsing and pairing of events into executions.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/fit.rs": {
+      "overview": "Pre-flight fit check that sheds optional request parts (history, summary, memory, few-shot, tool stubs) in order to fit the context window without ever trimming the persona prompt.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/lib.rs": {
+      "overview": "Crate root of fleet-snowfluff-ai declaring all modules and re-exporting the public API (agent runtime, providers, MCP, memory, compaction, scheduler, settings); the crate stays independent of core and the app crate.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/limits.rs": {
+      "overview": "Fixed Stage 1 cost/latency constants: history token budget, window percentage, uncovered extra tokens, max history messages and max response tokens, with a note on why no Ollama num_ctx is set.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/log.rs": {
+      "overview": "Session log entry format (JSONL) with serialize/parse functions and conversion of visible entries into context messages.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/persona.rs": {
+      "overview": "Persona file model and all-or-nothing YAML parsing, with fallback to the bundled default persona and a surfaced parse-failure reason.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/sensitive.rs": {
+      "overview": "Deterministic keyword screen for sensitive topics (health, money, credentials, sexuality, religion, politics) used to strip sentences from summaries and memory extraction output.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/memory/background.rs": {
+      "overview": "Background memory writers that run after an assistant reply: a remember-cue backstop that saves facts the model failed to store via tool, a correction handler that supersedes memories, and an LLM extraction pass with sensitive-topic filtering. Includes multilingual cue detection and tests.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/memory/fake.rs": {
+      "overview": "In-memory fake implementation of the memory service used in tests, validated against the shared behavior suite.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/memory/mod.rs": {
+      "overview": "Module root for the memory subsystem defining core types (Audience, Origin, Kind, Status, MemoryRecord, NewMemory, MemoryEdit) and the MemoryService trait, and wiring together the store, policy, rank, tokenizer and block submodules.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/memory/policy.rs": {
+      "overview": "Save policy for new memories: dedupes by normalized text, applies supersede-on-correction rules, drops derived memories about sensitive topics, and rejects blank text.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/memory/suite.rs": {
+      "overview": "Shared behavior test suite run against every MemoryService implementation to guarantee consistent semantics for add, search, supersede, forget, edit and audience filtering.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/memory/tokenizer.rs": {
+      "overview": "Multilingual tokenizer for memory indexing and search that folds traditional to simplified Chinese, normalizes full-width text, and produces CJK bigrams, stopword-filtered Latin tokens and single-character fallbacks.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/token_estimate.rs": {
+      "overview": "Heuristic token estimator weighting characters by class (CJK, structured text, prose) calibrated to never undershoot measured counts, with helpers for messages and tool definitions.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/tool_output.rs": {
+      "overview": "Bounds oversize tool outputs by estimated tokens, spilling the remainder to size-capped part files in a spill directory with a visible truncation marker, and prunes old spill files.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/mcp/config.rs": {
+      "overview": "Serde models for persisted MCP server configuration: transports, status, cached tools, disabled tools and JSON load/serialize helpers.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/mcp/error.rs": {
+      "overview": "Defines the McpError error type shared by MCP transports and client code.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/mcp/http_transport.rs": {
+      "overview": "HTTP transport for MCP that sends JSON-RPC requests and notifications with bearer auth, error mapping and timeouts, with mock-server tests.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/mcp/mod.rs": {
+      "overview": "Module root for the MCP client subsystem declaring config, error, transports, OAuth, protocol and tool submodules.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-core/src/voice.rs": {
+      "overview": "Voice-language enum, clip manifest schema, snap-back rule to a language with clips, and a clip selector that avoids long repeats.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/conversation.rs": {
+      "overview": "Defines ConversationId, a newtype identifying a conversation by its session log file path, shared by the agent tool context without depending on the app crate.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/native_tools/mod.rs": {
+      "overview": "Module wiring that declares the native tool submodules offered to the tool-calling agent.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/native_tools/compact_context.rs": {
+      "overview": "Implements the compact_context tool that lets the assistant request summarization of older conversation, with an optional focus hint, using a CompactionRequester; withheld from child agents.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/native_tools/file_tools.rs": {
+      "overview": "Provides read_file and list_directory tools with a byte cap on reads, UTF-8-safe truncation, project-root path containment checks (symlink and dot-dot aware), and auto-approval for spilled output files.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/native_tools/memory_tools.rs": {
+      "overview": "Defines four memory tools (search, get, remember, forget) over MemoryService, with read tools available to child agents and write tools restricted, plus privacy handling for sensitive entries.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/native_tools/system_context.rs": {
+      "overview": "Implements get_system_context, reporting OS, time, CPU and memory stats via sysinfo, deliberately excluding window title, idle time and clipboard.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/src/native_tools/web_search.rs": {
+      "overview": "Implements web_search with a three-tier no-key fallback (local ddgs server, public SearXNG, DuckDuckGo Instant Answer), a ddgs cooldown cache, an injectable transport and extensive parser tests.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/tests/fixtures/memory/README.md": {
+      "overview": "Explains the synthetic memory recall fixtures: 30 memories and 30 queries per language, query kinds, and the scripts used to regenerate and measure them.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/tests/fixtures/memory/recall_en.json": {
+      "overview": "English fixture with 30 synthetic memories (ids m1..m30, with tags) and 30 typed queries for evaluating memory recall in the AI crate.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/tests/fixtures/memory/recall_ja.json": {
+      "overview": "Japanese fixture with 30 synthetic memories (ids m1..m30, with tags) and 30 typed queries for evaluating memory recall in the AI crate.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/tests/fixtures/memory/recall_ko.json": {
+      "overview": "Korean fixture with 30 synthetic memories (ids m1..m30, with tags) and 30 typed queries for evaluating memory recall in the AI crate.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/tests/fixtures/memory/recall_zh-Hans.json": {
+      "overview": "Simplified Chinese fixture with 30 synthetic memories (ids m1..m30, with tags) and 30 typed queries for evaluating memory recall in the AI crate.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/tests/fixtures/memory/recall_zh-Hant.json": {
+      "overview": "Traditional Chinese fixture with 30 synthetic memories (ids m1..m30, with tags) and 30 typed queries for evaluating memory recall in the AI crate.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/tests/fixtures/memory/token_calibration.json": {
+      "overview": "Token calibration data for the qwen3:14b model, with repeated text samples and measured token counts plus a removed overhead of 23 tokens, used to calibrate token estimation for compaction.",
+      "sections": []
+    },
+    "ui/index.html": {
+      "overview": "HTML shell for the Vite-built UI, providing the #app mount point and loading the main.ts module.",
+      "sections": []
+    },
+    "ui/package.json": {
+      "overview": "npm manifest for the Tauri frontend with dev/build/preview scripts and dependencies on Pico CSS, Tauri API, dialog and shell plugins, TypeScript and Vite.",
+      "sections": []
+    },
+    "ui/tsconfig.json": {
+      "overview": "TypeScript compiler configuration targeting ES2023 in bundler mode with no-emit, strict unused checks, and Vite client types for the src directory.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/Cargo.toml": {
+      "overview": "Cargo manifest for the AI crate, declaring workspace-inherited dependencies for HTTP, SQLite memory, streaming, and hashing, plus a Windows-only winreg dependency.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-core/Cargo.toml": {
+      "overview": "Cargo manifest for the pure behavior-engine core crate with minimal dependencies (rand, serde, sys-locale).",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/Cargo.toml": {
+      "overview": "Cargo manifest for the main Tauri desktop app crate, depending on the core and AI crates, wgpu rendering, audio, and per-OS native windowing libraries.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/build.rs": {
+      "overview": "Build script that generates shadow-rs build-time constants (e.g. short commit hash) and runs tauri-build.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/icons/icon.icns": {
+      "overview": "Binary macOS application icon bundle referenced by the Tauri bundle config.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/examples/transparent_gif.wgsl": {
+      "overview": "WGSL shader for the transparent GIF spike that renders sprite frames with per-pixel alpha.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff/examples/transparent_gif.rs": {
+      "overview": "Spike example that opens a transparent borderless window and blits GIF frames via wgpu with real per-pixel alpha, validating the rendering approach.",
+      "sections": []
+    },
+    "crates/fleet-snowfluff-ai/tests/memory_live.rs": {
+      "overview": "Manually run, ignored integration tests exercising memory extraction, supersession, and explicit remember paths against a real local Ollama model using a Traditional Chinese conversation.",
+      "sections": []
+    }
+  }
+}

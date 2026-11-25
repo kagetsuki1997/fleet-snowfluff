@@ -1,0 +1,1148 @@
+{
+  "name": "fleet-snowfluff",
+  "description": "Fleet Snowfluff is a cross-platform desktop pet, a Rust rewrite of Ameath, that wanders the screen, follows the mouse, and offers an AI chat companion with a tool-calling agent, memory, and conversation compaction.",
+  "languages": ["css", "html", "icns", "json", "markdown", "rust", "toml", "typescript", "wgsl"],
+  "frameworks": ["Tauri", "Vite", "wgpu", "Tokio", "Pico CSS", "TypeScript"],
+  "files": [
+    {
+      "path": "crates/fleet-snowfluff-ai/Cargo.toml",
+      "language": "toml",
+      "sizeLines": 28,
+      "fileCategory": "config"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/agent_runtime.rs",
+      "language": "rust",
+      "sizeLines": 3352,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/agent_tool.rs",
+      "language": "rust",
+      "sizeLines": 204,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/compaction.rs",
+      "language": "rust",
+      "sizeLines": 640,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/context_budget.rs",
+      "language": "rust",
+      "sizeLines": 243,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/context_manager.rs",
+      "language": "rust",
+      "sizeLines": 749,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/conversation.rs",
+      "language": "rust",
+      "sizeLines": 45,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/credentials.rs",
+      "language": "rust",
+      "sizeLines": 151,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/execution.rs",
+      "language": "rust",
+      "sizeLines": 378,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/fit.rs",
+      "language": "rust",
+      "sizeLines": 549,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/lib.rs",
+      "language": "rust",
+      "sizeLines": 110,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/limits.rs",
+      "language": "rust",
+      "sizeLines": 42,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/log.rs",
+      "language": "rust",
+      "sizeLines": 142,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/mcp/config.rs",
+      "language": "rust",
+      "sizeLines": 262,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/mcp/error.rs",
+      "language": "rust",
+      "sizeLines": 15,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/mcp/http_transport.rs",
+      "language": "rust",
+      "sizeLines": 332,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/mcp/mod.rs",
+      "language": "rust",
+      "sizeLines": 32,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/mcp/oauth.rs",
+      "language": "rust",
+      "sizeLines": 779,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/mcp/protocol.rs",
+      "language": "rust",
+      "sizeLines": 303,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/mcp/stdio_transport.rs",
+      "language": "rust",
+      "sizeLines": 245,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/mcp/tool.rs",
+      "language": "rust",
+      "sizeLines": 172,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/mcp/transport.rs",
+      "language": "rust",
+      "sizeLines": 35,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/memory/background.rs",
+      "language": "rust",
+      "sizeLines": 590,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/memory/block.rs",
+      "language": "rust",
+      "sizeLines": 232,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/memory/extraction.rs",
+      "language": "rust",
+      "sizeLines": 196,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/memory/fake.rs",
+      "language": "rust",
+      "sizeLines": 214,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/memory/mod.rs",
+      "language": "rust",
+      "sizeLines": 300,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/memory/policy.rs",
+      "language": "rust",
+      "sizeLines": 164,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/memory/rank.rs",
+      "language": "rust",
+      "sizeLines": 189,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/memory/store.rs",
+      "language": "rust",
+      "sizeLines": 641,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/memory/suite.rs",
+      "language": "rust",
+      "sizeLines": 240,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/memory/tokenizer.rs",
+      "language": "rust",
+      "sizeLines": 228,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/message.rs",
+      "language": "rust",
+      "sizeLines": 322,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/native_tools/compact_context.rs",
+      "language": "rust",
+      "sizeLines": 174,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/native_tools/file_tools.rs",
+      "language": "rust",
+      "sizeLines": 513,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/native_tools/memory_tools.rs",
+      "language": "rust",
+      "sizeLines": 452,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/native_tools/mod.rs",
+      "language": "rust",
+      "sizeLines": 12,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/native_tools/run_command.rs",
+      "language": "rust",
+      "sizeLines": 244,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/native_tools/system_context.rs",
+      "language": "rust",
+      "sizeLines": 110,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/native_tools/web_search.rs",
+      "language": "rust",
+      "sizeLines": 833,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/persona.rs",
+      "language": "rust",
+      "sizeLines": 186,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/prompt.rs",
+      "language": "rust",
+      "sizeLines": 358,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/provider.rs",
+      "language": "rust",
+      "sizeLines": 109,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/providers/anthropic.rs",
+      "language": "rust",
+      "sizeLines": 945,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/providers/anthropic_stream_event.rs",
+      "language": "rust",
+      "sizeLines": 70,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/providers/claude_code_cli.rs",
+      "language": "rust",
+      "sizeLines": 1199,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/providers/cli_context.rs",
+      "language": "rust",
+      "sizeLines": 33,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/providers/cli_locator.rs",
+      "language": "rust",
+      "sizeLines": 401,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/providers/cli_process.rs",
+      "language": "rust",
+      "sizeLines": 88,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/providers/codex.rs",
+      "language": "rust",
+      "sizeLines": 883,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/providers/history_preamble.rs",
+      "language": "rust",
+      "sizeLines": 220,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/providers/http_stream.rs",
+      "language": "rust",
+      "sizeLines": 198,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/providers/line_buffer.rs",
+      "language": "rust",
+      "sizeLines": 59,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/providers/mock.rs",
+      "language": "rust",
+      "sizeLines": 107,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/providers/mod.rs",
+      "language": "rust",
+      "sizeLines": 27,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/providers/ollama.rs",
+      "language": "rust",
+      "sizeLines": 659,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/providers/openai.rs",
+      "language": "rust",
+      "sizeLines": 934,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/providers/test_server.rs",
+      "language": "rust",
+      "sizeLines": 103,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/scheduler.rs",
+      "language": "rust",
+      "sizeLines": 589,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/sensitive.rs",
+      "language": "rust",
+      "sizeLines": 440,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/settings.rs",
+      "language": "rust",
+      "sizeLines": 1234,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/summary.rs",
+      "language": "rust",
+      "sizeLines": 213,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/task_router.rs",
+      "language": "rust",
+      "sizeLines": 495,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/token_estimate.rs",
+      "language": "rust",
+      "sizeLines": 188,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/tool_output.rs",
+      "language": "rust",
+      "sizeLines": 339,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/src/tool_provider.rs",
+      "language": "rust",
+      "sizeLines": 148,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/tests/fixtures/memory/README.md",
+      "language": "markdown",
+      "sizeLines": 10,
+      "fileCategory": "docs"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/tests/fixtures/memory/recall_en.json",
+      "language": "json",
+      "sizeLines": 337,
+      "fileCategory": "config"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/tests/fixtures/memory/recall_ja.json",
+      "language": "json",
+      "sizeLines": 337,
+      "fileCategory": "config"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/tests/fixtures/memory/recall_ko.json",
+      "language": "json",
+      "sizeLines": 337,
+      "fileCategory": "config"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/tests/fixtures/memory/recall_zh-Hans.json",
+      "language": "json",
+      "sizeLines": 337,
+      "fileCategory": "config"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/tests/fixtures/memory/recall_zh-Hant.json",
+      "language": "json",
+      "sizeLines": 337,
+      "fileCategory": "config"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/tests/fixtures/memory/token_calibration.json",
+      "language": "json",
+      "sizeLines": 76,
+      "fileCategory": "config"
+    },
+    {
+      "path": "crates/fleet-snowfluff-ai/tests/memory_live.rs",
+      "language": "rust",
+      "sizeLines": 114,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-core/Cargo.toml",
+      "language": "toml",
+      "sizeLines": 13,
+      "fileCategory": "config"
+    },
+    {
+      "path": "crates/fleet-snowfluff-core/src/config.rs",
+      "language": "rust",
+      "sizeLines": 316,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-core/src/constants.rs",
+      "language": "rust",
+      "sizeLines": 76,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-core/src/dock.rs",
+      "language": "rust",
+      "sizeLines": 70,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-core/src/i18n.rs",
+      "language": "rust",
+      "sizeLines": 62,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-core/src/lib.rs",
+      "language": "rust",
+      "sizeLines": 20,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-core/src/locale.rs",
+      "language": "rust",
+      "sizeLines": 99,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-core/src/motion.rs",
+      "language": "rust",
+      "sizeLines": 641,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-core/src/pause.rs",
+      "language": "rust",
+      "sizeLines": 91,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-core/src/swarm.rs",
+      "language": "rust",
+      "sizeLines": 135,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff-core/src/voice.rs",
+      "language": "rust",
+      "sizeLines": 185,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/Cargo.toml",
+      "language": "toml",
+      "sizeLines": 61,
+      "fileCategory": "config"
+    },
+    {
+      "path": "crates/fleet-snowfluff/build.rs",
+      "language": "rust",
+      "sizeLines": 9,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/capabilities/default.json",
+      "language": "json",
+      "sizeLines": 7,
+      "fileCategory": "config"
+    },
+    {
+      "path": "crates/fleet-snowfluff/examples/transparent_gif.rs",
+      "language": "rust",
+      "sizeLines": 421,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/examples/transparent_gif.wgsl",
+      "language": "wgsl",
+      "sizeLines": 38,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/icons/icon.icns",
+      "language": "icns",
+      "sizeLines": 5000,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/ai_commands.rs",
+      "language": "rust",
+      "sizeLines": 827,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/ai_config_store.rs",
+      "language": "rust",
+      "sizeLines": 42,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/animation.rs",
+      "language": "rust",
+      "sizeLines": 122,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/assets.rs",
+      "language": "rust",
+      "sizeLines": 33,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/chat_commands.rs",
+      "language": "rust",
+      "sizeLines": 2544,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/chat_log_store.rs",
+      "language": "rust",
+      "sizeLines": 371,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/chat_pause.rs",
+      "language": "rust",
+      "sizeLines": 48,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/chat_window.rs",
+      "language": "rust",
+      "sizeLines": 134,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/cli_workdir.rs",
+      "language": "rust",
+      "sizeLines": 103,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/commands.rs",
+      "language": "rust",
+      "sizeLines": 333,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/compaction_runtime.rs",
+      "language": "rust",
+      "sizeLines": 256,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/config_store.rs",
+      "language": "rust",
+      "sizeLines": 114,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/execution_log_store.rs",
+      "language": "rust",
+      "sizeLines": 253,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/execution_recorder.rs",
+      "language": "rust",
+      "sizeLines": 226,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/gfx.rs",
+      "language": "rust",
+      "sizeLines": 325,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/lib.rs",
+      "language": "rust",
+      "sizeLines": 295,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/main.rs",
+      "language": "rust",
+      "sizeLines": 4,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/manager.rs",
+      "language": "rust",
+      "sizeLines": 868,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/mcp_commands.rs",
+      "language": "rust",
+      "sizeLines": 599,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/mcp_connection.rs",
+      "language": "rust",
+      "sizeLines": 294,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/mcp_servers_store.rs",
+      "language": "rust",
+      "sizeLines": 40,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/memory_commands.rs",
+      "language": "rust",
+      "sizeLines": 172,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/memory_runtime.rs",
+      "language": "rust",
+      "sizeLines": 190,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/persona_store.rs",
+      "language": "rust",
+      "sizeLines": 128,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/pet.rs",
+      "language": "rust",
+      "sizeLines": 521,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/pet_quad.wgsl",
+      "language": "wgsl",
+      "sizeLines": 48,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/platform/linux.rs",
+      "language": "rust",
+      "sizeLines": 163,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/platform/macos.rs",
+      "language": "rust",
+      "sizeLines": 137,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/platform/mod.rs",
+      "language": "rust",
+      "sizeLines": 17,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/platform/windows.rs",
+      "language": "rust",
+      "sizeLines": 587,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/quick_menu.rs",
+      "language": "rust",
+      "sizeLines": 35,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/secrets_store.rs",
+      "language": "rust",
+      "sizeLines": 77,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/session_domain.rs",
+      "language": "rust",
+      "sizeLines": 69,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/settings_window.rs",
+      "language": "rust",
+      "sizeLines": 101,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/status_bubble.rs",
+      "language": "rust",
+      "sizeLines": 98,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/task_router_rules_store.rs",
+      "language": "rust",
+      "sizeLines": 108,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/tool_confirmation.rs",
+      "language": "rust",
+      "sizeLines": 1045,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/tray.rs",
+      "language": "rust",
+      "sizeLines": 207,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/updater.rs",
+      "language": "rust",
+      "sizeLines": 69,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/src/voice.rs",
+      "language": "rust",
+      "sizeLines": 171,
+      "fileCategory": "code"
+    },
+    {
+      "path": "crates/fleet-snowfluff/tauri.conf.json",
+      "language": "json",
+      "sizeLines": 42,
+      "fileCategory": "config"
+    },
+    {
+      "path": "ui/index.html",
+      "language": "html",
+      "sizeLines": 12,
+      "fileCategory": "markup"
+    },
+    {
+      "path": "ui/package.json",
+      "language": "json",
+      "sizeLines": 20,
+      "fileCategory": "config"
+    },
+    {
+      "path": "ui/src/main.ts",
+      "language": "typescript",
+      "sizeLines": 1887,
+      "fileCategory": "code"
+    },
+    {
+      "path": "ui/src/style.css",
+      "language": "css",
+      "sizeLines": 622,
+      "fileCategory": "markup"
+    },
+    {
+      "path": "ui/tsconfig.json",
+      "language": "json",
+      "sizeLines": 24,
+      "fileCategory": "config"
+    },
+    {
+      "path": "ui/vite.config.ts",
+      "language": "typescript",
+      "sizeLines": 13,
+      "fileCategory": "code"
+    }
+  ],
+  "totalFiles": 138,
+  "filteredByIgnore": 189,
+  "estimatedComplexity": "moderate",
+  "importMap": {
+    "crates/fleet-snowfluff-ai/Cargo.toml": [],
+    "crates/fleet-snowfluff-ai/src/agent_runtime.rs": [],
+    "crates/fleet-snowfluff-ai/src/agent_tool.rs": [],
+    "crates/fleet-snowfluff-ai/src/compaction.rs": ["crates/fleet-snowfluff-ai/src/log.rs"],
+    "crates/fleet-snowfluff-ai/src/context_budget.rs": [],
+    "crates/fleet-snowfluff-ai/src/context_manager.rs": [
+      "crates/fleet-snowfluff-ai/src/memory/mod.rs",
+      "crates/fleet-snowfluff-ai/src/persona.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/conversation.rs": [],
+    "crates/fleet-snowfluff-ai/src/credentials.rs": [],
+    "crates/fleet-snowfluff-ai/src/execution.rs": [],
+    "crates/fleet-snowfluff-ai/src/fit.rs": [],
+    "crates/fleet-snowfluff-ai/src/lib.rs": [
+      "crates/fleet-snowfluff-ai/src/agent_runtime.rs",
+      "crates/fleet-snowfluff-ai/src/agent_tool.rs",
+      "crates/fleet-snowfluff-ai/src/compaction.rs",
+      "crates/fleet-snowfluff-ai/src/context_budget.rs",
+      "crates/fleet-snowfluff-ai/src/context_manager.rs",
+      "crates/fleet-snowfluff-ai/src/conversation.rs",
+      "crates/fleet-snowfluff-ai/src/credentials.rs",
+      "crates/fleet-snowfluff-ai/src/execution.rs",
+      "crates/fleet-snowfluff-ai/src/fit.rs",
+      "crates/fleet-snowfluff-ai/src/limits.rs",
+      "crates/fleet-snowfluff-ai/src/log.rs",
+      "crates/fleet-snowfluff-ai/src/mcp/mod.rs",
+      "crates/fleet-snowfluff-ai/src/memory/mod.rs",
+      "crates/fleet-snowfluff-ai/src/message.rs",
+      "crates/fleet-snowfluff-ai/src/native_tools/mod.rs",
+      "crates/fleet-snowfluff-ai/src/persona.rs",
+      "crates/fleet-snowfluff-ai/src/prompt.rs",
+      "crates/fleet-snowfluff-ai/src/provider.rs",
+      "crates/fleet-snowfluff-ai/src/providers/mod.rs",
+      "crates/fleet-snowfluff-ai/src/scheduler.rs",
+      "crates/fleet-snowfluff-ai/src/sensitive.rs",
+      "crates/fleet-snowfluff-ai/src/settings.rs",
+      "crates/fleet-snowfluff-ai/src/summary.rs",
+      "crates/fleet-snowfluff-ai/src/task_router.rs",
+      "crates/fleet-snowfluff-ai/src/token_estimate.rs",
+      "crates/fleet-snowfluff-ai/src/tool_output.rs",
+      "crates/fleet-snowfluff-ai/src/tool_provider.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/limits.rs": [],
+    "crates/fleet-snowfluff-ai/src/log.rs": ["crates/fleet-snowfluff-ai/src/message.rs"],
+    "crates/fleet-snowfluff-ai/src/mcp/config.rs": [],
+    "crates/fleet-snowfluff-ai/src/mcp/error.rs": [],
+    "crates/fleet-snowfluff-ai/src/mcp/http_transport.rs": [
+      "crates/fleet-snowfluff-ai/src/providers/mod.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/mcp/mod.rs": [
+      "crates/fleet-snowfluff-ai/src/mcp/config.rs",
+      "crates/fleet-snowfluff-ai/src/mcp/error.rs",
+      "crates/fleet-snowfluff-ai/src/mcp/http_transport.rs",
+      "crates/fleet-snowfluff-ai/src/mcp/oauth.rs",
+      "crates/fleet-snowfluff-ai/src/mcp/protocol.rs",
+      "crates/fleet-snowfluff-ai/src/mcp/stdio_transport.rs",
+      "crates/fleet-snowfluff-ai/src/mcp/tool.rs",
+      "crates/fleet-snowfluff-ai/src/mcp/transport.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/mcp/oauth.rs": [
+      "crates/fleet-snowfluff-ai/src/providers/mod.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/mcp/protocol.rs": [
+      "crates/fleet-snowfluff-ai/src/agent_tool.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/mcp/stdio_transport.rs": [
+      "crates/fleet-snowfluff-ai/src/mcp/protocol.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/mcp/tool.rs": [],
+    "crates/fleet-snowfluff-ai/src/mcp/transport.rs": [],
+    "crates/fleet-snowfluff-ai/src/memory/background.rs": [
+      "crates/fleet-snowfluff-ai/src/memory/mod.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/memory/block.rs": [
+      "crates/fleet-snowfluff-ai/src/memory/mod.rs",
+      "crates/fleet-snowfluff-ai/src/token_estimate.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/memory/extraction.rs": [
+      "crates/fleet-snowfluff-ai/src/memory/mod.rs",
+      "crates/fleet-snowfluff-ai/src/message.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/memory/fake.rs": [],
+    "crates/fleet-snowfluff-ai/src/memory/mod.rs": [
+      "crates/fleet-snowfluff-ai/src/memory/background.rs",
+      "crates/fleet-snowfluff-ai/src/memory/block.rs",
+      "crates/fleet-snowfluff-ai/src/memory/extraction.rs",
+      "crates/fleet-snowfluff-ai/src/memory/fake.rs",
+      "crates/fleet-snowfluff-ai/src/memory/policy.rs",
+      "crates/fleet-snowfluff-ai/src/memory/rank.rs",
+      "crates/fleet-snowfluff-ai/src/memory/store.rs",
+      "crates/fleet-snowfluff-ai/src/memory/suite.rs",
+      "crates/fleet-snowfluff-ai/src/memory/tokenizer.rs",
+      "crates/fleet-snowfluff-ai/src/native_tools/mod.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/memory/policy.rs": [
+      "crates/fleet-snowfluff-ai/src/memory/mod.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/memory/rank.rs": [
+      "crates/fleet-snowfluff-ai/src/memory/mod.rs",
+      "crates/fleet-snowfluff-ai/src/token_estimate.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/memory/store.rs": [],
+    "crates/fleet-snowfluff-ai/src/memory/suite.rs": [],
+    "crates/fleet-snowfluff-ai/src/memory/tokenizer.rs": [],
+    "crates/fleet-snowfluff-ai/src/message.rs": [],
+    "crates/fleet-snowfluff-ai/src/native_tools/compact_context.rs": [],
+    "crates/fleet-snowfluff-ai/src/native_tools/file_tools.rs": [
+      "crates/fleet-snowfluff-ai/src/conversation.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/native_tools/memory_tools.rs": [],
+    "crates/fleet-snowfluff-ai/src/native_tools/mod.rs": [
+      "crates/fleet-snowfluff-ai/src/native_tools/compact_context.rs",
+      "crates/fleet-snowfluff-ai/src/native_tools/file_tools.rs",
+      "crates/fleet-snowfluff-ai/src/native_tools/memory_tools.rs",
+      "crates/fleet-snowfluff-ai/src/native_tools/run_command.rs",
+      "crates/fleet-snowfluff-ai/src/native_tools/system_context.rs",
+      "crates/fleet-snowfluff-ai/src/native_tools/web_search.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/native_tools/run_command.rs": [
+      "crates/fleet-snowfluff-ai/src/conversation.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/native_tools/system_context.rs": [
+      "crates/fleet-snowfluff-ai/src/conversation.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/native_tools/web_search.rs": [
+      "crates/fleet-snowfluff-ai/src/conversation.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/persona.rs": [],
+    "crates/fleet-snowfluff-ai/src/prompt.rs": ["crates/fleet-snowfluff-ai/src/persona.rs"],
+    "crates/fleet-snowfluff-ai/src/provider.rs": ["crates/fleet-snowfluff-ai/src/message.rs"],
+    "crates/fleet-snowfluff-ai/src/providers/anthropic.rs": [],
+    "crates/fleet-snowfluff-ai/src/providers/anthropic_stream_event.rs": [
+      "crates/fleet-snowfluff-ai/src/message.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/providers/claude_code_cli.rs": [
+      "crates/fleet-snowfluff-ai/src/settings.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/providers/cli_context.rs": [
+      "crates/fleet-snowfluff-ai/src/message.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/providers/cli_locator.rs": [],
+    "crates/fleet-snowfluff-ai/src/providers/cli_process.rs": [
+      "crates/fleet-snowfluff-ai/src/message.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/providers/codex.rs": [],
+    "crates/fleet-snowfluff-ai/src/providers/history_preamble.rs": [
+      "crates/fleet-snowfluff-ai/src/message.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/providers/http_stream.rs": [],
+    "crates/fleet-snowfluff-ai/src/providers/line_buffer.rs": [],
+    "crates/fleet-snowfluff-ai/src/providers/mock.rs": [],
+    "crates/fleet-snowfluff-ai/src/providers/mod.rs": [
+      "crates/fleet-snowfluff-ai/src/providers/anthropic.rs",
+      "crates/fleet-snowfluff-ai/src/providers/anthropic_stream_event.rs",
+      "crates/fleet-snowfluff-ai/src/providers/claude_code_cli.rs",
+      "crates/fleet-snowfluff-ai/src/providers/cli_context.rs",
+      "crates/fleet-snowfluff-ai/src/providers/cli_locator.rs",
+      "crates/fleet-snowfluff-ai/src/providers/cli_process.rs",
+      "crates/fleet-snowfluff-ai/src/providers/codex.rs",
+      "crates/fleet-snowfluff-ai/src/providers/history_preamble.rs",
+      "crates/fleet-snowfluff-ai/src/providers/http_stream.rs",
+      "crates/fleet-snowfluff-ai/src/providers/line_buffer.rs",
+      "crates/fleet-snowfluff-ai/src/providers/mock.rs",
+      "crates/fleet-snowfluff-ai/src/providers/ollama.rs",
+      "crates/fleet-snowfluff-ai/src/providers/openai.rs",
+      "crates/fleet-snowfluff-ai/src/providers/test_server.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/providers/ollama.rs": [],
+    "crates/fleet-snowfluff-ai/src/providers/openai.rs": [
+      "crates/fleet-snowfluff-ai/src/message.rs",
+      "crates/fleet-snowfluff-ai/src/providers/test_server.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/providers/test_server.rs": [],
+    "crates/fleet-snowfluff-ai/src/scheduler.rs": [],
+    "crates/fleet-snowfluff-ai/src/sensitive.rs": [],
+    "crates/fleet-snowfluff-ai/src/settings.rs": ["crates/fleet-snowfluff-ai/src/message.rs"],
+    "crates/fleet-snowfluff-ai/src/summary.rs": ["crates/fleet-snowfluff-ai/src/log.rs"],
+    "crates/fleet-snowfluff-ai/src/task_router.rs": [],
+    "crates/fleet-snowfluff-ai/src/token_estimate.rs": [],
+    "crates/fleet-snowfluff-ai/src/tool_output.rs": [
+      "crates/fleet-snowfluff-ai/src/token_estimate.rs"
+    ],
+    "crates/fleet-snowfluff-ai/src/tool_provider.rs": [],
+    "crates/fleet-snowfluff-ai/tests/fixtures/memory/README.md": [],
+    "crates/fleet-snowfluff-ai/tests/fixtures/memory/recall_en.json": [],
+    "crates/fleet-snowfluff-ai/tests/fixtures/memory/recall_ja.json": [],
+    "crates/fleet-snowfluff-ai/tests/fixtures/memory/recall_ko.json": [],
+    "crates/fleet-snowfluff-ai/tests/fixtures/memory/recall_zh-Hans.json": [],
+    "crates/fleet-snowfluff-ai/tests/fixtures/memory/recall_zh-Hant.json": [],
+    "crates/fleet-snowfluff-ai/tests/fixtures/memory/token_calibration.json": [],
+    "crates/fleet-snowfluff-ai/tests/memory_live.rs": [],
+    "crates/fleet-snowfluff-core/Cargo.toml": [],
+    "crates/fleet-snowfluff-core/src/config.rs": [],
+    "crates/fleet-snowfluff-core/src/constants.rs": [],
+    "crates/fleet-snowfluff-core/src/dock.rs": ["crates/fleet-snowfluff-core/src/motion.rs"],
+    "crates/fleet-snowfluff-core/src/i18n.rs": ["crates/fleet-snowfluff-core/src/locale.rs"],
+    "crates/fleet-snowfluff-core/src/lib.rs": [
+      "crates/fleet-snowfluff-core/src/config.rs",
+      "crates/fleet-snowfluff-core/src/constants.rs",
+      "crates/fleet-snowfluff-core/src/dock.rs",
+      "crates/fleet-snowfluff-core/src/i18n.rs",
+      "crates/fleet-snowfluff-core/src/locale.rs",
+      "crates/fleet-snowfluff-core/src/motion.rs",
+      "crates/fleet-snowfluff-core/src/pause.rs",
+      "crates/fleet-snowfluff-core/src/swarm.rs",
+      "crates/fleet-snowfluff-core/src/voice.rs"
+    ],
+    "crates/fleet-snowfluff-core/src/locale.rs": [],
+    "crates/fleet-snowfluff-core/src/motion.rs": ["crates/fleet-snowfluff-core/src/constants.rs"],
+    "crates/fleet-snowfluff-core/src/pause.rs": ["crates/fleet-snowfluff-core/src/constants.rs"],
+    "crates/fleet-snowfluff-core/src/swarm.rs": ["crates/fleet-snowfluff-core/src/motion.rs"],
+    "crates/fleet-snowfluff-core/src/voice.rs": [],
+    "crates/fleet-snowfluff/Cargo.toml": [],
+    "crates/fleet-snowfluff/build.rs": [],
+    "crates/fleet-snowfluff/capabilities/default.json": [],
+    "crates/fleet-snowfluff/examples/transparent_gif.rs": [],
+    "crates/fleet-snowfluff/examples/transparent_gif.wgsl": [],
+    "crates/fleet-snowfluff/icons/icon.icns": [],
+    "crates/fleet-snowfluff/src/ai_commands.rs": [],
+    "crates/fleet-snowfluff/src/ai_config_store.rs": [],
+    "crates/fleet-snowfluff/src/animation.rs": ["crates/fleet-snowfluff/src/assets.rs"],
+    "crates/fleet-snowfluff/src/assets.rs": [],
+    "crates/fleet-snowfluff/src/chat_commands.rs": [],
+    "crates/fleet-snowfluff/src/chat_log_store.rs": [],
+    "crates/fleet-snowfluff/src/chat_pause.rs": [],
+    "crates/fleet-snowfluff/src/chat_window.rs": [],
+    "crates/fleet-snowfluff/src/cli_workdir.rs": [],
+    "crates/fleet-snowfluff/src/commands.rs": [],
+    "crates/fleet-snowfluff/src/compaction_runtime.rs": [],
+    "crates/fleet-snowfluff/src/config_store.rs": [],
+    "crates/fleet-snowfluff/src/execution_log_store.rs": [],
+    "crates/fleet-snowfluff/src/execution_recorder.rs": [],
+    "crates/fleet-snowfluff/src/gfx.rs": ["crates/fleet-snowfluff/src/animation.rs"],
+    "crates/fleet-snowfluff/src/lib.rs": [
+      "crates/fleet-snowfluff/src/ai_commands.rs",
+      "crates/fleet-snowfluff/src/ai_config_store.rs",
+      "crates/fleet-snowfluff/src/animation.rs",
+      "crates/fleet-snowfluff/src/assets.rs",
+      "crates/fleet-snowfluff/src/chat_commands.rs",
+      "crates/fleet-snowfluff/src/chat_log_store.rs",
+      "crates/fleet-snowfluff/src/chat_pause.rs",
+      "crates/fleet-snowfluff/src/chat_window.rs",
+      "crates/fleet-snowfluff/src/cli_workdir.rs",
+      "crates/fleet-snowfluff/src/commands.rs",
+      "crates/fleet-snowfluff/src/compaction_runtime.rs",
+      "crates/fleet-snowfluff/src/config_store.rs",
+      "crates/fleet-snowfluff/src/execution_log_store.rs",
+      "crates/fleet-snowfluff/src/execution_recorder.rs",
+      "crates/fleet-snowfluff/src/gfx.rs",
+      "crates/fleet-snowfluff/src/manager.rs",
+      "crates/fleet-snowfluff/src/mcp_commands.rs",
+      "crates/fleet-snowfluff/src/mcp_connection.rs",
+      "crates/fleet-snowfluff/src/mcp_servers_store.rs",
+      "crates/fleet-snowfluff/src/memory_commands.rs",
+      "crates/fleet-snowfluff/src/memory_runtime.rs",
+      "crates/fleet-snowfluff/src/persona_store.rs",
+      "crates/fleet-snowfluff/src/pet.rs",
+      "crates/fleet-snowfluff/src/platform/mod.rs",
+      "crates/fleet-snowfluff/src/quick_menu.rs",
+      "crates/fleet-snowfluff/src/secrets_store.rs",
+      "crates/fleet-snowfluff/src/session_domain.rs",
+      "crates/fleet-snowfluff/src/settings_window.rs",
+      "crates/fleet-snowfluff/src/status_bubble.rs",
+      "crates/fleet-snowfluff/src/task_router_rules_store.rs",
+      "crates/fleet-snowfluff/src/tool_confirmation.rs",
+      "crates/fleet-snowfluff/src/tray.rs",
+      "crates/fleet-snowfluff/src/updater.rs",
+      "crates/fleet-snowfluff/src/voice.rs"
+    ],
+    "crates/fleet-snowfluff/src/main.rs": [],
+    "crates/fleet-snowfluff/src/manager.rs": ["crates/fleet-snowfluff/src/gfx.rs"],
+    "crates/fleet-snowfluff/src/mcp_commands.rs": [],
+    "crates/fleet-snowfluff/src/mcp_connection.rs": [],
+    "crates/fleet-snowfluff/src/mcp_servers_store.rs": [],
+    "crates/fleet-snowfluff/src/memory_commands.rs": [],
+    "crates/fleet-snowfluff/src/memory_runtime.rs": [],
+    "crates/fleet-snowfluff/src/persona_store.rs": [],
+    "crates/fleet-snowfluff/src/pet.rs": [
+      "crates/fleet-snowfluff/src/animation.rs",
+      "crates/fleet-snowfluff/src/gfx.rs"
+    ],
+    "crates/fleet-snowfluff/src/pet_quad.wgsl": [],
+    "crates/fleet-snowfluff/src/platform/linux.rs": [],
+    "crates/fleet-snowfluff/src/platform/macos.rs": [],
+    "crates/fleet-snowfluff/src/platform/mod.rs": [
+      "crates/fleet-snowfluff/src/platform/linux.rs",
+      "crates/fleet-snowfluff/src/platform/macos.rs",
+      "crates/fleet-snowfluff/src/platform/windows.rs"
+    ],
+    "crates/fleet-snowfluff/src/platform/windows.rs": [],
+    "crates/fleet-snowfluff/src/quick_menu.rs": [],
+    "crates/fleet-snowfluff/src/secrets_store.rs": [],
+    "crates/fleet-snowfluff/src/session_domain.rs": [],
+    "crates/fleet-snowfluff/src/settings_window.rs": [],
+    "crates/fleet-snowfluff/src/status_bubble.rs": [],
+    "crates/fleet-snowfluff/src/task_router_rules_store.rs": [],
+    "crates/fleet-snowfluff/src/tool_confirmation.rs": [],
+    "crates/fleet-snowfluff/src/tray.rs": [],
+    "crates/fleet-snowfluff/src/updater.rs": [],
+    "crates/fleet-snowfluff/src/voice.rs": ["crates/fleet-snowfluff/src/assets.rs"],
+    "crates/fleet-snowfluff/tauri.conf.json": [],
+    "ui/index.html": [],
+    "ui/package.json": [],
+    "ui/src/main.ts": ["ui/src/style.css"],
+    "ui/src/style.css": [],
+    "ui/tsconfig.json": [],
+    "ui/vite.config.ts": []
+  }
+}
