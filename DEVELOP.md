@@ -242,3 +242,7 @@ warnings`, and the full test suite. The `clippy`/`test` jobs run through
 The active rewrite's proposal, design decisions, and per-area specs live
 under [`openspec/changes/`](openspec/changes/) — that's the place to look for
 _why_ something is built the way it is, not just what it does.
+
+To get oriented in the code itself, [`docs/understand-anything.md`](docs/understand-anything.md)
+explains how to build an interactive knowledge graph and guided tour of the repository and open it
+in the dashboard.
