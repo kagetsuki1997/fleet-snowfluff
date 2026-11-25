@@ -63,8 +63,23 @@ That covers about 140 files. Without a scope the run also analyzes `openspec/`, 
 | `.ua/fingerprints.json`, `.ua/meta.json` | Baseline for incremental updates. |
 | `.ua/config.json`, `.ua/.understandignore` | Your language and scope settings. |
 
-`.ua/` is generated, machine-specific output (it is a megabyte or two). **Do not commit it.**
-Add `.ua/` to your own `.git/info/exclude` if you do not want it showing in `git status`.
+`.ua/` is generated output, about 1.3 MB, tied to the commit it was built from, and none of it
+contains machine-specific paths. **This repository commits it**, so anyone can open the dashboard
+without running an analysis. The checked-in files are `knowledge-graph.json`,
+`code-lessons.json`, `fingerprints.json`, `meta.json`, `.understandignore` and
+`intermediate/scan-result.json`; the last three plus the fingerprints are what let a later
+`/understand` update incrementally. `.ua/.gitignore` keeps the scratch folders (`.trash-*/`,
+`tmp/`) out, and the root `.gitignore` already ignores `config.json`, so your language setting
+stays local.
+
+Because it is committed, treat it as a snapshot rather than live data:
+
+- It goes stale as soon as the code changes. Refresh it deliberately (for example when a
+  release is cut) by running `/understand` and committing the result, not on every commit.
+- Regenerating rewrites most of the JSON, so expect large, unreviewable diffs. Review the
+  summary of what changed, not the diff.
+- `meta.json` and the graph record the commit they describe. Keep that commit in `develop`'s
+  history, or incremental updates cannot diff from it and fall back to a full rebuild.
 
 ## Open the dashboard
 
